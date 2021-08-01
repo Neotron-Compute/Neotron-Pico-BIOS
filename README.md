@@ -37,9 +37,7 @@ updates) for performance reasons.
 
 ## Changelog
 
-### Unreleased Changes ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/master))
-
-* It blinks an LED.
+See [CHANGELOG.md](./CHANGELOG.md)
 
 ## Licence
 
