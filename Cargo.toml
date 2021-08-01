@@ -1,0 +1,38 @@
+[package]
+authors = ["Jonathan 'theJPster' Pallant <github@thejpster.org.uk>"]
+edition = "2018"
+readme = "README.md"
+license = "GPLv3"
+name = "neotron-pico-bios"
+version = "0.1.0"
+
+[dependencies]
+# Useful Cortex-M specific functions (e.g. SysTick)
+cortex-m = "0.7.3"
+# The Raspberry Pi Pico HAL
+pico = { git = "https://github.com/rp-rs/rp-hal.git" }
+# Cortex-M run-time (or start-up) code
+cortex-m-rt = "0.6.14"
+# The BIOS API we export to the OS
+neotron-common-bios = { git = "https://github.com/Neotron-Compute/Neotron-Common-BIOS.git" }
+# For time keeping/handling
+embedded-time = "0.12"
+# For the RP2040 bootloader
+rp2040-boot2 = "0.1"
+# For panic handling (todo remove this)
+panic-halt = "0.2"
+# For hardware abstraction traits
+embedded-hal ="0.2"
+
+[[bin]]
+name = "neotron-pico-bios"
+test = false
+bench = false
+
+[profile.release]
+# better optimizations
+codegen-units = 1
+# symbols are nice and they don't increase the size on Flash
+debug = true
+# better optimizations
+lto = true
