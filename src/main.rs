@@ -11,8 +11,31 @@
 //! address `0x1000_0100`. This IVT is found and jumped to by the RP2040 boot
 //! block(`0x1000_0000` to `0x1000_00FF`).
 
+// -----------------------------------------------------------------------------
+// Licence Statement
+// -----------------------------------------------------------------------------
+// Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2021
+//
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free Software
+// Foundation, either version 3 of the License, or (at your option) any later
+// version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+// details.
+//
+// You should have received a copy of the GNU General Public License along with
+// this program.  If not, see <https://www.gnu.org/licenses/>.
+// -----------------------------------------------------------------------------
+
 #![no_std]
 #![no_main]
+
+// -----------------------------------------------------------------------------
+// Imports
+// -----------------------------------------------------------------------------
 
 use cortex_m_rt::entry;
 use embedded_hal::digital::v2::OutputPin;
@@ -23,6 +46,10 @@ use pico;
 use pico::hal;
 use pico::hal::pac;
 
+// -----------------------------------------------------------------------------
+// Static and Const Data
+// -----------------------------------------------------------------------------
+
 /// This is the standard RP2040 bootloader. It must be stored in the first 256
 /// bytes of the external SPI Flash chip. It will map the external SPI flash
 /// chip to address `0x1000_0000` and jump to an Interrupt Vector Table at
@@ -32,6 +59,16 @@ use pico::hal::pac;
 #[link_section = ".boot2"]
 #[used]
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER;
+
+// -----------------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------------
+
+// None
+
+// -----------------------------------------------------------------------------
+// Functions
+// -----------------------------------------------------------------------------
 
 /// This is the entry-point to the BIOS. It is called by cortex-m-rt once the
 /// `.bss` and `.data` sections have been initialised.
@@ -86,3 +123,7 @@ fn main() -> ! {
 		delay.delay_ms(500);
 	}
 }
+
+// -----------------------------------------------------------------------------
+// End of file
+// -----------------------------------------------------------------------------

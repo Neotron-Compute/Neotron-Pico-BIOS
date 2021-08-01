@@ -56,7 +56,7 @@ See [CHANGELOG.md](./CHANGELOG.md)
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-See the full text in [LICENSE.md](./LICENSE.md). Broadly, we (the developers)
+See the full text in [LICENSE.txt](./LICENSE.txt). Broadly, we (the developers)
 interpret this to mean (and note that we are not lawyers and this is not
 legal advice) that if you give someone a Neotron Pico, you must also give them
 one of:
@@ -83,4 +83,4 @@ their Neotron Pico.
 Unless you explicitly state otherwise, any contribution intentionally
 submitted for inclusion in the work by you shall be licensed as above,
 without any additional terms or conditions.
-   
+
