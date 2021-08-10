@@ -1,4 +1,6 @@
 [target.thumbv6m-none-eabi]
+runner = "elf2uf2-rs -d"
+
 rustflags = [
   # This is needed if your flash or ram addresses are not aligned to 0x10000 in memory.x
   # See https://github.com/rust-embedded/cortex-m-quickstart/pull/95
