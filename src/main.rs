@@ -11,17 +11,47 @@
 //! address `0x1000_0100`. This IVT is found and jumped to by the RP2040 boot
 //! block(`0x1000_0000` to `0x1000_00FF`).
 
+// -----------------------------------------------------------------------------
+// Licence Statement
+// -----------------------------------------------------------------------------
+// Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2021
+//
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free Software
+// Foundation, either version 3 of the License, or (at your option) any later
+// version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+// details.
+//
+// You should have received a copy of the GNU General Public License along with
+// this program.  If not, see <https://www.gnu.org/licenses/>.
+// -----------------------------------------------------------------------------
+
 #![no_std]
 #![no_main]
 
+// -----------------------------------------------------------------------------
+// Imports
+// -----------------------------------------------------------------------------
+
 use cortex_m_rt::entry;
+use defmt::*;
+use defmt_rtt as _;
 use embedded_hal::digital::v2::OutputPin;
 use embedded_time::rate::*;
+use git_version::git_version;
 use hal::clocks::Clock;
-use panic_halt as _;
+use panic_probe as _;
 use pico;
 use pico::hal;
 use pico::hal::pac;
+
+// -----------------------------------------------------------------------------
+// Static and Const Data
+// -----------------------------------------------------------------------------
 
 /// This is the standard RP2040 bootloader. It must be stored in the first 256
 /// bytes of the external SPI Flash chip. It will map the external SPI flash
@@ -33,10 +63,25 @@ use pico::hal::pac;
 #[used]
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER;
 
+/// BIOS version
+const GIT_VERSION: &str = git_version!();
+
+// -----------------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------------
+
+// None
+
+// -----------------------------------------------------------------------------
+// Functions
+// -----------------------------------------------------------------------------
+
 /// This is the entry-point to the BIOS. It is called by cortex-m-rt once the
 /// `.bss` and `.data` sections have been initialised.
 #[entry]
 fn main() -> ! {
+	info!("Neotron BIOS {} starting...", GIT_VERSION);
+
 	// Grab the singleton containing all the RP2040 peripherals
 	let mut pac = pac::Peripherals::take().unwrap();
 	// Grab the singleton containing all the generic Cortex-M peripherals
@@ -58,6 +103,8 @@ fn main() -> ! {
 	.ok()
 	.unwrap();
 
+	info!("Clocks OK");
+
 	// Create an object we can use to busy-wait for specified numbers of
 	// milliseconds. For this to work, it needs to know our clock speed.
 	let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
@@ -75,14 +122,21 @@ fn main() -> ! {
 		&mut pac.RESETS,
 	);
 
+	info!("Pins OK");
+
 	// Grab the LED pin
 	let mut led_pin = pins.led.into_push_pull_output();
 
 	// Do some blinky so we can see it work.
 	loop {
+		debug!("Loop...");
 		led_pin.set_high().unwrap();
 		delay.delay_ms(500);
 		led_pin.set_low().unwrap();
 		delay.delay_ms(500);
 	}
 }
+
+// -----------------------------------------------------------------------------
+// End of file
+// -----------------------------------------------------------------------------

@@ -1,4 +1,7 @@
 [target.thumbv6m-none-eabi]
+# runner = "elf2uf2-rs -d"
+runner = "probe-run-rp --chip RP2040"
+
 rustflags = [
   # This is needed if your flash or ram addresses are not aligned to 0x10000 in memory.x
   # See https://github.com/rust-embedded/cortex-m-quickstart/pull/95
@@ -6,6 +9,9 @@ rustflags = [
 
   # LLD (shipped with the Rust toolchain) is used as the default linker
   "-C", "link-arg=-Tlink.x",
+
+  # Support defmt formatted logging
+  "-C", "link-arg=-Tdefmt.x",
 ]
 
 [build]
