@@ -27,6 +27,8 @@ defmt = "0.2"
 defmt-rtt = "0.2"
 # Send panics to the debugger
 panic-probe = "0.2"
+# Fetches the BIOS version from git
+git-version = "0.3"
 
 [features]
 default = [

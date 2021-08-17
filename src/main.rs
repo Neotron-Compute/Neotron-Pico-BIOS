@@ -42,6 +42,7 @@ use defmt::*;
 use defmt_rtt as _;
 use embedded_hal::digital::v2::OutputPin;
 use embedded_time::rate::*;
+use git_version::git_version;
 use hal::clocks::Clock;
 use panic_probe as _;
 use pico;
@@ -62,6 +63,9 @@ use pico::hal::pac;
 #[used]
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER;
 
+/// BIOS version
+const GIT_VERSION: &str = git_version!();
+
 // -----------------------------------------------------------------------------
 // Types
 // -----------------------------------------------------------------------------
@@ -76,7 +80,7 @@ pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER;
 /// `.bss` and `.data` sections have been initialised.
 #[entry]
 fn main() -> ! {
-	info!("Neotron BIOS starting...");
+	info!("Neotron BIOS {} starting...", GIT_VERSION);
 
 	// Grab the singleton containing all the RP2040 peripherals
 	let mut pac = pac::Peripherals::take().unwrap();
