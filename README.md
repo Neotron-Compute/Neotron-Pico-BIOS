@@ -75,6 +75,73 @@ user@host ~/neotron-pico-bios $ cargo run --release
 └─ neotron_pico_bios::__cortex_m_rt_main @ src/main.rs:128
 ``` 
 
+## Pinout
+
+The pinout assumed by this BIOS matches that of the Neotron Pico at v0.5.0.
+
+| Pin  | Name | Signal        | Function                                           |
+| :--- | :--- | :------------ | :------------------------------------------------- |
+| 01   | GP0  | VGA_HSYNC     | VGA Horizontal Sync (31.5 kHz)                     |
+| 02   | GP1  | VGA_VSYNC     | VGA Vertical Sync (60 Hz)                          |
+| 04   | GP2  | VGA_RED0      | Digital VGA signal, Red channel LSB                |
+| 05   | GP3  | VGA_RED1      | Digital VGA signal, Red channel                    |
+| 06   | GP4  | VGA_RED2      | Digital VGA signal, Red channel                    |
+| 07   | GP5  | VGA_RED3      | Digital VGA signal, Red channel MSB                |
+| 09   | GP6  | VGA_GREEN0    | Digital VGA signal, Green channel LSB              |
+| 10   | GP7  | VGA_GREEN1    | Digital VGA signal, Green channel                  |
+| 11   | GP8  | VGA_GREEN2    | Digital VGA signal, Green channel                  |
+| 12   | GP9  | VGA_GREEN3    | Digital VGA signal, Green channel MSB              |
+| 14   | GP10 | VGA_BLUE0     | Digital VGA signal, Blue channel LSB               |
+| 15   | GP11 | VGA_BLUE1     | Digital VGA signal, Blue channel                   |
+| 16   | GP12 | VGA_BLUE2     | Digital VGA signal, Blue channel                   |
+| 17   | GP13 | VGA_BLUE3     | Digital VGA signal, Blue channel MSB               |
+| 19   | GP14 | I2C_SDA       | I²C Data                                           |
+| 20   | GP15 | I2C_SCL       | I²C Clock                                          |
+| 21   | GP16 | SPI_CIPO      | SPI Data In                                        |
+| 22   | GP17 | SPI_CS_nIOCS  | Low selects MCP23S17, High selects Expansion Slots |
+| 24   | GP18 | SPI_CLK       | SPI Clock                                          |
+| 25   | GP19 | SPI_COPI      | SPI Data Out                                       |
+| 26   | GP20 | nIRQn         | Interrupt Request Input from MCP23S17              |
+| 27   | GP21 | nOUTPUT_EN    | Enable buffered CS outputs from MCP23S17           |
+| 29   | GP22 | I2S_DAC_DATA  | Digital Audio Output                               |
+| 31   | GP26 | I2S_ADC_DATA  | Digital Audio Input                                |
+| 32   | GP27 | I2S_LR_CLOCK  | Digital Audio Sync (96kHz)                         |
+| 34   | GP28 | I2S_BIT_CLOCK | Digital Audio Bit Clock (1.536MHz)                 |
+
+## Clocks
+
+The RP2040 has a two Phase-Locked-Loop (PLLs) - one for the system clock and
+one for the 48 MHz USB clock. Each can convert the incoming clock signal,
+multiply it up to a very high frequency signal using a Voltage Controlled
+Oscillator (VCO), and then divide it down to the desired value using two
+divider circuits. We have control over the system clock PLL, which is used
+for the Cortex-M0 core clock rate, as well as the input to the PIO, SPI, I²C
+and UART peripherals.
+
+The important clock signal we need is for the PIO, which needs to generate
+pixels at a rate of 25.175 MHz ± 0.5%. The PIO will need at least four clock
+cycles per pixel, so we need a clock speed of at least 100.7 MHz. Also note
+that a value of 25.0 MHz is out of rate (it is -0.7% of nominal, which is
+greater than -0.5% allowed). Many systems will just use this frequency
+anyway, but we strive for perfection!
+
+The Raspberry Pi Pico has a 12 MHz Crystal. We set the multiplier to x126 to
+give a VCO frequency of 1512 MHz. This is very near the VCO maximum of 1600
+MHz and we deliberately do this to try and reduce jitter on the divided clock
+signal. We then divide by 4 * 3 (= 12) to give a clock frequency of 126.0
+MHz. This is 25.2 MHz x 5, where 25.2 MHz is +0.1% from nominal for the video
+clock.
+
+We can also divide the system clock clock of 126 MHz by 82, and then by 32
+bits per stereo sample, to give an audio sample rate of 48.018 kHz, which
+is +0.03% of a nominal 48.0 kHz.
+
+There is a second video frequency of 28.321875 MHz (9/8 of the nominal
+frequency), which is used in VGA modes which have 720 pixels across
+(80 characters of 9 pixels each) rather than the usual 640 pixel across(or 80
+characters of 8 pixels each). Unfortunately this frequency doesn't divide out
+from the frequencies above, so there will be no 720 or 360 pixel wide modes.
+
 ## Changelog
 
 See [CHANGELOG.md](./CHANGELOG.md)
