@@ -40,6 +40,7 @@
 use cortex_m_rt::entry;
 use defmt::*;
 use defmt_rtt as _;
+use embedded_hal::blocking::i2c::Read;
 use embedded_hal::digital::v2::OutputPin;
 use embedded_time::rate::*;
 use git_version::git_version;
@@ -127,13 +128,41 @@ fn main() -> ! {
 	// Grab the LED pin
 	let mut led_pin = pins.led.into_push_pull_output();
 
+	// Set up I²C on pins
+	let mut i2c = hal::i2c::I2C::i2c1(
+		pac.I2C1,
+		pins.gpio14.into_mode(),
+		pins.gpio15.into_mode(),
+		100_000.Hz(),
+		&mut pac.RESETS,
+		clocks.system_clock,
+	);
+
 	// Do some blinky so we can see it work.
+	debug!("Checking all I²C addresses...");
 	loop {
-		debug!("Loop...");
-		led_pin.set_high().unwrap();
-		delay.delay_ms(500);
-		led_pin.set_low().unwrap();
-		delay.delay_ms(500);
+		for addr in 0x08..=0x77 {
+			led_pin.set_high().unwrap();
+			debug!("Checking addr 0x{:x}...", addr);
+			let mut results = [0u8; 1];
+			let res = i2c.read(addr, &mut results);
+			match res {
+				// Err(hal::i2c::Error::Abort(n)) => {
+				// 	info!("Address 0x{:x} not found, error {:?}", addr, n);
+				// }
+				// Err(_) => {
+				// 	info!("Address 0x{:x} not found, error unknown", addr);
+				// }
+				Ok(_) => {
+					info!("Address 0x{:x} found", addr);
+				}
+				_ => {
+					
+				}
+			}
+			led_pin.set_low().unwrap();
+		}
+		delay.delay_ms(1000);
 	}
 }
 
