@@ -8,11 +8,11 @@ version = "0.2.0"
 
 [dependencies]
 # Useful Cortex-M specific functions (e.g. SysTick)
-cortex-m = "0.7.3"
+cortex-m = "0.7"
 # The Raspberry Pi Pico HAL
 pico = { git = "https://github.com/rp-rs/rp-hal.git" }
 # Cortex-M run-time (or start-up) code
-cortex-m-rt = "0.6.14"
+cortex-m-rt = "0.7"
 # The BIOS API we export to the OS
 neotron-common-bios = { git = "https://github.com/Neotron-Compute/Neotron-Common-BIOS.git" }
 # For time keeping/handling
