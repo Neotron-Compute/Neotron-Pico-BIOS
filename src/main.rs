@@ -38,14 +38,18 @@
 // -----------------------------------------------------------------------------
 
 use core::sync::atomic::AtomicBool;
-use core::sync::atomic::Ordering;
 use core::sync::atomic::AtomicU32;
+use core::sync::atomic::Ordering;
 
-use embedded_hal::digital::v2::OutputPin;
 use cortex_m_rt::entry;
+use cortex_m_rt::entry;
+use defmt::*;
+use defmt_rtt as _;
+use embedded_hal::digital::v2::OutputPin;
 use embedded_time::rate::*;
+use git_version::git_version;
 use hal::clocks::Clock;
-use panic_halt as _;
+use panic_probe as _;
 use pico;
 use pico::hal;
 use pico::hal::pac;
@@ -64,6 +68,9 @@ use pico::hal::pac;
 #[used]
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER;
 
+/// BIOS version
+const GIT_VERSION: &str = git_version!();
+
 // -----------------------------------------------------------------------------
 // Types
 // -----------------------------------------------------------------------------
@@ -78,6 +85,8 @@ pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER;
 /// `.bss` and `.data` sections have been initialised.
 #[entry]
 fn main() -> ! {
+	info!("Neotron BIOS {} starting...", GIT_VERSION);
+
 	// Grab the singleton containing all the RP2040 peripherals
 	let mut pac = pac::Peripherals::take().unwrap();
 	// Grab the singleton containing all the generic Cortex-M peripherals
@@ -99,6 +108,8 @@ fn main() -> ! {
 	.ok()
 	.unwrap();
 
+	info!("Clocks OK");
+
 	// Create an object we can use to busy-wait for specified numbers of
 	// milliseconds. For this to work, it needs to know our clock speed.
 	let _delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
@@ -115,6 +126,8 @@ fn main() -> ! {
 		sio.gpio_bank0,
 		&mut pac.RESETS,
 	);
+
+	info!("Pins OK");
 
 	// Grab the LED pin
 	let mut led_pin = pins.led.into_push_pull_output();
@@ -134,17 +147,17 @@ fn main() -> ! {
 	let _blue2 = pins.gpio12.into_mode::<hal::gpio::FunctionPio0>();
 	let _blue3 = pins.gpio13.into_mode::<hal::gpio::FunctionPio0>();
 
-    scanvideo_setup();
+	scanvideo_setup();
 
-    scanvideo_timing_enable(true);
+	scanvideo_timing_enable(true);
 
 	// Do some blinky so we can see it work.
 	loop {
-        led_pin.set_low().unwrap();
-        let mut scanline_buffer = scanvideo_begin_scanline_generation(true);
-        draw_color_bar(&mut scanline_buffer);
-        scanvideo_end_scanline_generation(scanline_buffer);
-        led_pin.set_high().unwrap();
+		led_pin.set_low().unwrap();
+		let mut scanline_buffer = scanvideo_begin_scanline_generation(true);
+		draw_color_bar(&mut scanline_buffer);
+		scanvideo_end_scanline_generation(scanline_buffer);
+		led_pin.set_high().unwrap();
 	}
 }
 
@@ -169,8 +182,8 @@ struct Buffer {
 
 impl Buffer {
 	const fn new() -> Buffer {
-		Buffer { 
-			pio_data: [0; MAX_SCANVIDEO_WORDS]
+		Buffer {
+			pio_data: [0; MAX_SCANVIDEO_WORDS],
 		}
 	}
 }
@@ -180,7 +193,7 @@ struct Buffers {
 }
 
 struct BufferHandle {
-	buffer: &'static mut Buffer
+	buffer: &'static mut Buffer,
 }
 
 struct ScanvideoState {
@@ -193,46 +206,43 @@ struct ScanvideoState {
 }
 
 static SHARED_STATE: ScanvideoState = ScanvideoState {
-	last_scanline_id: AtomicU32::new(0)
+	last_scanline_id: AtomicU32::new(0),
 };
 
 /// Configure video for 640x480 @ 60 Hz
 fn scanvideo_setup() {
-	SHARED_STATE.last_scanline_id.store(0xFFFFFFFF, Ordering::Relaxed);
+	SHARED_STATE
+		.last_scanline_id
+		.store(0xFFFFFFFF, Ordering::Relaxed);
 
 	// video_program_load_offset = pio_add_program(video_pio, &video_24mhz_composable);
-    // setup_sm(PICO_SCANVIDEO_SCANLINE_SM, video_program_load_offset);
-    // video_htiming_load_offset = pio_add_program(video_pio, &video_timing_program);
-    // setup_sm(PICO_SCANVIDEO_TIMING_SM, video_htiming_load_offset);
-    // irq_set_priority(PIO0_IRQ_0, 0); // highest priority
-    // irq_set_priority(PIO0_IRQ_1, 0x40); // lower priority by 1
-
+	// setup_sm(PICO_SCANVIDEO_SCANLINE_SM, video_program_load_offset);
+	// video_htiming_load_offset = pio_add_program(video_pio, &video_timing_program);
+	// setup_sm(PICO_SCANVIDEO_TIMING_SM, video_htiming_load_offset);
+	// irq_set_priority(PIO0_IRQ_0, 0); // highest priority
+	// irq_set_priority(PIO0_IRQ_1, 0x40); // lower priority by 1
 }
 
-fn scanvideo_timing_enable(_some_arg: bool) {
-
-}
+fn scanvideo_timing_enable(_some_arg: bool) {}
 
 static mut BUFFERS: Buffers = Buffers {
-	 buffers: [
-	 	Buffer::new(),
-	 	Buffer::new(),
-	 	Buffer::new(),
-	 	Buffer::new(),
-	 	Buffer::new(),
-	 	Buffer::new(),
-	 	Buffer::new(),
-	 	Buffer::new(),
-	 ]
+	buffers: [
+		Buffer::new(),
+		Buffer::new(),
+		Buffer::new(),
+		Buffer::new(),
+		Buffer::new(),
+		Buffer::new(),
+		Buffer::new(),
+		Buffer::new(),
+	],
 };
 
 fn scanvideo_begin_scanline_generation(_some_arg: bool) -> BufferHandle {
 	let next_line = SHARED_STATE.last_scanline_id.load(Ordering::Relaxed);
 	let buffer = (next_line as usize) % MAX_SCANVIDEO_BUFFERS;
 	let buffer = unsafe { &mut BUFFERS.buffers[buffer] };
-	BufferHandle {
-		buffer
-	}
+	BufferHandle { buffer }
 }
 
 fn draw_color_bar(handle: &mut BufferHandle) {
@@ -245,8 +255,7 @@ fn draw_color_bar(handle: &mut BufferHandle) {
 	}
 }
 
-fn scanvideo_end_scanline_generation(_complete_buffer: BufferHandle) {
-}
+fn scanvideo_end_scanline_generation(_complete_buffer: BufferHandle) {}
 
 // -----------------------------------------------------------------------------
 // End of file
