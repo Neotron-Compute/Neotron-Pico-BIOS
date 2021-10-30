@@ -111,7 +111,7 @@ fn main() -> ! {
 
 	// Create an object we can use to busy-wait for specified numbers of
 	// milliseconds. For this to work, it needs to know our clock speed.
-	let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
+	let _delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
 
 	// sio is the *Single-cycle Input/Output* peripheral. It has all our GPIO
 	// pins, as well as some mailboxes and other useful things for inter-core
@@ -163,8 +163,6 @@ fn main() -> ! {
 	let program = pio_proc::pio!(
 		32,
 		"
-		; Block until FIFO receives data
-		pull block
 		.wrap_target
 		; Note autopull is set to 32-bits
 		; output is set to shift right
