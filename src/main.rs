@@ -191,13 +191,15 @@ fn main() -> ! {
 		.wrap_target
 		; Wait for timing state machine to start visible line
 		wait 1 irq 7
-		; Read `num_pixels - 1` into X
+		; Read `num_pixels - 1` from OSR into Scratch Register X
 		out x, 12
 		loop1:
-			; Push out RGB pixels (NB: add a 3 clock wait, to make 5 clocks per pixel)
-			out pins, 12
+			; Push out one 12-bit RGB pixel (with a 3 clock wait, to make 5 clocks per pixel)
+			out pins 12 [3]
 			; Repeat until all pixels sent
 			jmp x-- loop1
+		; Clear all pins after visible section
+		mov pins null
 		.wrap
 		"
 	);
@@ -222,7 +224,7 @@ fn main() -> ! {
 		.out_shift_direction(hal_pio::ShiftDirection::Right)
 		.pull_threshold(12)
 		.build(sm1);
-	pixel_sm.set_pindirs((2..=14).map(|x| (x, hal_pio::PinDir::Output)));
+	pixel_sm.set_pindirs((2..=13).map(|x| (x, hal_pio::PinDir::Output)));
 
 	timing_sm.start();
 	pixel_sm.start();
@@ -257,7 +259,7 @@ fn main() -> ! {
 			if is_visible {
 				while !pixel_fifo.write(63) {}
 				for pixel in 1..=64 {
-					while !pixel_fifo.write(pixel) {}
+					while !pixel_fifo.write(0xF00 + pixel) {}
 				}
 			}
 		}
