@@ -200,7 +200,7 @@ fn main() -> ! {
 			jmp x-- loop1
 		.wrap
 		"
-		);
+	);
 
 	let timing_installed = pio.install(&timing_program.program).unwrap();
 	let (mut timing_sm, _, mut timing_fifo) = hal_pio::PIOBuilder::from_program(timing_installed)
