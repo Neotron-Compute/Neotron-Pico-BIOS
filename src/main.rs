@@ -257,9 +257,9 @@ fn main() -> ! {
 
 			// Load all the pixels for the line
 			if is_visible {
-				while !pixel_fifo.write(63) {}
+				pixel_fifo.write(63);
 				for pixel in 1..=64 {
-					while !pixel_fifo.write(0xF00 + pixel) {}
+					pixel_fifo.write(0xF00 + pixel);
 				}
 			}
 		}
