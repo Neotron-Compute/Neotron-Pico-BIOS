@@ -150,44 +150,82 @@ fn main() -> ! {
 	// and it busy-waits the appropriate amount of time and trigger the
 	// appropriate interrupts.
 
-	// Post <front_porch> <pulse> <back_porch>
+	// Post <value:32> where value: <clock_cycles:14> <hsync:1> <vsync:1>
+	// <instruction:16>
+	//
+	// The SM will execute the instruction (you want to raise an IRQ at the
+	// start of the visible portion, to start another SM), set the H-Sync and
+	// V-Sync pins as desired, then wait the given number of clock cycles.
 
 	// Need to configure PIO0SM1 to run the pixel loop. It waits for an IRQ
-	// (posted by the timing loop) then pulls pixel data from the FIFO. We
-	// post the number of pixels for that line, then the pixel data.
+	// (posted by the timing loop) then pulls pixel data from the FIFO. We post
+	// the number of pixels for that line, then the pixel data.
 
-	// Post <horizontal pixels> <pixel0> <pixel1> <pixel2>; each <pixelX> is a 12-bit value padded up to 16-bits.
+	// Post <num_pixels> <pixel1> <pixel2> ... <pixelN>; each <pixelX> maps to
+	// the RGB output pins. On a Neotron Pico, there are 12 (4 Red, 4 Green and
+	// 4 Blue) - so we set autopull to 12, and each value should be 12-bits long.
 
-	let (mut pio, sm0, _sm1, _sm2, _sm3) = pac.PIO0.split(&mut pac.RESETS);
+	let (mut pio, sm0, sm1, _sm2, _sm3) = pac.PIO0.split(&mut pac.RESETS);
 
-	let program = pio_proc::pio!(
+	let timing_program = pio_proc::pio!(
 		32,
 		"
 		.wrap_target
-		; Note autopull is set to 32-bits
-		; output is set to shift right
-		out exec, 16  ; Execute top 16-bits as an instruction
-		out pins, 2   ; Push bottom 2 bits to PINS
-		out x, 14     ; Push next 14 bits into X for the timing loop
+		; Note autopull is set to 32-bits, OSR is set to shift right
+		; Execute bottom 16-bits as an instruction
+		out exec, 16
+		; Push next 2 bits to PINS
+		out pins, 2
+		; Push last 14 bits into X for the timing loop
+		out x, 14
 		loop0:
-		jmp x-- loop0 ; Spin until X is zero
+			; Spin until X is zero
+			jmp x-- loop0
 		.wrap
 		"
 	);
 
-	let installed = pio.install(&program.program).unwrap();
-	let (mut sm, _rx_fifo, mut tx_fifo) = hal_pio::PIOBuilder::from_program(installed)
+	let pixel_program = pio_proc::pio!(
+		32,
+		"
+		.wrap_target
+		; Wait for timing state machine to start visible line
+		wait 1 irq 7
+		; Read `num_pixels - 1` into X
+		out x, 12
+		loop1:
+			; Push out RGB pixels (NB: add a 3 clock wait, to make 5 clocks per pixel)
+			out pins, 12
+			; Repeat until all pixels sent
+			jmp x-- loop1
+		.wrap
+		"
+		);
+
+	let timing_installed = pio.install(&timing_program.program).unwrap();
+	let (mut timing_sm, _, mut timing_fifo) = hal_pio::PIOBuilder::from_program(timing_installed)
 		.buffers(hal_pio::Buffers::OnlyTx)
-		.set_pins(0, 2)
 		.out_pins(0, 2)
 		.clock_divisor(5.0)
 		.autopull(true)
 		.out_shift_direction(hal_pio::ShiftDirection::Right)
 		.pull_threshold(32)
 		.build(sm0);
-	sm.set_pindirs([(0, hal_pio::PinDir::Output), (1, hal_pio::PinDir::Output)]);
+	timing_sm.set_pindirs([(0, hal_pio::PinDir::Output), (1, hal_pio::PinDir::Output)]);
 
-	sm.start();
+	let pixels_installed = pio.install(&pixel_program.program).unwrap();
+	let (mut pixel_sm, _, mut pixel_fifo) = hal_pio::PIOBuilder::from_program(pixels_installed)
+		.buffers(hal_pio::Buffers::OnlyTx)
+		.out_pins(2, 12)
+		.clock_divisor(1.0)
+		.autopull(true)
+		.out_shift_direction(hal_pio::ShiftDirection::Right)
+		.pull_threshold(12)
+		.build(sm1);
+	pixel_sm.set_pindirs((2..=14).map(|x| (x, hal_pio::PinDir::Output)));
+
+	timing_sm.start();
+	pixel_sm.start();
 
 	let mut x: u8 = 0;
 	loop {
@@ -204,16 +242,24 @@ fn main() -> ! {
 			// 640 x 480, negative h-sync - four periods per video line
 
 			let need_vsync = scanline >= 490 && scanline <= 491;
-			let _is_visible = scanline <= 480;
+			let is_visible = scanline <= 480;
 
 			// This if the front porch
-			load_timing(&mut tx_fifo, 16, true, need_vsync, false);
+			load_timing(&mut timing_fifo, 16, true, need_vsync, false);
 			// This is the sync pulse
-			load_timing(&mut tx_fifo, 96, false, need_vsync, false);
+			load_timing(&mut timing_fifo, 96, false, need_vsync, false);
 			// This is the back porch
-			load_timing(&mut tx_fifo, 48, true, need_vsync, false);
+			load_timing(&mut timing_fifo, 48, true, need_vsync, false);
 			// This is the visible portion - trigger the IRQ to start pixels moving
-			load_timing(&mut tx_fifo, 640, true, need_vsync, true);
+			load_timing(&mut timing_fifo, 640, true, need_vsync, true);
+
+			// Load all the pixels for the line
+			if is_visible {
+				while !pixel_fifo.write(63) {}
+				for pixel in 1..=64 {
+					while !pixel_fifo.write(pixel) {}
+				}
+			}
 		}
 	}
 }
@@ -223,14 +269,14 @@ fn load_timing(
 	period: u16,
 	hsync: bool,
 	vsync: bool,
-	want_irq: bool,
+	raise_irq: bool,
 ) {
-	let command = if want_irq {
+	let command = if raise_irq {
 		// This command sets IRQ 0
 		pio::InstructionOperands::IRQ {
 			clear: false,
 			wait: false,
-			index: 0,
+			index: 7,
 			relative: false,
 		}
 	} else {
