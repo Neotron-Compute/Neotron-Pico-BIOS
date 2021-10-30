@@ -1,6 +1,6 @@
 [package]
 authors = ["Jonathan 'theJPster' Pallant <github@thejpster.org.uk>"]
-edition = "2018"
+edition = "2021"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 name = "neotron-pico-bios"
@@ -29,6 +29,10 @@ defmt-rtt = "0.2"
 panic-probe = "0.2"
 # Fetches the BIOS version from git
 git-version = "0.3"
+# RP2040 PIO driver
+pio = { git = "https://github.com/rp-rs/pio-rs.git", branch = "main" }
+# RP2040 PIO driver macros
+pio-proc = { git = "https://github.com/rp-rs/pio-rs.git", branch = "main" }
 
 [features]
 default = [

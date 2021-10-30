@@ -37,11 +37,6 @@
 // Imports
 // -----------------------------------------------------------------------------
 
-use core::sync::atomic::AtomicBool;
-use core::sync::atomic::AtomicU32;
-use core::sync::atomic::Ordering;
-
-use cortex_m_rt::entry;
 use cortex_m_rt::entry;
 use defmt::*;
 use defmt_rtt as _;
@@ -50,9 +45,7 @@ use embedded_time::rate::*;
 use git_version::git_version;
 use hal::clocks::Clock;
 use panic_probe as _;
-use pico;
-use pico::hal;
-use pico::hal::pac;
+use pico::{self, hal::{self, pac, pio::{self as hal_pio, PIOExt}}};
 
 // -----------------------------------------------------------------------------
 // Static and Const Data
@@ -112,7 +105,7 @@ fn main() -> ! {
 
 	// Create an object we can use to busy-wait for specified numbers of
 	// milliseconds. For this to work, it needs to know our clock speed.
-	let _delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
+	let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
 
 	// sio is the *Single-cycle Input/Output* peripheral. It has all our GPIO
 	// pins, as well as some mailboxes and other useful things for inter-core
@@ -147,115 +140,100 @@ fn main() -> ! {
 	let _blue2 = pins.gpio12.into_mode::<hal::gpio::FunctionPio0>();
 	let _blue3 = pins.gpio13.into_mode::<hal::gpio::FunctionPio0>();
 
-	scanvideo_setup();
 
-	scanvideo_timing_enable(true);
+	// Need to configure PIO0SM0 to run the timing loop. We post timing data
+	// and it busy-waits the appropriate amount of time and trigger the
+	// appropriate interrupts.
 
-	// Do some blinky so we can see it work.
+	// Post <front_porch> <pulse> <back_porch>
+
+	// Need to configure PIO0SM1 to run the pixel loop. It waits for an IRQ
+	// (posted by the timing loop) then pulls pixel data from the FIFO. We
+	// post the number of pixels for that line, then the pixel data.
+
+	// Post <horizontal pixels> <pixel0> <pixel1> <pixel2>; each <pixelX> is a 12-bit value padded up to 16-bits.
+
+	let (mut pio, sm0, _sm1, _sm2, _sm3) = pac.PIO0.split(&mut pac.RESETS);
+
+	let program = pio_proc::pio!(32,
+		"
+		; Block until FIFO receives data
+		pull block
+		.wrap_target
+		; Note autopull is set to 32-bits
+		; output is set to shift right
+		out exec, 16  ; Execute top 16-bits as an instruction
+		out pins, 2   ; Push bottom 2 bits to PINS
+		out x, 14     ; Push next 14 bits into X for the timing loop
+		loop0:
+		jmp x-- loop0 ; Spin until X is zero
+		.wrap
+		");
+
+	let installed = pio.install(&program.program).unwrap();
+	let (mut sm, _rx_fifo, mut tx_fifo) = hal_pio::PIOBuilder::from_program(installed)
+		.buffers(hal_pio::Buffers::RxTx)
+		.set_pins(0, 2)
+		.out_pins(0, 2)
+		.clock_divisor(5.0)
+		.autopull(true)
+		.out_shift_direction(hal_pio::ShiftDirection::Right)
+		.pull_threshold(32)
+		.build(sm0);
+	sm.set_pindirs([(0, hal_pio::PinDir::Output),(1, hal_pio::PinDir::Output)]);
+
+	sm.start();
+
+	let mut x: u8 = 0;
 	loop {
-		led_pin.set_low().unwrap();
-		let mut scanline_buffer = scanvideo_begin_scanline_generation(true);
-		draw_color_bar(&mut scanline_buffer);
-		scanvideo_end_scanline_generation(scanline_buffer);
-		led_pin.set_high().unwrap();
-	}
-}
-
-const VIDEO_CLOCK_FREQUENCY: u32 = 25_000_000;
-const VIDEO_VISIBLE_PIXELS: u32 = 640;
-const VIDEO_VISIBLE_LINES: u32 = 480;
-const VIDEO_H_FRONT_PORCH: u32 = 16;
-const VIDEO_H_PULSE: u32 = 64;
-const VIDEO_H_TOTAL: u32 = 800;
-const VIDEO_H_SYNC_POLARITY: bool = true;
-const VIDEO_V_FRONT_PORCH: u32 = 1;
-const VIDEO_V_PULSE: u32 = 2;
-const VIDEO_V_TOTAL: u32 = 523;
-const VIDEO_V_SYNC_POLARITY: bool = true;
-
-const MAX_SCANVIDEO_WORDS: usize = 1 + ((VIDEO_VISIBLE_PIXELS as usize) / 2);
-const MAX_SCANVIDEO_BUFFERS: usize = 8;
-
-struct Buffer {
-	pio_data: [u32; MAX_SCANVIDEO_WORDS],
-}
-
-impl Buffer {
-	const fn new() -> Buffer {
-		Buffer {
-			pio_data: [0; MAX_SCANVIDEO_WORDS],
+		// Flash a pin every 60 frames, or once a second
+		x = x.wrapping_add(1);
+		if x == 60 {
+			led_pin.set_high().unwrap();
+			x = 0;
+		} else {
+			led_pin.set_low().unwrap();
+		}
+		// This should all be moved off into an IRQ so it doesn't block the main thread
+		for scanline in 1..=525 {
+			// 640 x 480, negative h-sync - four periods per video line
+	
+			let need_vsync = scanline >= 490 && scanline <= 491; 
+			let _is_visible = scanline <= 480;
+		
+			// This if the front porch
+			load_timing(&mut tx_fifo, 16, true, need_vsync, false);
+			// This is the sync pulse
+			load_timing(&mut tx_fifo, 96, false, need_vsync, false);
+			// This is the back porch
+			load_timing(&mut tx_fifo, 48, true, need_vsync, false);
+			// This is the visible portion - trigger the IRQ to start pixels moving
+			load_timing(&mut tx_fifo, 640, true, need_vsync, true);
 		}
 	}
 }
 
-struct Buffers {
-	buffers: [Buffer; MAX_SCANVIDEO_BUFFERS],
-}
-
-struct BufferHandle {
-	buffer: &'static mut Buffer,
-}
-
-struct ScanvideoState {
-	// scanline.lock
-	// dma.lock
-	// free_list.lock
-	// in_use.lock
-	// scanline.last_scanline_id
-	last_scanline_id: AtomicU32,
-}
-
-static SHARED_STATE: ScanvideoState = ScanvideoState {
-	last_scanline_id: AtomicU32::new(0),
-};
-
-/// Configure video for 640x480 @ 60 Hz
-fn scanvideo_setup() {
-	SHARED_STATE
-		.last_scanline_id
-		.store(0xFFFFFFFF, Ordering::Relaxed);
-
-	// video_program_load_offset = pio_add_program(video_pio, &video_24mhz_composable);
-	// setup_sm(PICO_SCANVIDEO_SCANLINE_SM, video_program_load_offset);
-	// video_htiming_load_offset = pio_add_program(video_pio, &video_timing_program);
-	// setup_sm(PICO_SCANVIDEO_TIMING_SM, video_htiming_load_offset);
-	// irq_set_priority(PIO0_IRQ_0, 0); // highest priority
-	// irq_set_priority(PIO0_IRQ_1, 0x40); // lower priority by 1
-}
-
-fn scanvideo_timing_enable(_some_arg: bool) {}
-
-static mut BUFFERS: Buffers = Buffers {
-	buffers: [
-		Buffer::new(),
-		Buffer::new(),
-		Buffer::new(),
-		Buffer::new(),
-		Buffer::new(),
-		Buffer::new(),
-		Buffer::new(),
-		Buffer::new(),
-	],
-};
-
-fn scanvideo_begin_scanline_generation(_some_arg: bool) -> BufferHandle {
-	let next_line = SHARED_STATE.last_scanline_id.load(Ordering::Relaxed);
-	let buffer = (next_line as usize) % MAX_SCANVIDEO_BUFFERS;
-	let buffer = unsafe { &mut BUFFERS.buffers[buffer] };
-	BufferHandle { buffer }
-}
-
-fn draw_color_bar(handle: &mut BufferHandle) {
-	handle.buffer.pio_data[0] = VIDEO_VISIBLE_PIXELS;
-	for p in handle.buffer.pio_data[1..].iter_mut() {
-		// Each word is two 16-bit values.
-		// Of those, we use the bottom 12-bits as the RGB colour.
-		// White pixel, black pixel.
-		*p = 0x0FFF_0000;
+fn load_timing(fifo: &mut hal_pio::Tx<(pac::PIO0, hal_pio::SM0)>, period: u16, hsync: bool, vsync: bool, want_irq: bool) {
+	let command = if want_irq {
+		// This command sets IRQ 0
+		pio::InstructionOperands::IRQ { clear: false, wait: false, index: 0, relative: false }
+	}
+	else {
+		// This command is a no-op (it moves Y into Y)
+		pio::InstructionOperands::MOV { destination: pio::MovDestination::Y, op: pio::MovOperation::None, source: pio::MovSource::Y }
+	};
+	let mut value: u32 = u32::from(command.encode());
+	if hsync {
+		value |= 1 << 16;
+	}
+	if vsync {
+		value |= 1 << 17;
+	}
+	value |= (u32::from(period) - 4) << 18;
+	while !fifo.write(value) {
+		// Spin?
 	}
 }
-
-fn scanvideo_end_scanline_generation(_complete_buffer: BufferHandle) {}
 
 // -----------------------------------------------------------------------------
 // End of file
