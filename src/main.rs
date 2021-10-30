@@ -179,7 +179,7 @@ fn main() -> ! {
 
 	let installed = pio.install(&program.program).unwrap();
 	let (mut sm, _rx_fifo, mut tx_fifo) = hal_pio::PIOBuilder::from_program(installed)
-		.buffers(hal_pio::Buffers::RxTx)
+		.buffers(hal_pio::Buffers::OnlyTx)
 		.set_pins(0, 2)
 		.out_pins(0, 2)
 		.clock_divisor(5.0)
