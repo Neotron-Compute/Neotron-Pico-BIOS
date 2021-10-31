@@ -205,10 +205,14 @@ fn main() -> ! {
 		; Push next 2 bits to PINS
 		out pins, 2
 		; Push last 14 bits into X for the timing loop
+		; We want to wait five clock cycles per X
 		out x, 14
+		; Two NOPS to make this section add up to five clocks
+		nop
+		nop
 		loop0:
 			; Spin until X is zero
-			jmp x-- loop0
+			jmp x-- loop0 [4]
 		.wrap
 		"
 	);
@@ -218,13 +222,16 @@ fn main() -> ! {
 		"
 		.wrap_target
 		; Wait for timing state machine to start visible line
-		wait 1 irq 7
+		wait 1 irq 0
 		; Read `num_pixels - 1` from OSR into Scratch Register X
-		out x, 12
+		set x 31
 		loop1:
-			; Push out one 12-bit RGB pixel (with a 3 clock wait, to make 5 clocks per pixel)
-			out pins 12 [3]
-			; Repeat until all pixels sent
+			; Push out one 12-bit RGB pixel (with a 4 clock wait, to make 5 clocks per pixel)
+			set pins 15 [4]
+			set pins 0 [4]
+			set pins 15 [4]
+			set pins 0 [3]
+			; Repeat until all blocks sent
 			jmp x-- loop1
 		; Clear all pins after visible section
 		mov pins null
@@ -236,7 +243,6 @@ fn main() -> ! {
 	let (mut timing_sm, _, mut timing_fifo) = hal_pio::PIOBuilder::from_program(timing_installed)
 		.buffers(hal_pio::Buffers::OnlyTx)
 		.out_pins(0, 2)
-		.clock_divisor(5.0)
 		.autopull(true)
 		.out_shift_direction(hal_pio::ShiftDirection::Right)
 		.pull_threshold(32)
@@ -244,10 +250,10 @@ fn main() -> ! {
 	timing_sm.set_pindirs([(0, hal_pio::PinDir::Output), (1, hal_pio::PinDir::Output)]);
 
 	let pixels_installed = pio.install(&pixel_program.program).unwrap();
-	let (mut pixel_sm, _, mut pixel_fifo) = hal_pio::PIOBuilder::from_program(pixels_installed)
+	let (mut pixel_sm, _, _pixel_fifo) = hal_pio::PIOBuilder::from_program(pixels_installed)
 		.buffers(hal_pio::Buffers::OnlyTx)
 		.out_pins(2, 12)
-		.clock_divisor(1.0)
+		.set_pins(2, 5)
 		.autopull(true)
 		.out_shift_direction(hal_pio::ShiftDirection::Right)
 		.pull_threshold(12)
@@ -281,15 +287,7 @@ fn main() -> ! {
 			// This is the back porch
 			load_timing(&mut timing_fifo, 48, true, need_vsync, false);
 			// This is the visible portion - trigger the IRQ to start pixels moving
-			load_timing(&mut timing_fifo, 640, true, need_vsync, true);
-
-			// Load all the pixels for the line
-			if is_visible {
-				pixel_fifo.write(63);
-				for pixel in 1..=64 {
-					pixel_fifo.write(0xF00 + pixel);
-				}
-			}
+			load_timing(&mut timing_fifo, 640, true, need_vsync, is_visible);
 		}
 	}
 }
@@ -306,7 +304,7 @@ fn load_timing(
 		pio::InstructionOperands::IRQ {
 			clear: false,
 			wait: false,
-			index: 7,
+			index: 0,
 			relative: false,
 		}
 	} else {
@@ -324,7 +322,7 @@ fn load_timing(
 	if vsync {
 		value |= 1 << 17;
 	}
-	value |= (u32::from(period) - 4) << 18;
+	value |= (u32::from(period) - 2) << 18;
 	while !fifo.write(value) {
 		// Spin?
 	}
