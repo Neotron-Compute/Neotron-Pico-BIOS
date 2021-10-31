@@ -94,18 +94,46 @@ fn main() -> ! {
 	// Needed by the clock setup
 	let mut watchdog = hal::watchdog::Watchdog::new(pac.WATCHDOG);
 
-	// Get ourselves up to a decent clock speed.
-	let clocks = hal::clocks::init_clocks_and_plls(
-		pico::XOSC_CRYSTAL_FREQ,
-		pac.XOSC,
-		pac.CLOCKS,
+	// Run at 126 MHz SYS_PLL, 48 MHz, USB_PLL
+
+	let xosc = hal::xosc::setup_xosc_blocking(pac.XOSC, pico::XOSC_CRYSTAL_FREQ.Hz())
+		.map_err(|_x| false)
+		.unwrap();
+
+	// Configure watchdog tick generation to tick over every microsecond
+	watchdog.enable_tick_generation((pico::XOSC_CRYSTAL_FREQ / 1_000_000) as u8);
+
+	let mut clocks = hal::clocks::ClocksManager::new(pac.CLOCKS);
+
+	let pll_sys = hal::pll::setup_pll_blocking(
 		pac.PLL_SYS,
-		pac.PLL_USB,
+		xosc.operating_frequency().into(),
+		hal::pll::PLLConfig {
+			vco_freq: Megahertz(1512),
+			refdiv: 1,
+			post_div1: 6,
+			post_div2: 2,
+		},
+		&mut clocks,
 		&mut pac.RESETS,
-		&mut watchdog,
 	)
-	.ok()
+	.map_err(|_x| false)
 	.unwrap();
+
+	let pll_usb = hal::pll::setup_pll_blocking(
+		pac.PLL_USB,
+		xosc.operating_frequency().into(),
+		hal::pll::common_configs::PLL_USB_48MHZ,
+		&mut clocks,
+		&mut pac.RESETS,
+	)
+	.map_err(|_x| false)
+	.unwrap();
+
+	clocks
+		.init_default(&xosc, &pll_sys, &pll_usb)
+		.map_err(|_x| false)
+		.unwrap();
 
 	info!("Clocks OK");
 
