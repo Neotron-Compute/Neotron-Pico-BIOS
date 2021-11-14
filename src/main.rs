@@ -200,15 +200,15 @@ fn main() -> ! {
 		"
 		.wrap_target
 		; Note autopull is set to 32-bits, OSR is set to shift right
-		; Execute bottom 16-bits as an instruction
+
+
+		; Step 1. Execute bottom 16-bits of OSR as an instruction. This take two cycles.
 		out exec, 16
-		; Push next 2 bits to PINS
+		; Step 2. Push next 2 bits of OSR into `pins`, to set H-Sync and V-Sync
 		out pins, 2
-		; Push last 14 bits into X for the timing loop
-		; We want to wait five clock cycles per X
+		; Step 3. Push last 14 bits of OSR into X for the timing loop.
 		out x, 14
-		; Two NOPS to make this section add up to five clocks
-		nop
+		; Step 4. Make this section add up to exactly five clocks.
 		nop
 		loop0:
 			; Spin until X is zero
@@ -223,15 +223,19 @@ fn main() -> ! {
 		.wrap_target
 		; Wait for timing state machine to start visible line
 		wait 1 irq 0
-		; Read `num_pixels - 1` from OSR into Scratch Register X
-		set x 31
+		; Transmit 32 stripes (and pad to a whole pixel)
+		set x, 31
+		nop
+		nop
+		nop
 		loop1:
-			; Push out one 12-bit RGB pixel (with a 4 clock wait, to make 5 clocks per pixel)
-			set pins 15 [4]
-			set pins 0 [4]
-			set pins 15 [4]
-			set pins 0 [3]
-			; Repeat until all blocks sent
+			; Each stripe has 20 pixels. Each pixel is 5 clock cycles
+			; (converts 126 MHz to 25.2 MHz)
+			set pins 15 [24] ; 5 pixels (minus one for the instruction)
+			set pins 7 [24] ; 5 pixels (...)
+			set pins 15 [24] ; 5 pixels (...)
+			set pins 7 [23]  ; 5 pixels (minus two, for the inst. and the jump)
+			; Repeat until all stripes sent
 			jmp x-- loop1
 		; Clear all pins after visible section
 		mov pins null
@@ -249,11 +253,18 @@ fn main() -> ! {
 		.build(sm0);
 	timing_sm.set_pindirs([(0, hal_pio::PinDir::Output), (1, hal_pio::PinDir::Output)]);
 
+	// Important notes!
+	//
+	// You must not set a clock_divider (other than 1.0) on the pixel state
+	// machine. You might want the pixels to be twice as wide (or mode), but
+	// enabling a clock divider adds a lot of jitter (i.e. the start each
+	// each line differs by some number of 126 MHz clock cycles).
+
 	let pixels_installed = pio.install(&pixel_program.program).unwrap();
 	let (mut pixel_sm, _, _pixel_fifo) = hal_pio::PIOBuilder::from_program(pixels_installed)
 		.buffers(hal_pio::Buffers::OnlyTx)
 		.out_pins(2, 12)
-		.set_pins(2, 5)
+		.set_pins(10, 4)
 		.autopull(true)
 		.out_shift_direction(hal_pio::ShiftDirection::Right)
 		.pull_threshold(12)
