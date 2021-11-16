@@ -41,6 +41,7 @@ use core::sync::atomic::{AtomicU16, Ordering};
 use cortex_m_rt::entry;
 use defmt::*;
 use defmt_rtt as _;
+use embedded_hal::digital::v2::OutputPin;
 use embedded_time::rate::*;
 use git_version::git_version;
 use hal::clocks::Clock;
@@ -250,6 +251,10 @@ fn main() -> ! {
 		sio.gpio_bank0,
 		&mut pac.RESETS,
 	);
+
+	// Disable power save mode to force SMPS into low-efficiency, low-noise mode.
+	let mut b_power_save = pins.b_power_save.into_push_pull_output();
+	b_power_save.set_high().unwrap();
 
 	info!("Pins OK");
 
