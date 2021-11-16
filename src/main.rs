@@ -451,7 +451,7 @@ fn main() -> ! {
 			.write(|w| w.bits(TIMING_BUFFER.visible_line.data.as_ptr() as usize as u32));
 		pac.DMA.ch[TIMING_DMA_CHAN]
 			.ch_write_addr
-			.write(|w| w.bits(timing_fifo.dma_address()));
+			.write(|w| w.bits(timing_fifo.fifo_address() as usize as u32));
 		pac.DMA.ch[TIMING_DMA_CHAN]
 			.ch_trans_count
 			.write(|w| w.bits(4));
@@ -476,7 +476,7 @@ fn main() -> ! {
 			.write(|w| w.bits(PIXEL_DATA_BUFFER_EVEN.as_ptr()));
 		pac.DMA.ch[PIXEL_DMA_CHAN]
 			.ch_write_addr
-			.write(|w| w.bits(pixel_fifo.dma_address()));
+			.write(|w| w.bits(pixel_fifo.fifo_address() as usize as u32));
 		pac.DMA.ch[PIXEL_DMA_CHAN]
 			.ch_trans_count
 			.write(|w| w.bits(NUM_PIXEL_PAIRS_PER_LINE as u32 + 1));
