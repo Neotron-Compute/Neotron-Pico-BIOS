@@ -37,7 +37,7 @@
 // Imports
 // -----------------------------------------------------------------------------
 
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use cortex_m_rt::entry;
 use defmt::*;
 use defmt_rtt as _;
@@ -71,11 +71,26 @@ struct TimingBuffer {
 	vblank_sync_buffer: ScanlineTimingBuffer,
 }
 
-const NUM_PIXEL_PAIRS: usize = 32;
+/// How many pixels per scan-line. Adjust the pixel PIO program to run at the
+/// right speed to the screen is filled. For example, if this is only 320 but
+/// you are aiming at 640x480, make the pixel PIO take twice as long per
+/// pixel.
+const NUM_PIXELS_PER_LINE: usize = 640;
+
+/// How many pixel pairs we send out. Each pixel is two 12-bit values packed
+/// into one 32-bit word. This is to make more efficient use of DMA and FIFO
+/// resources.
+const NUM_PIXEL_PAIRS_PER_LINE: usize = NUM_PIXELS_PER_LINE / 2;
+
+/// Number of lines on screen.
+const NUM_LINES: u16 = 480;
+
+/// Index of the last line
+const LAST_LINE: u16 = NUM_LINES - 1;
 
 #[repr(C, align(16))]
 struct LineBuffer {
-	pixels: [u32; NUM_PIXEL_PAIRS + 1],
+	pixels: [u32; NUM_PIXEL_PAIRS_PER_LINE + 1],
 }
 
 // -----------------------------------------------------------------------------
@@ -144,8 +159,11 @@ static TIMING_BUFFER: TimingBuffer = TimingBuffer {
 /// Tracks which scanline we are currently on (for timing purposes => it goes 0..=524)
 static CURRENT_TIMING_LINE: AtomicU16 = AtomicU16::new(0);
 
-/// Tracks which scanline we are currently on (for pixel purposes => it goes 0..=479)
+/// Tracks which scanline we are currently on (for pixel purposes => it goes 0..NUM_LINES)
 static CURRENT_DISPLAY_LINE: AtomicU16 = AtomicU16::new(0);
+
+/// Set to `true` when DMA of previous line is complete and next line is scheduled.
+static DMA_READY: AtomicBool = AtomicBool::new(false);
 
 /// Somewhere to stash the DMA controller object, so the IRQ can find it
 static mut DMA_PERIPH: Option<pac::DMA> = None;
@@ -156,18 +174,18 @@ static mut TIMING_DMA_CHAN: usize = 0;
 /// DMA channel for the pixel FIFO
 static mut PIXEL_DMA_CHAN: usize = 1;
 
-/// 12-bit pixels for the even scan-lines (0, 2, 4 ... 478). Defaults to black.
+/// 12-bit pixels for the even scan-lines (0, 2, 4 ... NUM_LINES - 2). Defaults to black.
 static mut PIXEL_DATA_BUFFER_EVEN: LineBuffer = LineBuffer {
 	// The length is one less than the number of pixel pairs because of the
 	// way the jmp works in the PIO program (it's a do-while loop).
-	pixels: [0; NUM_PIXEL_PAIRS + 1],
+	pixels: [0; NUM_PIXEL_PAIRS_PER_LINE + 1],
 };
 
-/// 12-bit pixels for the odd scan-lines (1, 3, 5 ... 479). Defaults to white.
+/// 12-bit pixels for the odd scan-lines (1, 3, 5 ... NUM_LINES-1). Defaults to white.
 static mut PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer {
 	// The length is one less than the number of pixel pairs because of the
 	// way the jmp works in the PIO program (it's a do-while loop).
-	pixels: [0; NUM_PIXEL_PAIRS + 1],
+	pixels: [0; NUM_PIXEL_PAIRS_PER_LINE + 1],
 };
 
 // -----------------------------------------------------------------------------
@@ -178,6 +196,8 @@ static mut PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer {
 /// `.bss` and `.data` sections have been initialised.
 #[entry]
 fn main() -> ! {
+	cortex_m::interrupt::disable();
+
 	info!("Neotron BIOS {} starting...", GIT_VERSION);
 
 	// Grab the singleton containing all the RP2040 peripherals
@@ -185,8 +205,11 @@ fn main() -> ! {
 	// Grab the singleton containing all the generic Cortex-M peripherals
 	let core = pac::CorePeripherals::take().unwrap();
 
-	// Reset the DMA engine
-	pac.RESETS.reset.modify(|_, w| w.dma().clear_bit());
+	// Reset the DMA engine. If we don't do this, starting from probe-run
+	// (as opposed to a cold-start) is unreliable.
+	pac.RESETS.reset.modify(|_r, w| w.dma().set_bit());
+	cortex_m::asm::nop();
+	pac.RESETS.reset.modify(|_r, w| w.dma().clear_bit());
 	while pac.RESETS.reset_done.read().dma().bit_is_clear() {}
 
 	// Needed by the clock setup
@@ -276,11 +299,11 @@ fn main() -> ! {
 
 	// Set up a checker board in the line buffers
 	unsafe {
-		PIXEL_DATA_BUFFER_EVEN.pixels[0] = NUM_PIXEL_PAIRS as u32 - 1;
+		PIXEL_DATA_BUFFER_EVEN.pixels[0] = NUM_PIXEL_PAIRS_PER_LINE as u32 - 1;
 		for px in PIXEL_DATA_BUFFER_EVEN.pixels[1..].iter_mut() {
 			*px = 0x0FFF_0000;
 		}
-		PIXEL_DATA_BUFFER_ODD.pixels[0] = NUM_PIXEL_PAIRS as u32 - 1;
+		PIXEL_DATA_BUFFER_ODD.pixels[0] = NUM_PIXEL_PAIRS_PER_LINE as u32 - 1;
 		for px in PIXEL_DATA_BUFFER_ODD.pixels[1..].iter_mut() {
 			*px = 0x0000_0FFF;
 		}
@@ -339,13 +362,12 @@ fn main() -> ! {
 		; Wait for timing state machine to start visible line
 		wait 1 irq 0
 		; Read the line length (in pixel-pairs)
-		; out x, 32 ; BROKEN
-		set x, 31 ; Use fixed value instead
+		out x, 32
 		loop1:
-			; Write out first pixel - takes 5 clocks per pixel (4 pixels)
-			out pins, 16 [19]
-			; Write out second pixel - takes 5 clocks per pixel (4 pixels, allowing one for the jump)
-			out pins, 16 [18]
+			; Write out first pixel - takes 5 clocks per pixel (double-width)
+			out pins, 16 [4]
+			; Write out second pixel - takes 5 clocks per pixel (double-width, allowing one for the jump)
+			out pins, 16 [3]
 			; Repeat until all pixel pairs sent
 			jmp x-- loop1
 		; Clear all pins after visible section
@@ -457,7 +479,7 @@ fn main() -> ! {
 			.write(|w| w.bits(pixel_fifo.dma_address()));
 		pac.DMA.ch[PIXEL_DMA_CHAN]
 			.ch_trans_count
-			.write(|w| w.bits(NUM_PIXEL_PAIRS as u32));
+			.write(|w| w.bits(NUM_PIXEL_PAIRS_PER_LINE as u32 + 1));
 		pac.DMA.inte0.write(|w| {
 			w.inte0()
 				.bits((1 << PIXEL_DMA_CHAN) | (1 << TIMING_DMA_CHAN))
@@ -465,6 +487,8 @@ fn main() -> ! {
 
 		// Hand off the DMA peripheral to the interrupt
 		DMA_PERIPH = Some(pac.DMA);
+
+		cortex_m::interrupt::enable();
 
 		// Enable the interupts (DMA_PERIPH has to be set first)
 		pac::NVIC::unpend(pac::Interrupt::DMA_IRQ_0);
@@ -489,30 +513,37 @@ fn main() -> ! {
 
 	info!("State Machines running");
 
-	let mut last_line = 0;
 	let mut frame_count = 0;
 	loop {
 		cortex_m::asm::wfi();
-		let try_line = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
-		if try_line != last_line {
-			last_line = try_line;
-			let next_line = if last_line == 479 {
+		if DMA_READY.load(Ordering::Relaxed) {
+			DMA_READY.store(false, Ordering::Relaxed);
+			let current_line = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
+			if current_line == 0 {
 				info!("Frame {}", frame_count);
 				frame_count += 1;
-				0
-			} else {
-				last_line + 1
-			};
+			}
 			// new line - do some painting!
 			let px_buf = unsafe {
-				if (next_line & 1) == 1 {
+				if (current_line & 1) == 0 {
 					&mut PIXEL_DATA_BUFFER_ODD
 				} else {
 					&mut PIXEL_DATA_BUFFER_EVEN
 				}
 			};
-			for px in px_buf.pixels.iter_mut().skip(1) {
-				*px = u32::from(next_line) | u32::from(next_line) << 16;
+			let qtr = NUM_PIXEL_PAIRS_PER_LINE / 4;
+			let red = ((frame_count + (current_line as u32)) & 0x0F) * 0x0001_0001;
+			for x in 0..qtr {
+				px_buf.pixels[x + 1] = 0x0FF0_0FF0 + red;
+			}
+			for x in qtr..(2 * qtr) {
+				px_buf.pixels[x + 1] = 0x0F00_0F00 + red;
+			}
+			for x in (2 * qtr)..(3 * qtr) {
+				px_buf.pixels[x + 1] = 0x00F0_00F0 + red;
+			}
+			for x in (3 * qtr)..(4 * qtr) {
+				px_buf.pixels[x + 1] = 0x0000_0000 + red;
 			}
 		}
 	}
@@ -589,11 +620,11 @@ unsafe fn DMA_IRQ_0() {
 		CURRENT_TIMING_LINE.store(timing_line, Ordering::Relaxed);
 
 		let buffer = match timing_line {
-			0..=479 => {
+			0..=LAST_LINE => {
 				// Visible lines
 				&TIMING_BUFFER.visible_line
 			}
-			480..=489 => {
+			NUM_LINES..=489 => {
 				// VGA front porch before VGA sync pulse
 				&TIMING_BUFFER.vblank_porch_buffer
 			}
@@ -616,17 +647,15 @@ unsafe fn DMA_IRQ_0() {
 
 		// A pixel DMA transfer is now complete. This only fires on lines 0..=480.
 
-		let old_display_line = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
-		let next_display_line = if old_display_line == 479 {
-			// 479 -> 0
-			0
-		} else {
-			// n -> n + 1
-			old_display_line + 1
+		let mut next_display_line = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed) + 1;
+		if next_display_line > LAST_LINE {
+			next_display_line = 0;
 		};
-		CURRENT_DISPLAY_LINE.store(next_display_line, Ordering::Relaxed);
 
-		// Set the DMA load address according to which line we are on
+		// Set the DMA load address according to which line we are on. We use
+		// the 'trigger' alias to restart the DMA at the same time as we
+		// write the new read address. The DMA had stopped because the
+		// previous line was transferred completely.
 		if (next_display_line & 1) == 1 {
 			// Odd visible line is next
 			dma.ch[PIXEL_DMA_CHAN]
@@ -638,6 +667,9 @@ unsafe fn DMA_IRQ_0() {
 				.ch_al3_read_addr_trig
 				.write(|w| w.bits(PIXEL_DATA_BUFFER_EVEN.as_ptr()))
 		}
+
+		CURRENT_DISPLAY_LINE.store(next_display_line, Ordering::Relaxed);
+		DMA_READY.store(true, Ordering::Relaxed);
 	}
 }
 
@@ -645,7 +677,7 @@ impl LineBuffer {
 	/// Convert the line buffer to a 32-bit address that the DMA engine understands.
 	fn as_ptr(&self) -> u32 {
 		// NB: skip the length field
-		self.pixels.as_ptr() as usize as u32 + 4
+		self.pixels.as_ptr() as usize as u32
 	}
 }
 
