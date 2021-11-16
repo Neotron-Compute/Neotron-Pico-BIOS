@@ -388,6 +388,9 @@ fn main() -> ! {
 	pixel_sm.set_pindirs((2..=13).map(|x| (x, hal_pio::PinDir::Output)));
 
 	unsafe {
+		pac.RESETS.reset.modify(|_, w| w.dma().clear_bit());
+        while pac.RESETS.reset_done.read().dma().bit_is_clear() {}
+
 		// dma_channel_config timing_dma_chan_config = dma_channel_get_default_config(timing_dma_chan);
 
 		// Transfer 32 bits at a time
@@ -484,9 +487,6 @@ fn main() -> ! {
 			w.inte0()
 				.bits((1 << PIXEL_DMA_CHAN) | (1 << TIMING_DMA_CHAN))
 		});
-		//irq_set_enabled(DMA_IRQ_0, true);
-		pac::NVIC::unpend(pac::Interrupt::DMA_IRQ_0);
-		pac::NVIC::unmask(pac::Interrupt::DMA_IRQ_0);
 
 		pac.DMA
 			.multi_chan_trigger
@@ -495,7 +495,15 @@ fn main() -> ! {
 			.multi_chan_trigger
 			.write(|w| w.bits(1 << TIMING_DMA_CHAN));
 
+		info!("DMA enabled");
+
 		DMA_PERIPH = Some(pac.DMA);
+
+		//irq_set_enabled(DMA_IRQ_0, true);
+		pac::NVIC::unpend(pac::Interrupt::DMA_IRQ_0);
+		pac::NVIC::unmask(pac::Interrupt::DMA_IRQ_0);
+
+		info!("IRQs enabled");
 	}
 
 	info!("DMA set-up complete");
@@ -553,10 +561,11 @@ const fn make_timing(period: u32, hsync: bool, vsync: bool, raise_irq: bool) -> 
 
 #[interrupt]
 unsafe fn DMA_IRQ_0() {
-	let dma: &mut pac::DMA = DMA_PERIPH.as_mut().unwrap();
+	let dma: &mut pac::DMA = match DMA_PERIPH.as_mut() {
+		Some(dma) => { dma }
+		None => { return; }
+	};
 	let status = dma.ints0.read().bits();
-
-	info!("IRQ!");
 
 	// Check if this is a DMA interrupt for the sync DMA channel
 	let timing_dma_chan_irq = (status & (1 << TIMING_DMA_CHAN)) != 0;
