@@ -37,10 +37,10 @@
 // Imports
 // -----------------------------------------------------------------------------
 
+use core::sync::atomic::{AtomicBool, AtomicI16, AtomicU16, Ordering};
 use cortex_m_rt::entry;
 use defmt::*;
 use defmt_rtt as _;
-use embedded_hal::digital::v2::OutputPin;
 use embedded_time::rate::*;
 use git_version::git_version;
 use hal::clocks::Clock;
@@ -48,10 +48,33 @@ use panic_probe as _;
 use pico::{
 	self,
 	hal::{
-		self, pac,
+		self,
+		pac::{self, interrupt},
 		pio::{self as hal_pio, PIOExt},
 	},
 };
+
+// -----------------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------------
+
+#[repr(C, align(16))]
+struct ScanlineTimingBuffer {
+	data: [u32; 4],
+}
+
+#[repr(C, align(16))]
+struct TimingBuffer {
+	visible_line: ScanlineTimingBuffer,
+	vblank_porch_buffer: ScanlineTimingBuffer,
+	vblank_sync_buffer: ScanlineTimingBuffer,
+}
+
+#[repr(C, align(16))]
+struct LineBuffer {
+	length: u32,
+	pixels: [u32; 320],
+}
 
 // -----------------------------------------------------------------------------
 // Static and Const Data
@@ -70,11 +93,84 @@ pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER;
 /// BIOS version
 const GIT_VERSION: &str = git_version!();
 
-// -----------------------------------------------------------------------------
-// Types
-// -----------------------------------------------------------------------------
+/// Stores our timing data which we DMA into the timing PIO State Machine
+static TIMING_BUFFER: TimingBuffer = TimingBuffer {
+	// Note - the order of the arguments to `make_timing` is:
+	//
+	// * H-Sync Pulse (true = high, false = low)
+	// * V-Sync Pulse (true = high, false = low)
+	// * Generate pixel start IRQ (true or false)
+	visible_line: ScanlineTimingBuffer {
+		data: [
+			// Front porch (as per the spec)
+			make_timing(16 * 5, true, false, false),
+			// Sync pulse (as per the spec)
+			make_timing(96 * 5, false, false, false),
+			// Back porch (shortened by two pixels because the
+			// video starts two pixels late)
+			make_timing(48 * 5, true, false, false),
+			// Visible portion. It also triggers the IRQ to start pixels moving.
+			make_timing(640 * 5, true, false, true),
+		],
+	},
+	vblank_porch_buffer: ScanlineTimingBuffer {
+		data: [
+			// Front porch
+			make_timing(16 * 5, true, false, false),
+			// Sync pulse
+			make_timing(96 * 5, false, false, false),
+			// Back porch
+			make_timing(48 * 5, true, false, false),
+			// 'visible' portion (but it's blank)
+			make_timing(640 * 5, true, false, false),
+		],
+	},
+	vblank_sync_buffer: ScanlineTimingBuffer {
+		data: [
+			// Front porch
+			make_timing(16 * 5, true, true, false),
+			// Sync pulse
+			make_timing(96 * 5, false, true, false),
+			// Back porch
+			make_timing(48 * 5, true, true, false),
+			// Visible portion (but it's blank)
+			make_timing(640 * 5, true, true, false),
+		],
+	},
+};
 
-// None
+/// Tracks which scanline we are currently on (for timing purposes => it goes 0..=524)
+static CURRENT_TIMING_LINE: AtomicU16 = AtomicU16::new(0);
+
+/// Tracks which scanline we are drawing (for pixel purposes => it goes -3..=479)
+static CURRENT_DISPLAY_LINE: AtomicI16 = AtomicI16::new(-3);
+
+/// Set to true when we are at the top of the frame (and in the v-blank)
+static NEW_FRAME: AtomicBool = AtomicBool::new(false);
+
+/// Somewhere to stash the DMA controller object, so the IRQ can find it
+static mut DMA_PERIPH: Option<pac::DMA> = None;
+
+/// DMA channel for the timing FIFO
+static mut TIMING_DMA_CHAN: usize = 0;
+
+/// DMA channel for the pixel FIFO
+static mut PIXEL_DMA_CHAN: usize = 1;
+
+/// A dummy value for the DMA to read whilst we wait for the visible portion to start
+static mut PIXEL_DATA_ZERO_BUFFER: [u32; 1] = [0xFFFF_FFFF];
+
+/// 12-bit pixels for the even scan-lines (0, 2, 4 ... 478). Defaults to black.
+static mut PIXEL_DATA_BUFFER_EVEN: LineBuffer = LineBuffer {
+	length: 320,
+	pixels: [0; 320],
+};
+
+/// 12-bit pixels for the odd scan-lines (1, 3, 5 ... 479). Defaults to white.
+static mut PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer {
+	length: 320,
+	pixels: [0x0FFF_0FFF; 320],
+};
 
 // -----------------------------------------------------------------------------
 // Functions
@@ -156,8 +252,6 @@ fn main() -> ! {
 
 	info!("Pins OK");
 
-	// Grab the LED pin
-	let mut led_pin = pins.led.into_push_pull_output();
 	// Give H-Sync, V-Sync and 12 RGB colour pins to PIO0 to output video
 	let _h_sync = pins.gpio0.into_mode::<hal::gpio::FunctionPio0>();
 	let _v_sync = pins.gpio1.into_mode::<hal::gpio::FunctionPio0>();
@@ -174,68 +268,66 @@ fn main() -> ! {
 	let _blue2 = pins.gpio12.into_mode::<hal::gpio::FunctionPio0>();
 	let _blue3 = pins.gpio13.into_mode::<hal::gpio::FunctionPio0>();
 
-	// Need to configure PIO0SM0 to run the timing loop. We post timing data
-	// and it busy-waits the appropriate amount of time and trigger the
-	// appropriate interrupts.
+	// Grab PIO0 and the state machines it contains
+	let (mut pio, sm0, sm1, _sm2, _sm3) = pac.PIO0.split(&mut pac.RESETS);
 
+	// This program runs the timing loop. We post timing data (i.e. the length
+	// of each period, along with what the H-Sync and V-Sync pins should do)
+	// and it sets the GPIO pins and busy-waits the appropriate amount of
+	// time. It also takes an extra 'instruction' which we can use to trigger
+	// the appropriate interrupts.
+	//
 	// Post <value:32> where value: <clock_cycles:14> <hsync:1> <vsync:1>
 	// <instruction:16>
 	//
-	// The SM will execute the instruction (you want to raise an IRQ at the
-	// start of the visible portion, to start another SM), set the H-Sync and
-	// V-Sync pins as desired, then wait the given number of clock cycles.
-
-	// Need to configure PIO0SM1 to run the pixel loop. It waits for an IRQ
-	// (posted by the timing loop) then pulls pixel data from the FIFO. We post
-	// the number of pixels for that line, then the pixel data.
-
-	// Post <num_pixels> <pixel1> <pixel2> ... <pixelN>; each <pixelX> maps to
-	// the RGB output pins. On a Neotron Pico, there are 12 (4 Red, 4 Green and
-	// 4 Blue) - so we set autopull to 12, and each value should be 12-bits long.
-
-	let (mut pio, sm0, sm1, _sm2, _sm3) = pac.PIO0.split(&mut pac.RESETS);
-
+	// The SM will execute the instruction (typically either a NOP or an IRQ),
+	// set the H-Sync and V-Sync pins as desired, then wait the given number
+	// of clock cycles.
+	//
+	// Note: autopull should be set to 32-bits, OSR is set to shift right.
 	let timing_program = pio_proc::pio!(
 		32,
 		"
 		.wrap_target
-		; Note autopull is set to 32-bits, OSR is set to shift right
-
-
-		; Step 1. Execute bottom 16-bits of OSR as an instruction. This take two cycles.
-		out exec, 16
-		; Step 2. Push next 2 bits of OSR into `pins`, to set H-Sync and V-Sync
+		; Step 1. Push next 2 bits of OSR into `pins`, to set H-Sync and V-Sync
 		out pins, 2
-		; Step 3. Push last 14 bits of OSR into X for the timing loop.
+		; Step 2. Push last 14 bits of OSR into X for the timing loop.
 		out x, 14
-		; Step 4. Make this section add up to exactly five clocks.
-		nop
+		; Step 3. Execute bottom 16-bits of OSR as an instruction. This take two cycles.
+		out exec, 16
 		loop0:
 			; Spin until X is zero
-			jmp x-- loop0 [4]
+			jmp x-- loop0
 		.wrap
 		"
 	);
 
+	// This is the video pixels program. It waits for an IRQ
+	// (posted by the timing loop) then pulls pixel data from the FIFO. We post
+	// the number of pixels for that line, then the pixel data.
+	//
+	// Post <num_pixels> <pixel1> <pixel2> ... <pixelN>; each <pixelX> maps to
+	// the RGB output pins. On a Neotron Pico, there are 12 (4 Red, 4 Green and
+	// 4 Blue) - so we set autopull to 12, and each value should be 12-bits long.
+	//
+	// Currently the FIFO support is disabled and it just puts out 640 fixed
+	// 12-bit pixels per scanline.
+	//
+	// Note autopull should be set to 12-bits, OSR is set to shift right.
 	let pixel_program = pio_proc::pio!(
 		32,
 		"
 		.wrap_target
 		; Wait for timing state machine to start visible line
 		wait 1 irq 0
-		; Transmit 32 stripes (and pad to a whole pixel)
-		set x, 31
-		nop
-		nop
-		nop
+		; Read the line length (in pixel-pairs)
+		out x, 32
 		loop1:
-			; Each stripe has 20 pixels. Each pixel is 5 clock cycles
-			; (converts 126 MHz to 25.2 MHz)
-			set pins 15 [24] ; 5 pixels (minus one for the instruction)
-			set pins 7 [24] ; 5 pixels (...)
-			set pins 15 [24] ; 5 pixels (...)
-			set pins 7 [23]  ; 5 pixels (minus two, for the inst. and the jump)
-			; Repeat until all stripes sent
+			; Write out first pixel - takes 5 clocks
+			out pins, 16 [4]
+			; Write out second pixel - takes 5 clocks (allowing one for the jump)
+			out pins, 16 [3]
+			; Repeat until all pixel pairs sent
 			jmp x-- loop1
 		; Clear all pins after visible section
 		mov pins null
@@ -243,8 +335,33 @@ fn main() -> ! {
 		"
 	);
 
+	// These two state machines run thus:
+	//
+	// | Clock | Timing PIOSM | Pixel PIOSM      |
+	// |:------|:-------------|:-----------------|
+	// | 1     | out pins, 2  | wait 1 irq 0     |
+	// | 2     | out x, 14    | wait 1 irq 0     |
+	// | 3     | out exec, 16 | wait 1 irq 0     |
+	// | 4     | <irq>        | wait 1 irq 0     |
+	// | 5     | jmp x--      | wait 1 irq 0     |
+	// | 6     |              | out x, 12        |
+	// | 7     |              | out pins, 16 [4] |
+	// | 8     |              | ..               |
+	// | 9     |              | ..               |
+	// | 10    |              | ..               |
+	// | 11    |              | ..               |
+	// | 12    |              | out pins, 16 [3] |
+	// | 13    |              | ..               |
+	// | 14    |              | ..               |
+	// | 15    |              | ..               |
+	// | 16    |              | jump x-- loop1   |
+	//
+	// Note: Credit to
+	// https://gregchadwick.co.uk/blog/playing-with-the-pico-pt5/ who had a
+	// very similar idea to me, but wrote it up far better than I ever could.
+
 	let timing_installed = pio.install(&timing_program.program).unwrap();
-	let (mut timing_sm, _, mut timing_fifo) = hal_pio::PIOBuilder::from_program(timing_installed)
+	let (mut timing_sm, _, timing_fifo) = hal_pio::PIOBuilder::from_program(timing_installed)
 		.buffers(hal_pio::Buffers::OnlyTx)
 		.out_pins(0, 2)
 		.autopull(true)
@@ -261,81 +378,278 @@ fn main() -> ! {
 	// each line differs by some number of 126 MHz clock cycles).
 
 	let pixels_installed = pio.install(&pixel_program.program).unwrap();
-	let (mut pixel_sm, _, _pixel_fifo) = hal_pio::PIOBuilder::from_program(pixels_installed)
+	let (mut pixel_sm, _, pixel_fifo) = hal_pio::PIOBuilder::from_program(pixels_installed)
 		.buffers(hal_pio::Buffers::OnlyTx)
 		.out_pins(2, 12)
-		.set_pins(10, 4)
 		.autopull(true)
 		.out_shift_direction(hal_pio::ShiftDirection::Right)
-		.pull_threshold(12)
+		.pull_threshold(32)
 		.build(sm1);
 	pixel_sm.set_pindirs((2..=13).map(|x| (x, hal_pio::PinDir::Output)));
+
+	unsafe {
+		// dma_channel_config timing_dma_chan_config = dma_channel_get_default_config(timing_dma_chan);
+
+		// Transfer 32 bits at a time
+		// channel_config_set_transfer_data_size(&timing_dma_chan_config, DMA_SIZE_32);
+		// Increment read to go through the sync timing command buffer
+		// channel_config_set_read_increment(&timing_dma_chan_config, true);
+		// Don't increment write so we always transfer to the PIO FIFO
+		// channel_config_set_write_increment(&timing_dma_chan_config, false);
+		// Transfer when there's space in the sync SM FIFO
+		// channel_config_set_dreq(&timing_dma_chan_config, pio_get_dreq(pio, sync_sm, true));
+		pac.DMA.ch[TIMING_DMA_CHAN].ch_ctrl_trig.modify(|_r, w| {
+			w.data_size().size_word();
+			w.incr_read().set_bit();
+			w.incr_write().clear_bit();
+			w.treq_sel().bits(timing_fifo.dreq_value());
+			w.chain_to().bits(TIMING_DMA_CHAN as u8);
+			w.ring_size().bits(0);
+			w.ring_sel().clear_bit();
+			w.bswap().clear_bit();
+			w.irq_quiet().clear_bit();
+			w.en().set_bit();
+			w.sniff_en().clear_bit();
+			w
+		});
+
+		// Setup the channel and set it going
+		// dma_channel_configure(
+		//     timing_dma_chan,
+		//     &timing_dma_chan_config,
+		//     &pio->txf[sync_sm], // Write to PIO TX FIFO
+		//     vblank_sync_buffer, // Begin with vblank sync line
+		//     4, // 4 command words in each sync buffer
+		//     false // Don't start yet
+		// );
+		// set_read_addr
+		pac.DMA.ch[TIMING_DMA_CHAN]
+			.ch_read_addr
+			.write(|w| w.bits(TIMING_BUFFER.vblank_sync_buffer.data.as_ptr() as usize as u32));
+		// set_write_addr
+		pac.DMA.ch[TIMING_DMA_CHAN]
+			.ch_write_addr
+			.write(|w| w.bits(timing_fifo.dma_address()));
+		// set_trans_count
+		pac.DMA.ch[TIMING_DMA_CHAN]
+			.ch_trans_count
+			.write(|w| w.bits(4));
+
+		// Transfer 32 bits at a time
+		// channel_config_set_transfer_data_size(&pixel_dma_chan_config, DMA_SIZE_32);
+		// Increment read to go through the pixel data buffer
+		// channel_config_set_read_increment(&pixel_dma_chan_config, false);
+		// Don't increment write so we always transfer to the PIO FIFO
+		// channel_config_set_write_increment(&pixel_dma_chan_config, false);
+		// Transfer when there's space in the pixel SM FIFO
+		// channel_config_set_dreq(&pixel_dma_chan_config, pio_get_dreq(pio, line_sm, true));
+		pac.DMA.ch[PIXEL_DMA_CHAN].ch_ctrl_trig.modify(|_r, w| {
+			w.data_size().size_word();
+			w.incr_read().clear_bit();
+			w.incr_write().clear_bit();
+			w.treq_sel().bits(pixel_fifo.dreq_value());
+			w.chain_to().bits(PIXEL_DMA_CHAN as u8);
+			w.ring_size().bits(0);
+			w.ring_sel().clear_bit();
+			w.bswap().clear_bit();
+			w.irq_quiet().clear_bit();
+			w.en().set_bit();
+			w.sniff_en().clear_bit();
+			w
+		});
+		// Setup the channel and set it going
+		// dma_channel_configure(
+		//     pixel_dma_chan,
+		//     &pixel_dma_chan_config,
+		//     &pio->txf[line_sm], // Write to PIO TX FIFO
+		//     &line_data_zero_buffer, // First line output will be white line
+		//     160, // Transfer complete contents of `line_data_buffer`
+		//     false // Don't start yet
+		// );
+		pac.DMA.ch[PIXEL_DMA_CHAN]
+			.ch_read_addr
+			.write(|w| w.bits(PIXEL_DATA_ZERO_BUFFER.as_ptr() as usize as u32));
+		// set_write_addr
+		pac.DMA.ch[PIXEL_DMA_CHAN]
+			.ch_write_addr
+			.write(|w| w.bits(pixel_fifo.dma_address()));
+		// set_trans_count
+		pac.DMA.ch[PIXEL_DMA_CHAN]
+			.ch_trans_count
+			.write(|w| w.bits(321));
+		// Setup interrupt handler for line and sync DMA channels
+		//dma_channel_set_irq0_enabled(pixel_dma_chan, true);
+		//dma_channel_set_irq0_enabled(timing_dma_chan, true);
+		pac.DMA.inte0.modify(|_r, w| {
+			w.inte0()
+				.bits((1 << PIXEL_DMA_CHAN) | (1 << TIMING_DMA_CHAN))
+		});
+		//irq_set_enabled(DMA_IRQ_0, true);
+		pac::NVIC::unpend(pac::Interrupt::DMA_IRQ_0);
+		pac::NVIC::unmask(pac::Interrupt::DMA_IRQ_0);
+
+		pac.DMA
+			.multi_chan_trigger
+			.write(|w| w.bits(1 << PIXEL_DMA_CHAN));
+		pac.DMA
+			.multi_chan_trigger
+			.write(|w| w.bits(1 << TIMING_DMA_CHAN));
+
+		DMA_PERIPH = Some(pac.DMA);
+	}
+
+	info!("DMA set-up complete");
 
 	timing_sm.start();
 	pixel_sm.start();
 
-	let mut x: u8 = 0;
+	info!("State Machines running");
+
 	loop {
-		// Flash a pin every 60 frames, or once a second
-		x = x.wrapping_add(1);
-		if x == 60 {
-			led_pin.set_high().unwrap();
-			x = 0;
+		cortex_m::asm::wfi();
+		info!("Line is {}/480, {}/525", CURRENT_DISPLAY_LINE.load(Ordering::Relaxed), CURRENT_TIMING_LINE.load(Ordering::Relaxed));
+	}
+}
+
+const fn make_timing(period: u32, hsync: bool, vsync: bool, raise_irq: bool) -> u32 {
+	let command = if raise_irq {
+		// This command sets IRQ 0. It is the same as:
+		//
+		// ```
+		// pio::InstructionOperands::IRQ {
+		// 	clear: false,
+		// 	wait: false,
+		// 	index: 0,
+		// 	relative: false,
+		// }.encode()
+		// ```
+		//
+		// Unfortunately encoding this isn't a const-fn, so we cheat:
+		0xc000
+	} else {
+		// This command is a no-op (it moves Y into Y)
+		//
+		// ```
+		// pio::InstructionOperands::MOV {
+		// 	destination: pio::MovDestination::Y,
+		// 	op: pio::MovOperation::None,
+		// 	source: pio::MovSource::Y,
+		// }.encode()
+		// ```
+		//
+		// Unfortunately encoding this isn't a const-fn, so we cheat:
+		0xa042
+	};
+	let mut value: u32 = 0;
+	if hsync {
+		value |= 1 << 0;
+	}
+	if vsync {
+		value |= 1 << 1;
+	}
+	value |= (period - 6) << 2;
+	value | command << 16
+}
+
+#[interrupt]
+unsafe fn DMA_IRQ_0() {
+	let dma: &mut pac::DMA = DMA_PERIPH.as_mut().unwrap();
+	let status = dma.ints0.read().bits();
+
+	info!("IRQ!");
+
+	// Check if this is a DMA interrupt for the sync DMA channel
+	let timing_dma_chan_irq = (status & (1 << TIMING_DMA_CHAN)) != 0;
+
+	// Check if this is a DMA interrupt for the line DMA channel
+	let pixel_dma_chan_irq = (status & (1 << PIXEL_DMA_CHAN)) != 0;
+
+	if timing_dma_chan_irq {
+		// clear timing_dma_chan bit in DMA interrupt bitfield
+		dma.ints0.write(|w| w.bits(1 << TIMING_DMA_CHAN));
+
+		let old_timing_line = CURRENT_TIMING_LINE.load(Ordering::Relaxed);
+		let timing_line = if old_timing_line < 524 {
+			old_timing_line + 1
 		} else {
-			led_pin.set_low().unwrap();
-		}
-		// This should all be moved off into an IRQ so it doesn't block the main thread
-		for scanline in 1..=525 {
-			// 640 x 480, negative h-sync - four periods per video line
+			0
+		};
+		CURRENT_TIMING_LINE.store(timing_line, Ordering::Relaxed);
 
-			let need_vsync = scanline >= 490 && scanline <= 491;
-			let is_visible = scanline <= 480;
+		info!("Sync {}", timing_line);
 
-			// This if the front porch
-			load_timing(&mut timing_fifo, 16, true, need_vsync, false);
-			// This is the sync pulse
-			load_timing(&mut timing_fifo, 96, false, need_vsync, false);
-			// This is the back porch
-			load_timing(&mut timing_fifo, 48, true, need_vsync, false);
-			// This is the visible portion - trigger the IRQ to start pixels moving
-			load_timing(&mut timing_fifo, 640, true, need_vsync, is_visible);
+		let buffer = if (timing_line == 0) || (timing_line == 1) {
+			// V-Sync pulse
+			&TIMING_BUFFER.vblank_sync_buffer
+		} else if timing_line < 32 {
+			// VGA back porch following VGA sync pulse
+			&TIMING_BUFFER.vblank_porch_buffer
+		} else if timing_line < 515 {
+			// Visible lines (including three lines of the back porch we treat
+			// as visible to get ourselves up and running)
+			&TIMING_BUFFER.visible_line
+		} else {
+			// Front porch
+			&TIMING_BUFFER.vblank_porch_buffer
+		};
+		dma.ch[TIMING_DMA_CHAN]
+			.ch_al3_read_addr_trig
+			.write(|w| w.bits(buffer as *const _ as usize as u32))
+	}
+
+	if pixel_dma_chan_irq {
+		dma.ints0.write(|w| w.bits(1 << TIMING_DMA_CHAN));
+
+		let display_line = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
+
+		info!("Line {}", display_line);
+
+		if display_line == 479 {
+			// Set ourselves three lines early
+			CURRENT_DISPLAY_LINE.store(-3, Ordering::Relaxed);
+			NEW_FRAME.store(true, Ordering::Relaxed);
+			// Setup Line DMA channel to read zero lines for dummy lines and set it going.
+			// Disable read increment so just read zero over and over for dummy lines.
+			// DMA won't actually begin until line PIO starts consuming it in the next
+			// frame.
+			dma.ch[PIXEL_DMA_CHAN]
+				.ch_ctrl_trig
+				.modify(|_r, w| w.incr_read().clear_bit());
+			dma.ch[PIXEL_DMA_CHAN]
+				.ch_al3_read_addr_trig
+				.write(|w| w.bits(PIXEL_DATA_ZERO_BUFFER.as_ptr() as usize as u32))
+		} else {
+			let display_line = display_line + 1;
+			CURRENT_DISPLAY_LINE.store(display_line, Ordering::Relaxed);
+
+			if display_line == 0 {
+				// Our first line - turn on read address increment on the DMA
+				dma.ch[PIXEL_DMA_CHAN]
+					.ch_ctrl_trig
+					.modify(|_r, w| w.incr_read().set_bit());
+			}
+
+			if display_line < 0 {
+				dma.ch[PIXEL_DMA_CHAN]
+					.ch_al3_read_addr_trig
+					.write(|w| w.bits(PIXEL_DATA_ZERO_BUFFER.as_ptr() as usize as u32))
+			} else if (display_line & 1) == 1 {
+				dma.ch[PIXEL_DMA_CHAN]
+					.ch_al3_read_addr_trig
+					.write(|w| w.bits(PIXEL_DATA_BUFFER_ODD.as_ptr()))
+			} else {
+				dma.ch[PIXEL_DMA_CHAN]
+					.ch_al3_read_addr_trig
+					.write(|w| w.bits(PIXEL_DATA_BUFFER_EVEN.as_ptr()))
+			}
 		}
 	}
 }
 
-fn load_timing(
-	fifo: &mut hal_pio::Tx<(pac::PIO0, hal_pio::SM0)>,
-	period: u16,
-	hsync: bool,
-	vsync: bool,
-	raise_irq: bool,
-) {
-	let command = if raise_irq {
-		// This command sets IRQ 0
-		pio::InstructionOperands::IRQ {
-			clear: false,
-			wait: false,
-			index: 0,
-			relative: false,
-		}
-	} else {
-		// This command is a no-op (it moves Y into Y)
-		pio::InstructionOperands::MOV {
-			destination: pio::MovDestination::Y,
-			op: pio::MovOperation::None,
-			source: pio::MovSource::Y,
-		}
-	};
-	let mut value: u32 = u32::from(command.encode());
-	if hsync {
-		value |= 1 << 16;
-	}
-	if vsync {
-		value |= 1 << 17;
-	}
-	value |= (u32::from(period) - 2) << 18;
-	while !fifo.write(value) {
-		// Spin?
+impl LineBuffer {
+	/// Convert the line buffer to a 32-bit address that the DMA engine understands.
+	fn as_ptr(&self) -> u32 {
+		self as *const _ as usize as u32
 	}
 }
 
