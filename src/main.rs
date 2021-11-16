@@ -55,6 +55,8 @@ use pico::{
 	},
 };
 
+mod freebsd_cp850;
+
 // -----------------------------------------------------------------------------
 // Types
 // -----------------------------------------------------------------------------
@@ -83,7 +85,7 @@ const NUM_PIXELS_PER_LINE: usize = 640;
 const NUM_PIXEL_PAIRS_PER_LINE: usize = NUM_PIXELS_PER_LINE / 2;
 
 /// Number of lines on screen.
-const NUM_LINES: u16 = 480;
+const NUM_LINES: u16 = 400;
 
 /// Index of the last line
 const LAST_LINE: u16 = NUM_LINES - 1;
@@ -92,6 +94,35 @@ const LAST_LINE: u16 = NUM_LINES - 1;
 struct LineBuffer {
 	pixels: [u32; NUM_PIXEL_PAIRS_PER_LINE + 1],
 }
+
+
+static mut CHAR_ARRAY: [u8; 2000] =
+*b"\
+\xDA\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xBF\
+\xB3Neotron Pico Booting                                                          \xB3\
+\xB3                                                                              \xB3\
+\xB3                                                                              \xB3\
+\xB3                                                                              \xB3\
+\xB3                                                                              \xB3\
+\xB3         \xDb\xDb\xDb\xBB\xB2\xB2\xDb\xDb\xBB\xDb\xDb\xDb\xDb\xDb\xDb\xDb\xBB\xB2\xDb\xDb\xDb\xDb\xDb\xBB\xB2\xDb\xDb\xDb\xDb\xDb\xDb\xDb\xDb\xBB\xDb\xDb\xDb\xDb\xDb\xDb\xBB\xB2\xB2\xDb\xDb\xDb\xDb\xDb\xBB\xB2\xDb\xDb\xDb\xBB\xB2\xB2\xDb\xDb\xBB          \xB3\
+\xB3         \xDb\xDb\xDb\xDb\xBB\xB2\xDb\xDb\xBA\xDb\xDb\xC9\xCD\xCD\xCD\xCD\xBC\xDb\xDb\xC9\xCD\xCD\xDb\xDb\xBB\xC8\xCD\xCD\xDb\xDb\xC9\xCD\xCD\xBC\xDb\xDb\xC9\xCD\xCD\xDb\xDb\xBB\xDb\xDb\xC9\xCD\xCD\xDb\xDb\xBB\xDb\xDb\xDb\xDb\xBB\xB2\xDb\xDb\xBA          \xB3\
+\xB3         \xDb\xDb\xC9\xDb\xDb\xBB\xDb\xDb\xBA\xDb\xDb\xDb\xDb\xDb\xBB\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xB2\xDb\xDb\xDb\xDb\xDb\xDb\xC9\xBC\xDb\xDb\xBA\xB2\xB2\xDb\xDb\xBA\xDb\xDb\xC9\xDb\xDb\xBB\xDb\xDb\xBA          \xB3\
+\xB3         \xDb\xDb\xBA\xC8\xDb\xDb\xDb\xDb\xBA\xDb\xDb\xC9\xCD\xCD\xBC\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xB2\xDb\xDb\xC9\xCD\xCD\xDb\xDb\xBB\xDb\xDb\xBA\xB2\xB2\xDb\xDb\xBA\xDb\xDb\xBA\xC8\xDb\xDb\xDb\xDb\xBA          \xB3\
+\xB3         \xDb\xDb\xBA\xB2\xC8\xDb\xDb\xDb\xBA\xDb\xDb\xDb\xDb\xDb\xDb\xDb\xBB\xC8\xDb\xDb\xDb\xDb\xDb\xC9\xBC\xB2\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xDb\xDb\xBA\xC8\xDb\xDb\xDb\xDb\xDb\xC9\xBC\xDb\xDb\xBA\xB2\xC8\xDb\xDb\xDb\xBA          \xB3\
+\xB3                                                                              \xB3\
+\xB3                                                                              \xB3\
+\xB3                                                                              \xB3\
+\xB3                                                                              \xB3\
+\xB3                                                                              \xB3\
+\xB3                                                                              \xB3\
+\xB3                                                                              \xB3\
+\xB3                                                                              \xB3\
+\xB3                                                                              \xB3\
+\xB3                                                                              \xB3\
+\xB3                                                                              \xB3\
+\xB3                                                                              \xB3\
+\xB3This is the end                                                               \xB3\
+\xC0\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xD9";
 
 // -----------------------------------------------------------------------------
 // Static and Const Data
@@ -156,7 +187,7 @@ static TIMING_BUFFER: TimingBuffer = TimingBuffer {
 	},
 };
 
-/// Tracks which scanline we are currently on (for timing purposes => it goes 0..=524)
+/// Tracks which scanline we are currently on (for timing purposes => it goes 0..=449)
 static CURRENT_TIMING_LINE: AtomicU16 = AtomicU16::new(0);
 
 /// Tracks which scanline we are currently on (for pixel purposes => it goes 0..NUM_LINES)
@@ -531,23 +562,35 @@ fn main() -> ! {
 					&mut PIXEL_DATA_BUFFER_EVEN
 				}
 			};
-			let qtr = NUM_PIXEL_PAIRS_PER_LINE / 4;
-			let red = ((frame_count + (current_line as u32)) & 0x0F) * 0x0001_0001;
-			for x in 0..qtr {
-				px_buf.pixels[x + 1] = 0x0FF0_0FF0 + red;
-			}
-			for x in qtr..(2 * qtr) {
-				px_buf.pixels[x + 1] = 0x0F00_0F00 + red;
-			}
-			for x in (2 * qtr)..(3 * qtr) {
-				px_buf.pixels[x + 1] = 0x00F0_00F0 + red;
-			}
-			for x in (3 * qtr)..(4 * qtr) {
-				px_buf.pixels[x + 1] = 0x0000_0000 + red;
+
+			let text_row = (current_line / 16) as usize;
+			let font_row = (current_line % 16) as usize;
+			let text_row_offset = text_row * 80;
+
+			if text_row < 25 {
+				let row_slice = unsafe { &CHAR_ARRAY[text_row_offset..text_row_offset+80] };
+				let font_ptr = unsafe { freebsd_cp850::FONT_DATA.as_ptr().add(font_row) };
+
+				let px_ptr = px_buf.pixels[1..].as_mut_ptr();
+				let mut px_idx = 0;
+				for ch in row_slice.iter() {
+					let index = (*ch as isize) * 16;
+					let mono_pixels = unsafe { *font_ptr.offset(index) } as usize;
+					// Convert from mono to RGB white
+					unsafe {
+						core::ptr::write_volatile(px_ptr.offset(px_idx + 0), LOOKUP[(mono_pixels >> 6) & 3]);
+						core::ptr::write_volatile(px_ptr.offset(px_idx + 1), LOOKUP[(mono_pixels >> 4) & 3]);
+						core::ptr::write_volatile(px_ptr.offset(px_idx + 2), LOOKUP[(mono_pixels >> 2) & 3]);
+						core::ptr::write_volatile(px_ptr.offset(px_idx + 3), LOOKUP[(mono_pixels >> 0) & 3]);
+					}
+					px_idx += 4;
+				}
 			}
 		}
 	}
 }
+
+static LOOKUP: [u32; 4] = [ 0x0F00_0F00, 0x00FF_0F00, 0x0F00_00FF, 0x00FF_00FF ];
 
 const fn make_timing(period: u32, hsync: bool, vsync: bool, raise_irq: bool) -> u32 {
 	let command = if raise_irq {
@@ -610,8 +653,8 @@ unsafe fn DMA_IRQ_0() {
 		dma.ints0.write(|w| w.bits(1 << TIMING_DMA_CHAN));
 
 		let old_timing_line = CURRENT_TIMING_LINE.load(Ordering::Relaxed);
-		let timing_line = if old_timing_line == 524 {
-			// 524 -> 0
+		let timing_line = if old_timing_line == 449 {
+			// 449 -> 0
 			0
 		} else {
 			// n -> n + 1
@@ -624,15 +667,15 @@ unsafe fn DMA_IRQ_0() {
 				// Visible lines
 				&TIMING_BUFFER.visible_line
 			}
-			NUM_LINES..=489 => {
+			NUM_LINES..=411 => {
 				// VGA front porch before VGA sync pulse
 				&TIMING_BUFFER.vblank_porch_buffer
 			}
-			490..=491 => {
+			412..=415 => {
 				// Sync pulse
 				&TIMING_BUFFER.vblank_sync_buffer
 			}
-			492.. => {
+			416.. => {
 				// VGA back porch following VGA sync pulse
 				&TIMING_BUFFER.vblank_porch_buffer
 			}
