@@ -70,10 +70,11 @@ struct TimingBuffer {
 	vblank_sync_buffer: ScanlineTimingBuffer,
 }
 
+const NUM_PIXEL_PAIRS: usize = 32;
+
 #[repr(C, align(16))]
 struct LineBuffer {
-	length: u32,
-	pixels: [u32; 320],
+	pixels: [u32; NUM_PIXEL_PAIRS + 1],
 }
 
 // -----------------------------------------------------------------------------
@@ -162,14 +163,16 @@ static mut PIXEL_DATA_ZERO_BUFFER: [u32; 1] = [0xFFFF_FFFF];
 
 /// 12-bit pixels for the even scan-lines (0, 2, 4 ... 478). Defaults to black.
 static mut PIXEL_DATA_BUFFER_EVEN: LineBuffer = LineBuffer {
-	length: 320,
-	pixels: [0; 320],
+	// The length is one less than the number of pixel pairs because of the
+	// way the jmp works in the PIO program (it's a do-while loop).
+	pixels: [0; NUM_PIXEL_PAIRS + 1],
 };
 
 /// 12-bit pixels for the odd scan-lines (1, 3, 5 ... 479). Defaults to white.
 static mut PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer {
-	length: 320,
-	pixels: [0x0FFF_0FFF; 320],
+	// The length is one less than the number of pixel pairs because of the
+	// way the jmp works in the PIO program (it's a do-while loop).
+	pixels: [0; NUM_PIXEL_PAIRS + 1],
 };
 
 // -----------------------------------------------------------------------------
@@ -186,6 +189,18 @@ fn main() -> ! {
 	let mut pac = pac::Peripherals::take().unwrap();
 	// Grab the singleton containing all the generic Cortex-M peripherals
 	let core = pac::CorePeripherals::take().unwrap();
+
+	unsafe {
+		PIXEL_DATA_BUFFER_EVEN.pixels[0] = NUM_PIXEL_PAIRS as u32 - 1;
+		for px in PIXEL_DATA_BUFFER_EVEN.pixels[1..].iter_mut() {
+			*px = 0x0FFF_0000;
+		}
+
+		PIXEL_DATA_BUFFER_ODD.pixels[0] = NUM_PIXEL_PAIRS as u32 - 1;
+		for px in PIXEL_DATA_BUFFER_ODD.pixels[1..].iter_mut() {
+			*px = 0x0000_0FFF;
+		}
+	}
 
 	// Needed by the clock setup
 	let mut watchdog = hal::watchdog::Watchdog::new(pac.WATCHDOG);
@@ -321,12 +336,13 @@ fn main() -> ! {
 		; Wait for timing state machine to start visible line
 		wait 1 irq 0
 		; Read the line length (in pixel-pairs)
-		out x, 32
+		; out x, 32
+		set x, 31
 		loop1:
-			; Write out first pixel - takes 5 clocks
-			out pins, 16 [4]
-			; Write out second pixel - takes 5 clocks (allowing one for the jump)
-			out pins, 16 [3]
+			; Write out first pixel - takes 5 clocks per pixel (4 pixels)
+			out pins, 16 [19]
+			; Write out second pixel - takes 5 clocks per pixel (4 pixels, allowing one for the jump)
+			out pins, 16 [18]
 			; Repeat until all pixel pairs sent
 			jmp x-- loop1
 		; Clear all pins after visible section
@@ -479,7 +495,8 @@ fn main() -> ! {
 		// set_trans_count
 		pac.DMA.ch[PIXEL_DMA_CHAN]
 			.ch_trans_count
-			.write(|w| w.bits(321));
+			.write(|w| w.bits(NUM_PIXEL_PAIRS as u32));
+
 		// Setup interrupt handler for line and sync DMA channels
 		//dma_channel_set_irq0_enabled(pixel_dma_chan, true);
 		//dma_channel_set_irq0_enabled(timing_dma_chan, true);
@@ -488,15 +505,6 @@ fn main() -> ! {
 				.bits((1 << PIXEL_DMA_CHAN) | (1 << TIMING_DMA_CHAN))
 		});
 
-		pac.DMA
-			.multi_chan_trigger
-			.write(|w| w.bits(1 << PIXEL_DMA_CHAN));
-		pac.DMA
-			.multi_chan_trigger
-			.write(|w| w.bits(1 << TIMING_DMA_CHAN));
-
-		info!("DMA enabled");
-
 		DMA_PERIPH = Some(pac.DMA);
 
 		//irq_set_enabled(DMA_IRQ_0, true);
@@ -504,6 +512,14 @@ fn main() -> ! {
 		pac::NVIC::unmask(pac::Interrupt::DMA_IRQ_0);
 
 		info!("IRQs enabled");
+
+		DMA_PERIPH
+			.as_mut()
+			.unwrap()
+			.multi_chan_trigger
+			.write(|w| w.bits((1 << PIXEL_DMA_CHAN) | (1 << TIMING_DMA_CHAN)));
+
+		info!("DMA enabled");
 	}
 
 	info!("DMA set-up complete");
@@ -591,8 +607,6 @@ unsafe fn DMA_IRQ_0() {
 		};
 		CURRENT_TIMING_LINE.store(timing_line, Ordering::Relaxed);
 
-		info!("Sync {}", timing_line);
-
 		let buffer = if (timing_line == 0) || (timing_line == 1) {
 			// V-Sync pulse
 			&TIMING_BUFFER.vblank_sync_buffer
@@ -615,11 +629,9 @@ unsafe fn DMA_IRQ_0() {
 	if pixel_dma_chan_irq {
 		dma.ints0.write(|w| w.bits(1 << PIXEL_DMA_CHAN));
 
-		let display_line = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
+		let old_display_line = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
 
-		info!("Line {}", display_line);
-
-		if display_line == 479 {
+		if old_display_line == 479 {
 			// Set ourselves three lines early
 			CURRENT_DISPLAY_LINE.store(-3, Ordering::Relaxed);
 			NEW_FRAME.store(true, Ordering::Relaxed);
@@ -634,25 +646,29 @@ unsafe fn DMA_IRQ_0() {
 				.ch_al3_read_addr_trig
 				.write(|w| w.bits(PIXEL_DATA_ZERO_BUFFER.as_ptr() as usize as u32))
 		} else {
-			let display_line = display_line + 1;
+			let display_line = old_display_line + 1;
 			CURRENT_DISPLAY_LINE.store(display_line, Ordering::Relaxed);
 
 			if display_line == 0 {
-				// Our first line - turn on read address increment on the DMA
+				// Our first visible line - turn on read address increment on the DMA
 				dma.ch[PIXEL_DMA_CHAN]
 					.ch_ctrl_trig
 					.modify(|_r, w| w.incr_read().set_bit());
 			}
 
+			// Set the DMA load address according to which line we are on
 			if display_line < 0 {
+				// Invisible line (last part of the front-porch)
 				dma.ch[PIXEL_DMA_CHAN]
 					.ch_al3_read_addr_trig
 					.write(|w| w.bits(PIXEL_DATA_ZERO_BUFFER.as_ptr() as usize as u32))
-			} else if (display_line & 1) == 1 {
+			} else if (display_line & 4) == 4 {
+				// Odd visible line
 				dma.ch[PIXEL_DMA_CHAN]
 					.ch_al3_read_addr_trig
 					.write(|w| w.bits(PIXEL_DATA_BUFFER_ODD.as_ptr()))
 			} else {
+				// Even visible line
 				dma.ch[PIXEL_DMA_CHAN]
 					.ch_al3_read_addr_trig
 					.write(|w| w.bits(PIXEL_DATA_BUFFER_EVEN.as_ptr()))
@@ -664,7 +680,7 @@ unsafe fn DMA_IRQ_0() {
 impl LineBuffer {
 	/// Convert the line buffer to a 32-bit address that the DMA engine understands.
 	fn as_ptr(&self) -> u32 {
-		self as *const _ as usize as u32
+		self.pixels.as_ptr() as usize as u32 + 4
 	}
 }
 
