@@ -37,7 +37,7 @@
 // Imports
 // -----------------------------------------------------------------------------
 
-use core::sync::atomic::{AtomicBool, AtomicI16, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicU16, Ordering};
 use cortex_m_rt::entry;
 use defmt::*;
 use defmt_rtt as _;
@@ -143,11 +143,8 @@ static TIMING_BUFFER: TimingBuffer = TimingBuffer {
 /// Tracks which scanline we are currently on (for timing purposes => it goes 0..=524)
 static CURRENT_TIMING_LINE: AtomicU16 = AtomicU16::new(0);
 
-/// Tracks which scanline we are drawing (for pixel purposes => it goes -3..=479)
-static CURRENT_DISPLAY_LINE: AtomicI16 = AtomicI16::new(-3);
-
-/// Set to true when we are at the top of the frame (and in the v-blank)
-static NEW_FRAME: AtomicBool = AtomicBool::new(false);
+/// Tracks which scanline we are currently on (for pixel purposes => it goes 0..=479)
+static CURRENT_DISPLAY_LINE: AtomicU16 = AtomicU16::new(0);
 
 /// Somewhere to stash the DMA controller object, so the IRQ can find it
 static mut DMA_PERIPH: Option<pac::DMA> = None;
@@ -157,9 +154,6 @@ static mut TIMING_DMA_CHAN: usize = 0;
 
 /// DMA channel for the pixel FIFO
 static mut PIXEL_DMA_CHAN: usize = 1;
-
-/// A dummy value for the DMA to read whilst we wait for the visible portion to start
-static mut PIXEL_DATA_ZERO_BUFFER: [u32; 1] = [0xFFFF_FFFF];
 
 /// 12-bit pixels for the even scan-lines (0, 2, 4 ... 478). Defaults to black.
 static mut PIXEL_DATA_BUFFER_EVEN: LineBuffer = LineBuffer {
@@ -190,17 +184,9 @@ fn main() -> ! {
 	// Grab the singleton containing all the generic Cortex-M peripherals
 	let core = pac::CorePeripherals::take().unwrap();
 
-	unsafe {
-		PIXEL_DATA_BUFFER_EVEN.pixels[0] = NUM_PIXEL_PAIRS as u32 - 1;
-		for px in PIXEL_DATA_BUFFER_EVEN.pixels[1..].iter_mut() {
-			*px = 0x0FFF_0000;
-		}
-
-		PIXEL_DATA_BUFFER_ODD.pixels[0] = NUM_PIXEL_PAIRS as u32 - 1;
-		for px in PIXEL_DATA_BUFFER_ODD.pixels[1..].iter_mut() {
-			*px = 0x0000_0FFF;
-		}
-	}
+	// Reset the DMA engine
+	pac.RESETS.reset.modify(|_, w| w.dma().clear_bit());
+	while pac.RESETS.reset_done.read().dma().bit_is_clear() {}
 
 	// Needed by the clock setup
 	let mut watchdog = hal::watchdog::Watchdog::new(pac.WATCHDOG);
@@ -283,6 +269,18 @@ fn main() -> ! {
 	let _blue2 = pins.gpio12.into_mode::<hal::gpio::FunctionPio0>();
 	let _blue3 = pins.gpio13.into_mode::<hal::gpio::FunctionPio0>();
 
+	// Set up a checker board in the line buffers
+	unsafe {
+		PIXEL_DATA_BUFFER_EVEN.pixels[0] = NUM_PIXEL_PAIRS as u32 - 1;
+		for px in PIXEL_DATA_BUFFER_EVEN.pixels[1..].iter_mut() {
+			*px = 0x0FFF_0000;
+		}
+		PIXEL_DATA_BUFFER_ODD.pixels[0] = NUM_PIXEL_PAIRS as u32 - 1;
+		for px in PIXEL_DATA_BUFFER_ODD.pixels[1..].iter_mut() {
+			*px = 0x0000_0FFF;
+		}
+	}
+
 	// Grab PIO0 and the state machines it contains
 	let (mut pio, sm0, sm1, _sm2, _sm3) = pac.PIO0.split(&mut pac.RESETS);
 
@@ -325,10 +323,10 @@ fn main() -> ! {
 	// the RGB output pins. On a Neotron Pico, there are 12 (4 Red, 4 Green and
 	// 4 Blue) - so we set autopull to 12, and each value should be 12-bits long.
 	//
-	// Currently the FIFO support is disabled and it just puts out 640 fixed
-	// 12-bit pixels per scanline.
+	// Currently the FIFO supplies only the pixels, not the length value. When
+	// we read the length from the FIFO as well, all hell breaks loose.
 	//
-	// Note autopull should be set to 12-bits, OSR is set to shift right.
+	// Note autopull should be set to 32-bits, OSR is set to shift right.
 	let pixel_program = pio_proc::pio!(
 		32,
 		"
@@ -336,8 +334,8 @@ fn main() -> ! {
 		; Wait for timing state machine to start visible line
 		wait 1 irq 0
 		; Read the line length (in pixel-pairs)
-		; out x, 32
-		set x, 31
+		; out x, 32 ; BROKEN
+		set x, 31 ; Use fixed value instead
 		loop1:
 			; Write out first pixel - takes 5 clocks per pixel (4 pixels)
 			out pins, 16 [19]
@@ -360,7 +358,7 @@ fn main() -> ! {
 	// | 3     | out exec, 16 | wait 1 irq 0     |
 	// | 4     | <irq>        | wait 1 irq 0     |
 	// | 5     | jmp x--      | wait 1 irq 0     |
-	// | 6     |              | out x, 12        |
+	// | 6     |              | set x, 31        |
 	// | 7     |              | out pins, 16 [4] |
 	// | 8     |              | ..               |
 	// | 9     |              | ..               |
@@ -404,20 +402,10 @@ fn main() -> ! {
 	pixel_sm.set_pindirs((2..=13).map(|x| (x, hal_pio::PinDir::Output)));
 
 	unsafe {
-		pac.RESETS.reset.modify(|_, w| w.dma().clear_bit());
-		while pac.RESETS.reset_done.read().dma().bit_is_clear() {}
-
-		// dma_channel_config timing_dma_chan_config = dma_channel_get_default_config(timing_dma_chan);
-
-		// Transfer 32 bits at a time
-		// channel_config_set_transfer_data_size(&timing_dma_chan_config, DMA_SIZE_32);
-		// Increment read to go through the sync timing command buffer
-		// channel_config_set_read_increment(&timing_dma_chan_config, true);
-		// Don't increment write so we always transfer to the PIO FIFO
-		// channel_config_set_write_increment(&timing_dma_chan_config, false);
-		// Transfer when there's space in the sync SM FIFO
-		// channel_config_set_dreq(&timing_dma_chan_config, pio_get_dreq(pio, sync_sm, true));
-		pac.DMA.ch[TIMING_DMA_CHAN].ch_ctrl_trig.modify(|_r, w| {
+		// Read from the timing buffer and write to the timing FIFO. We get an
+		// IRQ when the transfer is complete (i.e. when line has been fully
+		// loaded).
+		pac.DMA.ch[TIMING_DMA_CHAN].ch_ctrl_trig.write(|w| {
 			w.data_size().size_word();
 			w.incr_read().set_bit();
 			w.incr_write().clear_bit();
@@ -431,40 +419,20 @@ fn main() -> ! {
 			w.sniff_en().clear_bit();
 			w
 		});
-
-		// Setup the channel and set it going
-		// dma_channel_configure(
-		//     timing_dma_chan,
-		//     &timing_dma_chan_config,
-		//     &pio->txf[sync_sm], // Write to PIO TX FIFO
-		//     vblank_sync_buffer, // Begin with vblank sync line
-		//     4, // 4 command words in each sync buffer
-		//     false // Don't start yet
-		// );
-		// set_read_addr
 		pac.DMA.ch[TIMING_DMA_CHAN]
 			.ch_read_addr
-			.write(|w| w.bits(TIMING_BUFFER.vblank_sync_buffer.data.as_ptr() as usize as u32));
-		// set_write_addr
+			.write(|w| w.bits(TIMING_BUFFER.visible_line.data.as_ptr() as usize as u32));
 		pac.DMA.ch[TIMING_DMA_CHAN]
 			.ch_write_addr
 			.write(|w| w.bits(timing_fifo.dma_address()));
-		// set_trans_count
 		pac.DMA.ch[TIMING_DMA_CHAN]
 			.ch_trans_count
 			.write(|w| w.bits(4));
 
-		// Transfer 32 bits at a time
-		// channel_config_set_transfer_data_size(&pixel_dma_chan_config, DMA_SIZE_32);
-		// Increment read to go through the pixel data buffer
-		// channel_config_set_read_increment(&pixel_dma_chan_config, false);
-		// Don't increment write so we always transfer to the PIO FIFO
-		// channel_config_set_write_increment(&pixel_dma_chan_config, false);
-		// Transfer when there's space in the pixel SM FIFO
-		// channel_config_set_dreq(&pixel_dma_chan_config, pio_get_dreq(pio, line_sm, true));
-		pac.DMA.ch[PIXEL_DMA_CHAN].ch_ctrl_trig.modify(|_r, w| {
+		// Read from the pixel buffer (even first) and write to the pixel FIFO
+		pac.DMA.ch[PIXEL_DMA_CHAN].ch_ctrl_trig.write(|w| {
 			w.data_size().size_word();
-			w.incr_read().clear_bit();
+			w.incr_read().set_bit();
 			w.incr_write().clear_bit();
 			w.treq_sel().bits(pixel_fifo.dreq_value());
 			w.chain_to().bits(PIXEL_DMA_CHAN as u8);
@@ -476,43 +444,30 @@ fn main() -> ! {
 			w.sniff_en().clear_bit();
 			w
 		});
-		// Setup the channel and set it going
-		// dma_channel_configure(
-		//     pixel_dma_chan,
-		//     &pixel_dma_chan_config,
-		//     &pio->txf[line_sm], // Write to PIO TX FIFO
-		//     &line_data_zero_buffer, // First line output will be white line
-		//     160, // Transfer complete contents of `line_data_buffer`
-		//     false // Don't start yet
-		// );
 		pac.DMA.ch[PIXEL_DMA_CHAN]
 			.ch_read_addr
-			.write(|w| w.bits(PIXEL_DATA_ZERO_BUFFER.as_ptr() as usize as u32));
-		// set_write_addr
+			.write(|w| w.bits(PIXEL_DATA_BUFFER_EVEN.as_ptr()));
 		pac.DMA.ch[PIXEL_DMA_CHAN]
 			.ch_write_addr
 			.write(|w| w.bits(pixel_fifo.dma_address()));
-		// set_trans_count
 		pac.DMA.ch[PIXEL_DMA_CHAN]
 			.ch_trans_count
 			.write(|w| w.bits(NUM_PIXEL_PAIRS as u32));
-
-		// Setup interrupt handler for line and sync DMA channels
-		//dma_channel_set_irq0_enabled(pixel_dma_chan, true);
-		//dma_channel_set_irq0_enabled(timing_dma_chan, true);
-		pac.DMA.inte0.modify(|_r, w| {
+		pac.DMA.inte0.write(|w| {
 			w.inte0()
 				.bits((1 << PIXEL_DMA_CHAN) | (1 << TIMING_DMA_CHAN))
 		});
 
+		// Hand off the DMA peripheral to the interrupt
 		DMA_PERIPH = Some(pac.DMA);
 
-		//irq_set_enabled(DMA_IRQ_0, true);
+		// Enable the interupts (DMA_PERIPH has to be set first)
 		pac::NVIC::unpend(pac::Interrupt::DMA_IRQ_0);
 		pac::NVIC::unmask(pac::Interrupt::DMA_IRQ_0);
 
 		info!("IRQs enabled");
 
+		// Enable the DMA
 		DMA_PERIPH
 			.as_mut()
 			.unwrap()
@@ -529,13 +484,32 @@ fn main() -> ! {
 
 	info!("State Machines running");
 
+	let mut last_line = 0;
+	let mut frame_count = 0;
 	loop {
 		cortex_m::asm::wfi();
-		info!(
-			"Line is {}/480, {}/525",
-			CURRENT_DISPLAY_LINE.load(Ordering::Relaxed),
-			CURRENT_TIMING_LINE.load(Ordering::Relaxed)
-		);
+		let try_line = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
+		if try_line != last_line {
+			last_line = try_line;
+			let next_line = if last_line == 479 {
+				info!("Frame {}", frame_count);
+				frame_count += 1;
+				0
+			} else {
+				last_line + 1
+			};
+			// new line - do some painting!
+			let px_buf = unsafe {
+				if (next_line & 1) == 1 {
+					&mut PIXEL_DATA_BUFFER_ODD
+				} else {
+					&mut PIXEL_DATA_BUFFER_EVEN
+				}
+			};
+			for px in px_buf.pixels.iter_mut().skip(1) {
+				*px = u32::from(next_line) | u32::from(next_line) << 16;
+			}
+		}
 	}
 }
 
@@ -600,26 +574,32 @@ unsafe fn DMA_IRQ_0() {
 		dma.ints0.write(|w| w.bits(1 << TIMING_DMA_CHAN));
 
 		let old_timing_line = CURRENT_TIMING_LINE.load(Ordering::Relaxed);
-		let timing_line = if old_timing_line < 524 {
-			old_timing_line + 1
-		} else {
+		let timing_line = if old_timing_line == 524 {
+			// 524 -> 0
 			0
+		} else {
+			// n -> n + 1
+			old_timing_line + 1
 		};
 		CURRENT_TIMING_LINE.store(timing_line, Ordering::Relaxed);
 
-		let buffer = if (timing_line == 0) || (timing_line == 1) {
-			// V-Sync pulse
-			&TIMING_BUFFER.vblank_sync_buffer
-		} else if timing_line < 32 {
-			// VGA back porch following VGA sync pulse
-			&TIMING_BUFFER.vblank_porch_buffer
-		} else if timing_line < 515 {
-			// Visible lines (including three lines of the back porch we treat
-			// as visible to get ourselves up and running)
-			&TIMING_BUFFER.visible_line
-		} else {
-			// Front porch
-			&TIMING_BUFFER.vblank_porch_buffer
+		let buffer = match timing_line {
+			0..=479 => {
+				// Visible lines
+				&TIMING_BUFFER.visible_line
+			}
+			480..=489 => {
+				// VGA front porch before VGA sync pulse
+				&TIMING_BUFFER.vblank_porch_buffer
+			}
+			490..=491 => {
+				// Sync pulse
+				&TIMING_BUFFER.vblank_sync_buffer
+			}
+			492.. => {
+				// VGA back porch following VGA sync pulse
+				&TIMING_BUFFER.vblank_porch_buffer
+			}
 		};
 		dma.ch[TIMING_DMA_CHAN]
 			.ch_al3_read_addr_trig
@@ -629,50 +609,29 @@ unsafe fn DMA_IRQ_0() {
 	if pixel_dma_chan_irq {
 		dma.ints0.write(|w| w.bits(1 << PIXEL_DMA_CHAN));
 
-		let old_display_line = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
+		// A pixel DMA transfer is now complete. This only fires on lines 0..=480.
 
-		if old_display_line == 479 {
-			// Set ourselves three lines early
-			CURRENT_DISPLAY_LINE.store(-3, Ordering::Relaxed);
-			NEW_FRAME.store(true, Ordering::Relaxed);
-			// Setup Line DMA channel to read zero lines for dummy lines and set it going.
-			// Disable read increment so just read zero over and over for dummy lines.
-			// DMA won't actually begin until line PIO starts consuming it in the next
-			// frame.
-			dma.ch[PIXEL_DMA_CHAN]
-				.ch_ctrl_trig
-				.modify(|_r, w| w.incr_read().clear_bit());
+		let old_display_line = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
+		let next_display_line = if old_display_line == 479 {
+			// 479 -> 0
+			0
+		} else {
+			// n -> n + 1
+			old_display_line + 1
+		};
+		CURRENT_DISPLAY_LINE.store(next_display_line, Ordering::Relaxed);
+
+		// Set the DMA load address according to which line we are on
+		if (next_display_line & 1) == 1 {
+			// Odd visible line is next
 			dma.ch[PIXEL_DMA_CHAN]
 				.ch_al3_read_addr_trig
-				.write(|w| w.bits(PIXEL_DATA_ZERO_BUFFER.as_ptr() as usize as u32))
+				.write(|w| w.bits(PIXEL_DATA_BUFFER_ODD.as_ptr()))
 		} else {
-			let display_line = old_display_line + 1;
-			CURRENT_DISPLAY_LINE.store(display_line, Ordering::Relaxed);
-
-			if display_line == 0 {
-				// Our first visible line - turn on read address increment on the DMA
-				dma.ch[PIXEL_DMA_CHAN]
-					.ch_ctrl_trig
-					.modify(|_r, w| w.incr_read().set_bit());
-			}
-
-			// Set the DMA load address according to which line we are on
-			if display_line < 0 {
-				// Invisible line (last part of the front-porch)
-				dma.ch[PIXEL_DMA_CHAN]
-					.ch_al3_read_addr_trig
-					.write(|w| w.bits(PIXEL_DATA_ZERO_BUFFER.as_ptr() as usize as u32))
-			} else if (display_line & 4) == 4 {
-				// Odd visible line
-				dma.ch[PIXEL_DMA_CHAN]
-					.ch_al3_read_addr_trig
-					.write(|w| w.bits(PIXEL_DATA_BUFFER_ODD.as_ptr()))
-			} else {
-				// Even visible line
-				dma.ch[PIXEL_DMA_CHAN]
-					.ch_al3_read_addr_trig
-					.write(|w| w.bits(PIXEL_DATA_BUFFER_EVEN.as_ptr()))
-			}
+			// Even visible line is next
+			dma.ch[PIXEL_DMA_CHAN]
+				.ch_al3_read_addr_trig
+				.write(|w| w.bits(PIXEL_DATA_BUFFER_EVEN.as_ptr()))
 		}
 	}
 }
@@ -680,6 +639,7 @@ unsafe fn DMA_IRQ_0() {
 impl LineBuffer {
 	/// Convert the line buffer to a 32-bit address that the DMA engine understands.
 	fn as_ptr(&self) -> u32 {
+		// NB: skip the length field
 		self.pixels.as_ptr() as usize as u32 + 4
 	}
 }
