@@ -607,7 +607,7 @@ unsafe fn DMA_IRQ_0() {
 	}
 
 	if pixel_dma_chan_irq {
-		dma.ints0.write(|w| w.bits(1 << TIMING_DMA_CHAN));
+		dma.ints0.write(|w| w.bits(1 << PIXEL_DMA_CHAN));
 
 		let display_line = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
 
