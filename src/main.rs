@@ -389,7 +389,7 @@ fn main() -> ! {
 
 	unsafe {
 		pac.RESETS.reset.modify(|_, w| w.dma().clear_bit());
-        while pac.RESETS.reset_done.read().dma().bit_is_clear() {}
+		while pac.RESETS.reset_done.read().dma().bit_is_clear() {}
 
 		// dma_channel_config timing_dma_chan_config = dma_channel_get_default_config(timing_dma_chan);
 
@@ -515,7 +515,11 @@ fn main() -> ! {
 
 	loop {
 		cortex_m::asm::wfi();
-		info!("Line is {}/480, {}/525", CURRENT_DISPLAY_LINE.load(Ordering::Relaxed), CURRENT_TIMING_LINE.load(Ordering::Relaxed));
+		info!(
+			"Line is {}/480, {}/525",
+			CURRENT_DISPLAY_LINE.load(Ordering::Relaxed),
+			CURRENT_TIMING_LINE.load(Ordering::Relaxed)
+		);
 	}
 }
 
@@ -562,8 +566,10 @@ const fn make_timing(period: u32, hsync: bool, vsync: bool, raise_irq: bool) -> 
 #[interrupt]
 unsafe fn DMA_IRQ_0() {
 	let dma: &mut pac::DMA = match DMA_PERIPH.as_mut() {
-		Some(dma) => { dma }
-		None => { return; }
+		Some(dma) => dma,
+		None => {
+			return;
+		}
 	};
 	let status = dma.ints0.read().bits();
 
