@@ -95,7 +95,6 @@ struct LineBuffer {
 	pixels: [u32; NUM_PIXEL_PAIRS_PER_LINE + 1],
 }
 
-
 static mut CHAR_ARRAY: [u8; 2000] =
 *b"\
 \xDA\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xBF\
@@ -568,7 +567,7 @@ fn main() -> ! {
 			let text_row_offset = text_row * 80;
 
 			if text_row < 25 {
-				let row_slice = unsafe { &CHAR_ARRAY[text_row_offset..text_row_offset+80] };
+				let row_slice = unsafe { &CHAR_ARRAY[text_row_offset..text_row_offset + 80] };
 				let font_ptr = unsafe { freebsd_cp850::FONT_DATA.as_ptr().add(font_row) };
 
 				let px_ptr = px_buf.pixels[1..].as_mut_ptr();
@@ -578,10 +577,22 @@ fn main() -> ! {
 					let mono_pixels = unsafe { *font_ptr.offset(index) } as usize;
 					// Convert from mono to RGB white
 					unsafe {
-						core::ptr::write_volatile(px_ptr.offset(px_idx + 0), LOOKUP[(mono_pixels >> 6) & 3]);
-						core::ptr::write_volatile(px_ptr.offset(px_idx + 1), LOOKUP[(mono_pixels >> 4) & 3]);
-						core::ptr::write_volatile(px_ptr.offset(px_idx + 2), LOOKUP[(mono_pixels >> 2) & 3]);
-						core::ptr::write_volatile(px_ptr.offset(px_idx + 3), LOOKUP[(mono_pixels >> 0) & 3]);
+						core::ptr::write_volatile(
+							px_ptr.offset(px_idx + 0),
+							LOOKUP[(mono_pixels >> 6) & 3],
+						);
+						core::ptr::write_volatile(
+							px_ptr.offset(px_idx + 1),
+							LOOKUP[(mono_pixels >> 4) & 3],
+						);
+						core::ptr::write_volatile(
+							px_ptr.offset(px_idx + 2),
+							LOOKUP[(mono_pixels >> 2) & 3],
+						);
+						core::ptr::write_volatile(
+							px_ptr.offset(px_idx + 3),
+							LOOKUP[(mono_pixels >> 0) & 3],
+						);
 					}
 					px_idx += 4;
 				}
@@ -590,7 +601,7 @@ fn main() -> ! {
 	}
 }
 
-static LOOKUP: [u32; 4] = [ 0x0F00_0F00, 0x00FF_0F00, 0x0F00_00FF, 0x00FF_00FF ];
+static LOOKUP: [u32; 4] = [0x0F00_0F00, 0x00FF_0F00, 0x0F00_00FF, 0x00FF_00FF];
 
 const fn make_timing(period: u32, hsync: bool, vsync: bool, raise_irq: bool) -> u32 {
 	let command = if raise_irq {
