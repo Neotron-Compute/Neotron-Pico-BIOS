@@ -391,7 +391,7 @@ impl VideoEngine {
 					// Convert from eight mono pixels in one byte to four RGB pairs
 					unsafe {
 						core::ptr::write_volatile(
-							scan_line_buffer_ptr.offset(px_idx + 0),
+							scan_line_buffer_ptr.offset(px_idx),
 							self.lookup[(mono_pixels >> 6) & 3],
 						);
 						core::ptr::write_volatile(
@@ -404,7 +404,7 @@ impl VideoEngine {
 						);
 						core::ptr::write_volatile(
 							scan_line_buffer_ptr.offset(px_idx + 3),
-							self.lookup[(mono_pixels >> 0) & 3],
+							self.lookup[mono_pixels & 3],
 						);
 					}
 					px_idx += 4;
@@ -413,6 +413,12 @@ impl VideoEngine {
 			let running_end = cortex_m::peripheral::SYST::get_current();
 			self.running_ticks += (awake_at - running_end) & 0x00FF_FFFF;
 		}
+	}
+}
+
+impl Default for VideoEngine {
+	fn default() -> Self {
+		VideoEngine::new()
 	}
 }
 
@@ -634,6 +640,10 @@ pub fn init(pio: super::pac::PIO0, dma: super::pac::DMA, resets: &mut super::pac
 ///
 /// We use this as a prompt to either start a transfer or more Timing words,
 /// or a transfer or more pixel words.
+///
+/// # Safety
+///
+/// Only call this from the DMA IRQ handler.
 pub unsafe fn irq() {
 	let dma: &mut super::pac::DMA = match DMA_PERIPH.as_mut() {
 		Some(dma) => dma,
