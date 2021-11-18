@@ -1,33 +1,42 @@
-/// The font data here must be in the same order as the `Char` enum. This is
-/// the cp850-8x16 font from FreeBSD. See
-/// http://web.mit.edu/freebsd/head/share/syscons/fonts/cp850-8x16.fnt
-///
-/// The compilation of software known as FreeBSD is distributed under the
-/// following terms:
-///
-/// Copyright (c) 1992-2014 The FreeBSD Project. All rights reserved.
-///
-/// Redistribution and use in source and binary forms, with or without
-/// modification, are permitted provided that the following conditions
-/// are met:
-/// 1. Redistributions of source code must retain the above copyright
-///    notice, this list of conditions and the following disclaimer.
-/// 2. Redistributions in binary form must reproduce the above copyright
-///    notice, this list of conditions and the following disclaimer in the
-///    documentation and/or other materials provided with the distribution.
-///
-/// THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
-/// ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-/// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-/// ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
-/// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-/// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
-/// OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
-/// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
-/// LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
-/// OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
-/// SUCH DAMAGE.
-pub static FONT_DATA: [u8; 256 * 16] = [
+//! # Neotron Pico Console Font
+//!
+//! This is the cp850-8x16 font from FreeBSD. See
+//! <http://web.mit.edu/freebsd/head/share/syscons/fonts/cp850-8x16.fnt>
+//!
+//! The compilation of software known as FreeBSD is distributed under the
+//! following terms:
+//!
+//! Copyright (c) 1992-2014 The FreeBSD Project. All rights reserved.
+//!
+//! Redistribution and use in source and binary forms, with or without
+//! modification, are permitted provided that the following conditions
+//! are met:
+//! 1. Redistributions of source code must retain the above copyright
+//!    notice, this list of conditions and the following disclaimer.
+//! 2. Redistributions in binary form must reproduce the above copyright
+//!    notice, this list of conditions and the following disclaimer in the
+//!    documentation and/or other materials provided with the distribution.
+//!
+//! THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+//! ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+//! IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+//! ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+//! FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+//! DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+//! OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+//! HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+//! LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+//! OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+//! SUCH DAMAGE.
+
+/// Width of the font in pixels
+pub const WIDTH_PX: usize = 8;
+
+/// Height of the font in pixels
+pub const HEIGHT_PX: usize = 16;
+
+/// Our font data - arranged as 256 glyphs of 1 byte/row x 16 row/glyph.
+pub static DATA: [u8; 256 * HEIGHT_PX] = [
 	// Char::Null
 	0b0000_0000,
 	0b0000_0000,
