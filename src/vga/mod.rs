@@ -196,11 +196,13 @@ static TIMING_BUFFER: TimingBuffer = TimingBuffer {
 			make_timing(16 * 5, true, false, false),
 			// Sync pulse (as per the spec)
 			make_timing(96 * 5, false, false, false),
-			// Back porch (shortened by two pixels because the
-			// video starts two pixels late)
-			make_timing(48 * 5, true, false, false),
-			// Visible portion. It also triggers the IRQ to start pixels moving.
-			make_timing(640 * 5, true, false, true),
+			// Back porch. Adjusted by a few clocks to account for interrupt +
+			// PIO SM start latency.
+			make_timing((48 * 5) - 5, true, false, false),
+			// Visible portion. It also triggers the IRQ to start pixels
+			// moving. Adjusted to compensate for changes made to previous
+			// period to ensure scan-line remains at correct length.
+			make_timing((640 * 5) + 5, true, false, true),
 		],
 	},
 	vblank_porch_buffer: ScanlineTimingBuffer {
@@ -493,9 +495,9 @@ pub fn init(pio: super::pac::PIO0, dma: super::pac::DMA, resets: &mut super::pac
 	// | 1     | out pins, 2  | wait 1 irq 0     |
 	// | 2     | out x, 14    | wait 1 irq 0     |
 	// | 3     | out exec, 16 | wait 1 irq 0     |
-	// | 4     | <irq>        | wait 1 irq 0     |
+	// | 4     | <exec irq>   | wait 1 irq 0     |
 	// | 5     | jmp x--      | wait 1 irq 0     |
-	// | 6     |              | set x, 31        |
+	// | 6     |              | out x, 32        |
 	// | 7     |              | out pins, 16 [4] |
 	// | 8     |              | ..               |
 	// | 9     |              | ..               |
@@ -505,7 +507,7 @@ pub fn init(pio: super::pac::PIO0, dma: super::pac::DMA, resets: &mut super::pac
 	// | 13    |              | ..               |
 	// | 14    |              | ..               |
 	// | 15    |              | ..               |
-	// | 16    |              | jump x-- loop1   |
+	// | 16    |              | jump x--         |
 	//
 	// Note: Credit to
 	// https://gregchadwick.co.uk/blog/playing-with-the-pico-pt5/ who had a
