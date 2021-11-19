@@ -225,10 +225,10 @@ fn main() -> ! {
 
 	info!("VGA intialised");
 
-	let mut x = 0;
+	let mut x: u32 = 0;
 	loop {
 		println!("x = {}", x);
-		x = x + 1;
+		x = x.wrapping_add(1);
 	}
 }
 
