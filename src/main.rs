@@ -81,9 +81,35 @@ pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER;
 /// BIOS version
 const GIT_VERSION: &str = git_version!();
 
+/// Create a new Text Console
+static TEXT_CONSOLE: vga::TextConsole = vga::TextConsole::new();
+
 // -----------------------------------------------------------------------------
 // Functions
 // -----------------------------------------------------------------------------
+
+/// Prints to the screen
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => {
+        {
+            use core::fmt::Write as _;
+            write!(&TEXT_CONSOLE, $($arg)*).unwrap();
+        }
+    };
+}
+
+/// Prints to the screen and puts a new-line on the end
+#[macro_export]
+macro_rules! println {
+    () => (print!("\n"));
+    ($($arg:tt)*) => {
+        {
+            use core::fmt::Write as _;
+            writeln!(&TEXT_CONSOLE, $($arg)*).unwrap();
+        }
+    };
+}
 
 /// This is the entry-point to the BIOS. It is called by cortex-m-rt once the
 /// `.bss` and `.data` sections have been initialised.
@@ -96,7 +122,7 @@ fn main() -> ! {
 	// Grab the singleton containing all the RP2040 peripherals
 	let mut pac = pac::Peripherals::take().unwrap();
 	// Grab the singleton containing all the generic Cortex-M peripherals
-	let mut core = pac::CorePeripherals::take().unwrap();
+	let _core = pac::CorePeripherals::take().unwrap();
 
 	// Reset the DMA engine. If we don't do this, starting from probe-run
 	// (as opposed to a cold-start) is unreliable.
@@ -168,8 +194,6 @@ fn main() -> ! {
 	let mut b_power_save = pins.b_power_save.into_push_pull_output();
 	b_power_save.set_high().unwrap();
 
-	info!("Pins OK");
-
 	// Give H-Sync, V-Sync and 12 RGB colour pins to PIO0 to output video
 	let _h_sync = pins.gpio0.into_mode::<hal::gpio::FunctionPio0>();
 	let _v_sync = pins.gpio1.into_mode::<hal::gpio::FunctionPio0>();
@@ -186,6 +210,8 @@ fn main() -> ! {
 	let _blue2 = pins.gpio12.into_mode::<hal::gpio::FunctionPio0>();
 	let _blue3 = pins.gpio13.into_mode::<hal::gpio::FunctionPio0>();
 
+	info!("Pins OK");
+
 	vga::init(
 		pac.PIO0,
 		pac.DMA,
@@ -195,8 +221,14 @@ fn main() -> ! {
 		&mut pac.PSM,
 	);
 
+	TEXT_CONSOLE.set_text_buffer(unsafe { &mut vga::CHAR_ARRAY });
+
+	info!("VGA intialised");
+
+	let mut x = 0;
 	loop {
-		cortex_m::asm::wfi();
+		println!("x = {}", x);
+		x = x + 1;
 	}
 }
 

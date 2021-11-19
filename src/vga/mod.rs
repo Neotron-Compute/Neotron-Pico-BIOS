@@ -39,7 +39,7 @@ pub(crate) mod font;
 // Imports
 // -----------------------------------------------------------------------------
 
-use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, Ordering};
 use defmt::*;
 use pico::hal::pio::PIOExt;
 
@@ -51,13 +51,22 @@ use pico::hal::pio::PIOExt;
 ///
 /// This structure is owned entirely by the main thread (or the drawing
 /// thread). Data handled under interrupt is stored in various other places.
-pub struct VideoEngine {
+struct RenderEngine {
 	/// How many frames have been drawn
 	frame_count: u32,
 	/// Look-up table mapping two 1-bpp pixels to two 12-bit RGB values (packed into one 32-bit word).
 	///
 	/// You can adjust this table to convert text to different colours.
 	lookup: [RGBPair; 4],
+}
+
+/// Holds some data necessary to present a text console.
+///
+/// Used by Core 0 to control writes to a shared text-buffer.
+pub struct TextConsole {
+	current_col: AtomicU16,
+	current_row: AtomicU16,
+	text_buffer: AtomicPtr<u8>,
 }
 
 /// Describes one scan-line's worth of pixels, including the length word required by the Pixel FIFO.
@@ -174,24 +183,50 @@ const TIMING_DMA_CHAN: usize = 0;
 /// DMA channel for the pixel FIFO
 const PIXEL_DMA_CHAN: usize = 1;
 
-/// 12-bit pixels for the even scan-lines (0, 2, 4 ... NUM_LINES - 2). Defaults to black.
+/// One scan-line's worth of 12-bit pixels, used for the even scan-lines (0, 2, 4 ... NUM_LINES-2).
+///
+/// Gets read by DMA, which pushes them into the pixel state machine's FIFO.
+///
+/// Gets written to by `RenderEngine` running on Core 1.
 static mut PIXEL_DATA_BUFFER_EVEN: LineBuffer = LineBuffer {
 	length: (MAX_NUM_PIXEL_PAIRS_PER_LINE as u32) - 1,
 	pixels: [RGBPair::from_pixels(colours::WHITE, colours::BLACK); MAX_NUM_PIXEL_PAIRS_PER_LINE],
 };
 
-/// 12-bit pixels for the odd scan-lines (1, 3, 5 ... NUM_LINES-1). Defaults to white.
+/// One scan-line's worth of 12-bit pixels, used for the odd scan-lines (1, 3, 5 ... NUM_LINES-1).
+///
+/// Gets read by DMA, which pushes them into the pixel state machine's FIFO.
+///
+/// Gets written to by `RenderEngine` running on Core 1.
 static mut PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer {
 	length: (MAX_NUM_PIXEL_PAIRS_PER_LINE as u32) - 1,
 	pixels: [RGBPair::from_pixels(colours::BLACK, colours::WHITE); MAX_NUM_PIXEL_PAIRS_PER_LINE],
 };
 
-/// Some dummy text to display.
+/// This is our text buffer.
 ///
 /// This is arranged as `NUM_TEXT_ROWS` rows of `NUM_TEXT_COLS` columns. Each
 /// item is an index into `font::FONT_DATA` (or a Code-Page 850 character).
-static mut CHAR_ARRAY: [u8; NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize] =
+///
+/// Written to by Core 0, and read from by `RenderEngine` running on Core 1.
+pub static mut CHAR_ARRAY: [u8; NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize] =
 	[0xB2; NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize];
+
+/// Core 1 entry function.
+///
+/// This is a naked function I have pre-compiled to thumb-2 instructions. I
+/// could use inline assembler, but then I'd have to make you install
+/// arm-none-eabi-as or arm-none-eabi-gcc, or wait until `llvm_asm!` is
+/// stablised.
+///
+/// We want this function to load the three parameters (which we placed in
+/// Core 1's stack) into registers. We then jump to the third of these, which
+/// effectively makes a function call with the first two values as function
+/// arguments.
+static CORE1_ENTRY_FUNCTION: [u16; 2] = [
+	0xbd03, // pop {r0, r1, pc}
+	0x46c0, // nop - pad this out to 32-bits long
+];
 
 /// A set of useful constants representing common RGB colours.
 pub mod colours {
@@ -214,107 +249,6 @@ pub mod colours {
 // -----------------------------------------------------------------------------
 // Functions
 // -----------------------------------------------------------------------------
-
-impl VideoEngine {
-	// Initialise the main-thread resources
-	pub fn new() -> VideoEngine {
-		VideoEngine {
-			frame_count: 0,
-			lookup: [
-				RGBPair::from_pixels(colours::BLUE, colours::BLUE),
-				RGBPair::from_pixels(colours::BLUE, colours::WHITE),
-				RGBPair::from_pixels(colours::WHITE, colours::BLUE),
-				RGBPair::from_pixels(colours::WHITE, colours::WHITE),
-			],
-		}
-	}
-
-	pub fn poll(&mut self) {
-		if DMA_READY.load(Ordering::Relaxed) {
-			DMA_READY.store(false, Ordering::Relaxed);
-			unsafe {
-				CHAR_ARRAY[0] = CHAR_ARRAY[0].wrapping_add(1);
-			}
-			let current_line_num = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
-			if current_line_num == 0 {
-				info!("Frame {}", self.frame_count);
-				self.frame_count += 1;
-			}
-
-			// new line - pick a buffer to draw into (not the one that is currently rendering!)
-			let scan_line_buffer = unsafe {
-				if (current_line_num & 1) == 0 {
-					&mut PIXEL_DATA_BUFFER_ODD
-				} else {
-					&mut PIXEL_DATA_BUFFER_EVEN
-				}
-			};
-
-			// Convert our position in scan-lines to a text row, and a line within each glyph on that row
-			let text_row = (current_line_num / font::HEIGHT_PX as u16) as usize;
-			let font_row = (current_line_num % font::HEIGHT_PX as u16) as usize;
-
-			if text_row < NUM_TEXT_ROWS {
-				// Note (unsafe): We could stash the char array inside `self`
-				// but at some point we are going to need one CPU rendering
-				// the text, and the other CPU running code and writing to
-				// the buffer. This might be Undefined Behaviour, but
-				// unfortunately real-time video is all about shared mutable
-				// state. At least our platform is fixed, so we can simply
-				// test if it works, for some given version of the Rust compiler.
-				let row_slice = unsafe {
-					&CHAR_ARRAY[(text_row * NUM_TEXT_COLS)..((text_row + 1) * NUM_TEXT_COLS)]
-				};
-				// Every font look-up we are about to do for this row will
-				// involve offsetting by the row within each glyph. As this
-				// is the same for every glyph on this row, we calculate a
-				// new pointer once, in advance, and save ourselves an
-				// addition each time around the loop.
-				let font_ptr = unsafe { font::DATA.as_ptr().add(font_row) };
-
-				// Get a pointer into our scan-line buffer
-				let scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
-				let mut px_idx = 0;
-
-				// Convert from characters to coloured pixels, using the font as a look-up table.
-				for ch in row_slice.iter() {
-					let index = (*ch as isize) * 16;
-					// Note (unsafe): We use pointer arithmetic here because we
-					// can't afford a bounds-check on an array. This is safe
-					// because the font is `256 * width` bytes long and we can't
-					// index more than `255 * width` bytes into it.
-					let mono_pixels = unsafe { *font_ptr.offset(index) } as usize;
-					// Convert from eight mono pixels in one byte to four RGB pairs
-					unsafe {
-						core::ptr::write_volatile(
-							scan_line_buffer_ptr.offset(px_idx),
-							self.lookup[(mono_pixels >> 6) & 3],
-						);
-						core::ptr::write_volatile(
-							scan_line_buffer_ptr.offset(px_idx + 1),
-							self.lookup[(mono_pixels >> 4) & 3],
-						);
-						core::ptr::write_volatile(
-							scan_line_buffer_ptr.offset(px_idx + 2),
-							self.lookup[(mono_pixels >> 2) & 3],
-						);
-						core::ptr::write_volatile(
-							scan_line_buffer_ptr.offset(px_idx + 3),
-							self.lookup[mono_pixels & 3],
-						);
-					}
-					px_idx += 4;
-				}
-			}
-		}
-	}
-}
-
-impl Default for VideoEngine {
-	fn default() -> Self {
-		VideoEngine::new()
-	}
-}
 
 /// Initialise all the static data and peripherals we need for our video display.
 ///
@@ -511,7 +445,7 @@ pub fn init(
 	dma.multi_chan_trigger
 		.write(|w| unsafe { w.bits((1 << PIXEL_DMA_CHAN) | (1 << TIMING_DMA_CHAN)) });
 
-	info!("DMA enabled");
+	debug!("DMA enabled");
 
 	unsafe {
 		// Hand off the DMA peripheral to the interrupt
@@ -523,14 +457,14 @@ pub fn init(
 		pico::hal::pac::NVIC::unmask(pico::hal::pac::Interrupt::DMA_IRQ_0);
 	}
 
-	info!("IRQs enabled");
+	debug!("IRQs enabled");
 
-	info!("DMA set-up complete");
+	debug!("DMA set-up complete");
 
 	timing_sm.start();
 	pixel_sm.start();
 
-	info!("State Machines running");
+	debug!("State Machines running");
 
 	// We drop our state-machine and PIO objects here - this means the video
 	// cannot be reconfigured at a later time, but they do keep on running
@@ -542,27 +476,14 @@ pub fn init(
 		multicore_launch_core1_with_stack(core1_main, &mut CORE1_STACK, ppb, fifo, psm);
 	}
 
-	info!("Core 1 running");
+	debug!("Core 1 running");
 }
 
 /// The bootrom code will call this function on core1 to perform any set-up, before the
 /// entry function is called.
 extern "C" fn core1_wrapper(entry_func: extern "C" fn() -> u32, _stack_base: *mut u32) -> u32 {
-	return entry_func();
+	entry_func()
 }
-
-/// Core 1 entry function.
-///
-/// This is a naked function I have pre-compiled to thumb-2 instructions. I
-/// could use inline assembler, but then I'd have to make you install
-/// arm-none-eabi-as or arm-none-eabi-gcc, or wait until `llvm_asm!` is
-/// stablised.
-static CORE1_ENTRY_FUNCTION: [u16; 2] = [
-	// pop {r0, r1, pc} - load the three parameters (which we placed in Core 1's stack) into registers.
-	// Loading PC is basically a jump.
-	0xbd03, // nop - pad this out to 32-bits long
-	0x46c0,
-];
 
 /// Starts core 1 running the given function, with the given stack.
 fn multicore_launch_core1_with_stack(
@@ -572,7 +493,7 @@ fn multicore_launch_core1_with_stack(
 	fifo: &mut pico::hal::sio::SioFifo,
 	psm: &mut pico::hal::pac::PSM,
 ) {
-	info!("Resetting CPU1...");
+	debug!("Resetting CPU1...");
 
 	psm.frce_off.modify(|_, w| w.proc1().set_bit());
 	while !psm.frce_off.read().proc1().bit_is_set() {
@@ -580,24 +501,27 @@ fn multicore_launch_core1_with_stack(
 	}
 	psm.frce_off.modify(|_, w| w.proc1().clear_bit());
 
-	info!("Setting up stack...");
+	debug!("Setting up stack...");
 
-	// Gets popped into r0 by CORE1_ENTRY_FUNCTION. This is the function we
-	// want to run. It appears in `core1_wrapper` as the first argument.
+	// Gets popped into `r0` by CORE1_ENTRY_FUNCTION. This is the `main`
+	// function we want to run. It appears in the call to `core1_wrapper` as
+	// the first argument.
 	stack[stack.len() - 3] = main_func as *const () as usize;
-	// Gets popped into r1 by CORE1_ENTRY_FUNCTION. This is the top of stack
-	// for Core 1. It appears in `core1_wrapper` as the second argument.
+	// Gets popped into `r1` by CORE1_ENTRY_FUNCTION. This is the top of stack
+	// for Core 1. It appears in the call to `core1_wrapper` as the second
+	// argument.
 	stack[stack.len() - 2] = stack.as_ptr() as *const _ as usize;
-	// Gets popped into pc by CORE1_ENTRY_FUNCTION. This is the function
+	// Gets popped into `pc` by CORE1_ENTRY_FUNCTION. This is the function
 	// `CORE1_ENTRY_FUNCTION` will jump to, passing the above two values as
 	// arguments.
 	stack[stack.len() - 1] = core1_wrapper as *const () as usize;
-	// Point into the top of the stack (so there are three values pushed onto it, i.e. at/above it)
+	// Point into the top of the stack (so there are three values pushed onto
+	// it, i.e. at/above it)
 	let stack_ptr = unsafe { stack.as_mut_ptr().add(stack.len() - 3) };
 
-	info!("Stack ptr is 0x{:x}", stack_ptr);
-	info!("Stack bottom is 0x{:x}", stack.as_ptr());
-	info!("Stack top is 0x{:x}", &stack[stack.len() - 4..stack.len()]);
+	debug!("Stack ptr is 0x{:x}", stack_ptr);
+	debug!("Stack bottom is 0x{:x}", stack.as_ptr());
+	debug!("Stack top is 0x{:x}", &stack[stack.len() - 4..stack.len()]);
 
 	// This is the launch sequence we send to core1, to get it to leave the
 	// boot ROM and run our code.
@@ -616,29 +540,29 @@ fn multicore_launch_core1_with_stack(
 
 	'outer: loop {
 		for cmd in cmd_sequence.iter() {
-			info!("Sending command {:x}...", *cmd);
+			debug!("Sending command {:x}...", *cmd);
 
 			// we drain before sending a 0
 			if *cmd == 0 {
-				info!("Draining FIFO...");
+				debug!("Draining FIFO...");
 				fifo.drain();
 				// core 1 may be waiting for fifo space
 				cortex_m::asm::sev();
 			}
-			info!("Pushing to FIFO...");
+			debug!("Pushing to FIFO...");
 			fifo.write_blocking(*cmd);
 
-			info!("Getting response from FIFO...");
+			debug!("Getting response from FIFO...");
 			let response = loop {
 				if let Some(x) = fifo.read() {
 					break x;
 				} else {
-					info!("ST is {:x}", fifo.status());
+					debug!("ST is {:x}", fifo.status());
 				}
 			};
 
 			// move to next state on correct response otherwise start over
-			info!("Got {:x}", response);
+			debug!("Got {:x}", response);
 			if *cmd != response {
 				continue 'outer;
 			}
@@ -650,11 +574,11 @@ fn multicore_launch_core1_with_stack(
 		unsafe { pico::hal::pac::NVIC::unmask(pico::hal::pac::Interrupt::SIO_IRQ_PROC0) };
 	}
 
-	info!("Waiting for Core 1 to start...");
+	debug!("Waiting for Core 1 to start...");
 	while !CORE1_START_FLAG.load(Ordering::Relaxed) {
 		cortex_m::asm::nop();
 	}
-	info!("Core 1 started!!");
+	debug!("Core 1 started!!");
 }
 
 /// This function runs the video processing loop on Core 1.
@@ -668,7 +592,7 @@ fn multicore_launch_core1_with_stack(
 unsafe extern "C" fn core1_main() -> u32 {
 	CORE1_START_FLAG.store(true, Ordering::Relaxed);
 
-	let mut video = VideoEngine::new();
+	let mut video = RenderEngine::new();
 
 	loop {
 		// This function currently consumes about 70% CPU (or rather, 90% CPU
@@ -760,6 +684,205 @@ pub unsafe fn irq() {
 
 		CURRENT_DISPLAY_LINE.store(next_display_line, Ordering::Relaxed);
 		DMA_READY.store(true, Ordering::Relaxed);
+	}
+}
+
+impl RenderEngine {
+	// Initialise the main-thread resources
+	pub fn new() -> RenderEngine {
+		RenderEngine {
+			frame_count: 0,
+			lookup: [
+				RGBPair::from_pixels(colours::BLUE, colours::BLUE),
+				RGBPair::from_pixels(colours::BLUE, colours::WHITE),
+				RGBPair::from_pixels(colours::WHITE, colours::BLUE),
+				RGBPair::from_pixels(colours::WHITE, colours::WHITE),
+			],
+		}
+	}
+
+	pub fn poll(&mut self) {
+		if DMA_READY.load(Ordering::Relaxed) {
+			DMA_READY.store(false, Ordering::Relaxed);
+			let current_line_num = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
+			if current_line_num == 0 {
+				debug!("Frame {}", self.frame_count);
+				self.frame_count += 1;
+			}
+
+			// new line - pick a buffer to draw into (not the one that is currently rendering!)
+			let scan_line_buffer = unsafe {
+				if (current_line_num & 1) == 0 {
+					&mut PIXEL_DATA_BUFFER_ODD
+				} else {
+					&mut PIXEL_DATA_BUFFER_EVEN
+				}
+			};
+
+			// Convert our position in scan-lines to a text row, and a line within each glyph on that row
+			let text_row = (current_line_num / font::HEIGHT_PX as u16) as usize;
+			let font_row = (current_line_num % font::HEIGHT_PX as u16) as usize;
+
+			if text_row < NUM_TEXT_ROWS {
+				// Note (unsafe): We could stash the char array inside `self`
+				// but at some point we are going to need one CPU rendering
+				// the text, and the other CPU running code and writing to
+				// the buffer. This might be Undefined Behaviour, but
+				// unfortunately real-time video is all about shared mutable
+				// state. At least our platform is fixed, so we can simply
+				// test if it works, for some given version of the Rust compiler.
+				let row_slice = unsafe {
+					&CHAR_ARRAY[(text_row * NUM_TEXT_COLS)..((text_row + 1) * NUM_TEXT_COLS)]
+				};
+				// Every font look-up we are about to do for this row will
+				// involve offsetting by the row within each glyph. As this
+				// is the same for every glyph on this row, we calculate a
+				// new pointer once, in advance, and save ourselves an
+				// addition each time around the loop.
+				let font_ptr = unsafe { font::DATA.as_ptr().add(font_row) };
+
+				// Get a pointer into our scan-line buffer
+				let scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
+				let mut px_idx = 0;
+
+				// Convert from characters to coloured pixels, using the font as a look-up table.
+				for ch in row_slice.iter() {
+					let index = (*ch as isize) * 16;
+					// Note (unsafe): We use pointer arithmetic here because we
+					// can't afford a bounds-check on an array. This is safe
+					// because the font is `256 * width` bytes long and we can't
+					// index more than `255 * width` bytes into it.
+					let mono_pixels = unsafe { *font_ptr.offset(index) } as usize;
+					// Convert from eight mono pixels in one byte to four RGB pairs
+					unsafe {
+						core::ptr::write_volatile(
+							scan_line_buffer_ptr.offset(px_idx),
+							self.lookup[(mono_pixels >> 6) & 3],
+						);
+						core::ptr::write_volatile(
+							scan_line_buffer_ptr.offset(px_idx + 1),
+							self.lookup[(mono_pixels >> 4) & 3],
+						);
+						core::ptr::write_volatile(
+							scan_line_buffer_ptr.offset(px_idx + 2),
+							self.lookup[(mono_pixels >> 2) & 3],
+						);
+						core::ptr::write_volatile(
+							scan_line_buffer_ptr.offset(px_idx + 3),
+							self.lookup[mono_pixels & 3],
+						);
+					}
+					px_idx += 4;
+				}
+			}
+		}
+	}
+}
+
+impl Default for RenderEngine {
+	fn default() -> Self {
+		RenderEngine::new()
+	}
+}
+
+impl TextConsole {
+	/// Create a TextConsole.
+	///
+	/// Has no buffer associated with it
+	pub const fn new() -> TextConsole {
+		TextConsole {
+			current_row: AtomicU16::new(0),
+			current_col: AtomicU16::new(0),
+			text_buffer: AtomicPtr::new(core::ptr::null_mut()),
+		}
+	}
+
+	/// Update the text buffer we are using.
+	///
+	/// Will reset the cursor. The screen is not cleared.
+	pub fn set_text_buffer(&self, text_buffer: &'static mut [u8; NUM_TEXT_ROWS * NUM_TEXT_COLS]) {
+		self.text_buffer
+			.store(text_buffer.as_mut_ptr(), Ordering::Relaxed)
+	}
+
+	/// Place a single Code Page 850 encoded 8-bit character on the screen.
+	///
+	/// Adjusts the current row and column automatically. Also understands
+	/// Carriage Return and New Line bytes.
+	pub fn write_cp850_char(&self, cp850_char: u8) {
+		// Load from global state
+		let mut row = self.current_row.load(Ordering::Relaxed);
+		let mut col = self.current_col.load(Ordering::Relaxed);
+		let buffer = self.text_buffer.load(Ordering::Relaxed);
+
+		if !buffer.is_null() {
+			self.write_at(cp850_char, buffer, &mut row, &mut col);
+			// Push back to global state
+			self.current_row.store(row as u16, Ordering::Relaxed);
+			self.current_col.store(col as u16, Ordering::Relaxed);
+		}
+	}
+
+	fn write_at(&self, cp850_char: u8, buffer: *mut u8, row: &mut u16, col: &mut u16) {
+		if cp850_char == b'\r' {
+			*col = 0;
+		} else if cp850_char == b'\n' {
+			*col = 0;
+			*row += 1;
+		} else {
+			let offset = (*col as usize) + (NUM_TEXT_COLS * (*row as usize));
+			// Note (safety): This is safe as we bound `col` and `row`
+			unsafe { buffer.add(offset).write_volatile(cp850_char) };
+			*col += 1;
+		}
+		if *col == (NUM_TEXT_COLS as u16) {
+			*col = 0;
+			*row += 1;
+		}
+		if *row == (NUM_TEXT_ROWS as u16) {
+			// Stay on last line
+			*row = (NUM_TEXT_ROWS - 1) as u16;
+
+			unsafe {
+				core::ptr::copy(
+					buffer.add(NUM_TEXT_COLS as usize),
+					buffer,
+					NUM_TEXT_COLS * (NUM_TEXT_ROWS - 1),
+				)
+			};
+
+			for blank_col in 0..NUM_TEXT_COLS {
+				let offset = (blank_col as usize) + (NUM_TEXT_COLS * (*row as usize));
+				unsafe { buffer.add(offset).write_volatile(b' ') };
+			}
+		}
+	}
+}
+
+unsafe impl Sync for TextConsole {}
+
+impl core::fmt::Write for &TextConsole {
+	/// Allows us to call `writeln!(some_text_console, "hello")`
+	fn write_str(&mut self, s: &str) -> core::fmt::Result {
+		// Load from global state
+		let mut row = self.current_row.load(Ordering::Relaxed);
+		let mut col = self.current_col.load(Ordering::Relaxed);
+		let buffer = self.text_buffer.load(Ordering::Relaxed);
+
+		if !buffer.is_null() {
+			// Convert a String (a collection of bytes which are valid UTF-8) to CP850 (very badly)
+			for ch in s.chars() {
+				let b = if (ch as u32) < 127 { ch as u8 } else { b'?' };
+
+				self.write_at(b, buffer, &mut row, &mut col);
+			}
+
+			// Push back to global state
+			self.current_row.store(row as u16, Ordering::Relaxed);
+			self.current_col.store(col as u16, Ordering::Relaxed);
+		}
+
+		Ok(())
 	}
 }
 
