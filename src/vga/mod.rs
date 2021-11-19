@@ -39,7 +39,7 @@ pub(crate) mod font;
 // Imports
 // -----------------------------------------------------------------------------
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use defmt::*;
 use pico::hal::pio::PIOExt;
 
@@ -54,19 +54,31 @@ use pico::hal::pio::PIOExt;
 pub struct VideoEngine {
 	/// How many frames have been drawn
 	frame_count: u32,
-	// How many ticks the CPU spent drawing, across the entire frame.
-	running_ticks: u32,
 	/// Look-up table mapping two 1-bpp pixels to two 12-bit RGB values (packed into one 32-bit word).
 	///
 	/// You can adjust this table to convert text to different colours.
 	lookup: [RGBPair; 4],
 }
 
+/// Describes one scan-line's worth of pixels, including the length word required by the Pixel FIFO.
 #[repr(C, align(16))]
 struct LineBuffer {
+	/// Must be one less than the number of pixel-pairs in `pixels`
 	length: u32,
-	pixels: [RGBPair; NUM_PIXEL_PAIRS_PER_LINE],
+	/// Pixels to be displayed, grouped into pairs (to save FIFO space and reduce DMA bandwidth)
+	pixels: [RGBPair; MAX_NUM_PIXEL_PAIRS_PER_LINE],
 }
+
+/// Describes the polarity of a sync pulse.
+///
+/// Some pulses are positive (active-high), some are negative (active-low).
+pub enum SyncPolarity {
+	/// An active-high pulse
+	Positive,
+	/// An active-low pulse
+	Negative,
+}
+
 /// Holds the four scan-line timing FIFO words we need for one scan-line.
 ///
 /// See `make_timing` for a function which can generate these words. We DMA
@@ -78,7 +90,6 @@ struct ScanlineTimingBuffer {
 
 /// Holds the different kinds of scan-line timing buffers we need for various
 /// portions of the screen.
-#[repr(C, align(16))]
 struct TimingBuffer {
 	/// We use this when there are visible pixels on screen
 	visible_line: ScanlineTimingBuffer,
@@ -86,6 +97,14 @@ struct TimingBuffer {
 	vblank_porch_buffer: ScanlineTimingBuffer,
 	/// We use this during the v-sync sync pulse
 	vblank_sync_buffer: ScanlineTimingBuffer,
+	/// The last visible scan-line,
+	visible_lines_ends_at: u16,
+	/// The last scan-line of the front porch
+	front_porch_end_at: u16,
+	/// The last scan-line of the sync pulse
+	sync_pulse_ends_at: u16,
+	/// The last scan-line of the back-porch (and the frame)
+	back_porch_ends_at: u16,
 }
 
 /// Represents a 12-bit colour value.
@@ -97,15 +116,6 @@ struct TimingBuffer {
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct RGBColour(u16);
 
-impl RGBColour {
-	pub const fn from_24bit(red: u8, green: u8, blue: u8) -> RGBColour {
-		let red: u16 = (red as u16) & 0x00F;
-		let green: u16 = (green as u16) & 0x00F;
-		let blue: u16 = (blue as u16) & 0x00F;
-		RGBColour((blue << 12) | (green << 4) | red)
-	}
-}
-
 /// Represents two `RGBColour` pixels packed together.
 ///
 /// The `first` pixel is packed in the lower 16-bits. This is because the PIO
@@ -113,14 +123,6 @@ impl RGBColour {
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct RGBPair(u32);
-
-impl RGBPair {
-	pub const fn from_pixels(first: RGBColour, second: RGBColour) -> RGBPair {
-		let first: u32 = first.0 as u32;
-		let second: u32 = second.0 as u32;
-		RGBPair((second << 16) | first)
-	}
-}
 
 // -----------------------------------------------------------------------------
 // Static and Const Data
@@ -131,111 +133,34 @@ impl RGBPair {
 /// Adjust the pixel PIO program to run at the right speed to the screen is
 /// filled. For example, if this is only 320 but you are aiming at 640x480,
 /// make the pixel PIO take twice as long per pixel.
-const NUM_PIXELS_PER_LINE: usize = 640;
+const MAX_NUM_PIXELS_PER_LINE: usize = 640;
 
 /// How many pixel pairs we send out.
 ///
 /// Each pixel is two 12-bit values packed into one 32-bit word(an `RGBPair`).
 /// This is to make more efficient use of DMA and FIFO resources.
-const NUM_PIXEL_PAIRS_PER_LINE: usize = NUM_PIXELS_PER_LINE / 2;
+const MAX_NUM_PIXEL_PAIRS_PER_LINE: usize = MAX_NUM_PIXELS_PER_LINE / 2;
 
-/// Number of lines on screen.
-const NUM_LINES: usize = 400;
+/// Maximum number of lines on screen.
+const MAX_NUM_LINES: usize = 480;
 
 /// The highest number of columns in any text mode.
-pub const NUM_TEXT_COLS: usize = NUM_PIXELS_PER_LINE / font::WIDTH_PX;
+pub const NUM_TEXT_COLS: usize = MAX_NUM_PIXELS_PER_LINE / font::WIDTH_PX;
 
 /// The highest number of rows in any text mode.
-pub const NUM_TEXT_ROWS: usize = NUM_LINES as usize / font::HEIGHT_PX;
+pub const NUM_TEXT_ROWS: usize = MAX_NUM_LINES as usize / font::HEIGHT_PX;
 
-/// Scan-line on which the visible portion of the screen ends.
-///
-/// This value is for 400 line, 70 Hz mode. We assume the visible portion starts on line zero.
-const V_VISIBLE_END: usize = V_FRONT_PORCH_START - 1;
-
-/// Scan-line on which the front-porch starts.
-///
-/// This value is for 400 line, 70 Hz mode.
-const V_FRONT_PORCH_START: usize = NUM_LINES;
-
-/// Scan-line on which the front-porch ends.
-///
-/// This value is for 400 line, 70 Hz mode.
-const V_FRONT_PORCH_END: usize = V_SYNC_START - 1;
-
-/// Scan-line on which the sync-pulse starts.
-///
-/// This value is for 400 line, 70 Hz mode.
-const V_SYNC_START: usize = 412;
-
-/// Scan-line on which the sync pulse ends.
-///
-/// This value is for 400 line, 70 Hz mode.
-const V_SYNC_END: usize = V_BACK_PORCH_START - 1;
-
-/// Scan-line on which the back-porch starts.
-///
-/// This value is for 400 line, 70 Hz mode.
-const V_BACK_PORCH_START: usize = 416;
-
-/// Scan-line on which the back-porch ends.
-///
-/// This value is for 400 line, 70 Hz mode.
-const V_BACK_PORCH_END: usize = 449;
+/// Used to signal when Core 1 has started
+static CORE1_START_FLAG: AtomicBool = AtomicBool::new(false);
 
 /// Stores our timing data which we DMA into the timing PIO State Machine
-static TIMING_BUFFER: TimingBuffer = TimingBuffer {
-	// Note - the order of the arguments to `make_timing` is:
-	//
-	// * H-Sync Pulse (true = high, false = low)
-	// * V-Sync Pulse (true = high, false = low)
-	// * Generate pixel start IRQ (true or false)
-	visible_line: ScanlineTimingBuffer {
-		data: [
-			// Front porch (as per the spec)
-			make_timing(16 * 5, true, false, false),
-			// Sync pulse (as per the spec)
-			make_timing(96 * 5, false, false, false),
-			// Back porch. Adjusted by a few clocks to account for interrupt +
-			// PIO SM start latency.
-			make_timing((48 * 5) - 5, true, false, false),
-			// Visible portion. It also triggers the IRQ to start pixels
-			// moving. Adjusted to compensate for changes made to previous
-			// period to ensure scan-line remains at correct length.
-			make_timing((640 * 5) + 5, true, false, true),
-		],
-	},
-	vblank_porch_buffer: ScanlineTimingBuffer {
-		data: [
-			// Front porch
-			make_timing(16 * 5, true, false, false),
-			// Sync pulse
-			make_timing(96 * 5, false, false, false),
-			// Back porch
-			make_timing(48 * 5, true, false, false),
-			// 'visible' portion (but it's blank)
-			make_timing(640 * 5, true, false, false),
-		],
-	},
-	vblank_sync_buffer: ScanlineTimingBuffer {
-		data: [
-			// Front porch
-			make_timing(16 * 5, true, true, false),
-			// Sync pulse
-			make_timing(96 * 5, false, true, false),
-			// Back porch
-			make_timing(48 * 5, true, true, false),
-			// Visible portion (but it's blank)
-			make_timing(640 * 5, true, true, false),
-		],
-	},
-};
+static TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x480();
 
 /// Tracks which scan-line we are currently on (for timing purposes => it goes 0..=449)
-static CURRENT_TIMING_LINE: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_TIMING_LINE: AtomicU16 = AtomicU16::new(0);
 
 /// Tracks which scan-line we are currently on (for pixel purposes => it goes 0..NUM_LINES)
-static CURRENT_DISPLAY_LINE: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_DISPLAY_LINE: AtomicU16 = AtomicU16::new(0);
 
 /// Set to `true` when DMA of previous line is complete and next line is scheduled.
 static DMA_READY: AtomicBool = AtomicBool::new(false);
@@ -251,14 +176,14 @@ const PIXEL_DMA_CHAN: usize = 1;
 
 /// 12-bit pixels for the even scan-lines (0, 2, 4 ... NUM_LINES - 2). Defaults to black.
 static mut PIXEL_DATA_BUFFER_EVEN: LineBuffer = LineBuffer {
-	length: (NUM_PIXEL_PAIRS_PER_LINE as u32) - 1,
-	pixels: [RGBPair::from_pixels(colours::WHITE, colours::BLACK); NUM_PIXEL_PAIRS_PER_LINE],
+	length: (MAX_NUM_PIXEL_PAIRS_PER_LINE as u32) - 1,
+	pixels: [RGBPair::from_pixels(colours::WHITE, colours::BLACK); MAX_NUM_PIXEL_PAIRS_PER_LINE],
 };
 
 /// 12-bit pixels for the odd scan-lines (1, 3, 5 ... NUM_LINES-1). Defaults to white.
 static mut PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer {
-	length: (NUM_PIXEL_PAIRS_PER_LINE as u32) - 1,
-	pixels: [RGBPair::from_pixels(colours::BLACK, colours::WHITE); NUM_PIXEL_PAIRS_PER_LINE],
+	length: (MAX_NUM_PIXEL_PAIRS_PER_LINE as u32) - 1,
+	pixels: [RGBPair::from_pixels(colours::BLACK, colours::WHITE); MAX_NUM_PIXEL_PAIRS_PER_LINE],
 };
 
 /// Some dummy text to display.
@@ -266,32 +191,7 @@ static mut PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer {
 /// This is arranged as `NUM_TEXT_ROWS` rows of `NUM_TEXT_COLS` columns. Each
 /// item is an index into `font::FONT_DATA` (or a Code-Page 850 character).
 static mut CHAR_ARRAY: [u8; NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize] =
-*b"\
-\xDA\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xBF\
-\xB3Neotron Pico Booting...                                                       \xB3\
-\xB3                                                                              \xB3\
-\xB3                                                                              \xB3\
-\xB3                                                                              \xB3\
-\xB3                                                                              \xB3\
-\xB3         \xDb\xDb\xDb\xBB\xB2\xB2\xDb\xDb\xBB\xDb\xDb\xDb\xDb\xDb\xDb\xDb\xBB\xB2\xDb\xDb\xDb\xDb\xDb\xBB\xB2\xDb\xDb\xDb\xDb\xDb\xDb\xDb\xDb\xBB\xDb\xDb\xDb\xDb\xDb\xDb\xBB\xB2\xB2\xDb\xDb\xDb\xDb\xDb\xBB\xB2\xDb\xDb\xDb\xBB\xB2\xB2\xDb\xDb\xBB          \xB3\
-\xB3         \xDb\xDb\xDb\xDb\xBB\xB2\xDb\xDb\xBA\xDb\xDb\xC9\xCD\xCD\xCD\xCD\xBC\xDb\xDb\xC9\xCD\xCD\xDb\xDb\xBB\xC8\xCD\xCD\xDb\xDb\xC9\xCD\xCD\xBC\xDb\xDb\xC9\xCD\xCD\xDb\xDb\xBB\xDb\xDb\xC9\xCD\xCD\xDb\xDb\xBB\xDb\xDb\xDb\xDb\xBB\xB2\xDb\xDb\xBA          \xB3\
-\xB3         \xDb\xDb\xC9\xDb\xDb\xBB\xDb\xDb\xBA\xDb\xDb\xDb\xDb\xDb\xBB\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xB2\xDb\xDb\xDb\xDb\xDb\xDb\xC9\xBC\xDb\xDb\xBA\xB2\xB2\xDb\xDb\xBA\xDb\xDb\xC9\xDb\xDb\xBB\xDb\xDb\xBA          \xB3\
-\xB3         \xDb\xDb\xBA\xC8\xDb\xDb\xDb\xDb\xBA\xDb\xDb\xC9\xCD\xCD\xBC\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xB2\xDb\xDb\xC9\xCD\xCD\xDb\xDb\xBB\xDb\xDb\xBA\xB2\xB2\xDb\xDb\xBA\xDb\xDb\xBA\xC8\xDb\xDb\xDb\xDb\xBA          \xB3\
-\xB3         \xDb\xDb\xBA\xB2\xC8\xDb\xDb\xDb\xBA\xDb\xDb\xDb\xDb\xDb\xDb\xDb\xBB\xC8\xDb\xDb\xDb\xDb\xDb\xC9\xBC\xB2\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xB2\xDb\xDb\xBA\xB2\xB2\xDb\xDb\xBA\xC8\xDb\xDb\xDb\xDb\xDb\xC9\xBC\xDb\xDb\xBA\xB2\xC8\xDb\xDb\xDb\xBA          \xB3\
-\xB3                                                                              \xB3\
-\xB3                                                                              \xB3\
-\xB3                                                                              \xB3\
-\xB3                                                                              \xB3\
-\xB3                                                                              \xB3\
-\xB3                                                                              \xB3\
-\xB3                                                                              \xB3\
-\xB3                                                                              \xB3\
-\xB3                                                                              \xB3\
-\xB3                                                                              \xB3\
-\xB3                                                                              \xB3\
-\xB3                                                                              \xB3\
-\xB3This is the end                                                               \xB3\
-\xC0\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4\xD9";
+	[0xB2; NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize];
 
 /// A set of useful constants representing common RGB colours.
 pub mod colours {
@@ -320,7 +220,6 @@ impl VideoEngine {
 	pub fn new() -> VideoEngine {
 		VideoEngine {
 			frame_count: 0,
-			running_ticks: 0,
 			lookup: [
 				RGBPair::from_pixels(colours::BLUE, colours::BLUE),
 				RGBPair::from_pixels(colours::BLUE, colours::WHITE),
@@ -332,16 +231,13 @@ impl VideoEngine {
 
 	pub fn poll(&mut self) {
 		if DMA_READY.load(Ordering::Relaxed) {
-			let awake_at = cortex_m::peripheral::SYST::get_current();
 			DMA_READY.store(false, Ordering::Relaxed);
+			unsafe {
+				CHAR_ARRAY[0] = CHAR_ARRAY[0].wrapping_add(1);
+			}
 			let current_line_num = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
 			if current_line_num == 0 {
-				let cpu_percent = ((self.running_ticks * 1000 * 100) / 400) / 31_777;
-				info!(
-					"Frame {}, awake {} ticks ({}% load)",
-					self.frame_count, self.running_ticks, cpu_percent
-				);
-				self.running_ticks = 0;
+				info!("Frame {}", self.frame_count);
 				self.frame_count += 1;
 			}
 
@@ -355,8 +251,8 @@ impl VideoEngine {
 			};
 
 			// Convert our position in scan-lines to a text row, and a line within each glyph on that row
-			let text_row = (current_line_num / font::HEIGHT_PX) as usize;
-			let font_row = (current_line_num % font::HEIGHT_PX) as usize;
+			let text_row = (current_line_num / font::HEIGHT_PX as u16) as usize;
+			let font_row = (current_line_num % font::HEIGHT_PX as u16) as usize;
 
 			if text_row < NUM_TEXT_ROWS {
 				// Note (unsafe): We could stash the char array inside `self`
@@ -410,8 +306,6 @@ impl VideoEngine {
 					px_idx += 4;
 				}
 			}
-			let running_end = cortex_m::peripheral::SYST::get_current();
-			self.running_ticks += (awake_at - running_end) & 0x00FF_FFFF;
 		}
 	}
 }
@@ -426,7 +320,14 @@ impl Default for VideoEngine {
 ///
 /// We need to keep `pio` and `dma` to run the video. We need `resets` to set
 /// things up, so we only borrow that.
-pub fn init(pio: super::pac::PIO0, dma: super::pac::DMA, resets: &mut super::pac::RESETS) {
+pub fn init(
+	pio: super::pac::PIO0,
+	dma: super::pac::DMA,
+	resets: &mut super::pac::RESETS,
+	ppb: &mut pico::hal::pac::PPB,
+	fifo: &mut pico::hal::sio::SioFifo,
+	psm: &mut pico::hal::pac::PSM,
+) {
 	// Grab PIO0 and the state machines it contains
 	let (mut pio, sm0, sm1, _sm2, _sm3) = pio.split(resets);
 
@@ -482,9 +383,9 @@ pub fn init(pio: super::pac::PIO0, dma: super::pac::DMA, resets: &mut super::pac
 		; Read the line length (in pixel-pairs)
 		out x, 32
 		loop1:
-			; Write out first pixel - takes 5 clocks per pixel (double-width)
+			; Write out first pixel - takes 5 clocks per pixel
 			out pins, 16 [4]
-			; Write out second pixel - takes 5 clocks per pixel (double-width, allowing one for the jump)
+			; Write out second pixel - takes 5 clocks per pixel (allowing one clock for the jump)
 			out pins, 16 [3]
 			; Repeat until all pixel pairs sent
 			jmp x-- loop1
@@ -523,7 +424,7 @@ pub fn init(pio: super::pac::PIO0, dma: super::pac::DMA, resets: &mut super::pac
 	let (mut timing_sm, _, timing_fifo) =
 		pico::hal::pio::PIOBuilder::from_program(timing_installed)
 			.buffers(pico::hal::pio::Buffers::OnlyTx)
-			.out_pins(0, 2)
+			.out_pins(0, 2) // H-Sync is GPIO0, V-Sync is GPIO1
 			.autopull(true)
 			.out_shift_direction(pico::hal::pio::ShiftDirection::Right)
 			.pull_threshold(32)
@@ -543,10 +444,10 @@ pub fn init(pio: super::pac::PIO0, dma: super::pac::DMA, resets: &mut super::pac
 	let pixels_installed = pio.install(&pixel_program.program).unwrap();
 	let (mut pixel_sm, _, pixel_fifo) = pico::hal::pio::PIOBuilder::from_program(pixels_installed)
 		.buffers(pico::hal::pio::Buffers::OnlyTx)
-		.out_pins(2, 12)
+		.out_pins(2, 12) // Red0 is GPIO2, Blue3 is GPIO13
 		.autopull(true)
 		.out_shift_direction(pico::hal::pio::ShiftDirection::Right)
-		.pull_threshold(32)
+		.pull_threshold(32) // We read all 32-bits in each FIFO word
 		.build(sm1);
 	pixel_sm.set_pindirs((2..=13).map(|x| (x, pico::hal::pio::PinDir::Output)));
 
@@ -634,6 +535,146 @@ pub fn init(pio: super::pac::PIO0, dma: super::pac::DMA, resets: &mut super::pac
 	// We drop our state-machine and PIO objects here - this means the video
 	// cannot be reconfigured at a later time, but they do keep on running
 	// as-is.
+
+	static mut CORE1_STACK: [usize; 1024] = [0usize; 1024];
+
+	unsafe {
+		multicore_launch_core1_with_stack(core1_main, &mut CORE1_STACK, ppb, fifo, psm);
+	}
+
+	info!("Core 1 running");
+}
+
+/// The bootrom code will call this function on core1 to perform any set-up, before the
+/// entry function is called.
+extern "C" fn core1_wrapper(entry_func: extern "C" fn() -> u32, _stack_base: *mut u32) -> u32 {
+	return entry_func();
+}
+
+/// Core 1 entry function.
+///
+/// This is a naked function I have pre-compiled to thumb-2 instructions. I
+/// could use inline assembler, but then I'd have to make you install
+/// arm-none-eabi-as or arm-none-eabi-gcc, or wait until `llvm_asm!` is
+/// stablised.
+static CORE1_ENTRY_FUNCTION: [u16; 2] = [
+	// pop {r0, r1, pc} - load the three parameters (which we placed in Core 1's stack) into registers.
+	// Loading PC is basically a jump.
+	0xbd03, // nop - pad this out to 32-bits long
+	0x46c0,
+];
+
+/// Starts core 1 running the given function, with the given stack.
+fn multicore_launch_core1_with_stack(
+	main_func: unsafe extern "C" fn() -> u32,
+	stack: &mut [usize],
+	ppb: &mut pico::hal::pac::PPB,
+	fifo: &mut pico::hal::sio::SioFifo,
+	psm: &mut pico::hal::pac::PSM,
+) {
+	info!("Resetting CPU1...");
+
+	psm.frce_off.modify(|_, w| w.proc1().set_bit());
+	while !psm.frce_off.read().proc1().bit_is_set() {
+		cortex_m::asm::nop();
+	}
+	psm.frce_off.modify(|_, w| w.proc1().clear_bit());
+
+	info!("Setting up stack...");
+
+	// Gets popped into r0 by CORE1_ENTRY_FUNCTION. This is the function we
+	// want to run. It appears in `core1_wrapper` as the first argument.
+	stack[stack.len() - 3] = main_func as *const () as usize;
+	// Gets popped into r1 by CORE1_ENTRY_FUNCTION. This is the top of stack
+	// for Core 1. It appears in `core1_wrapper` as the second argument.
+	stack[stack.len() - 2] = stack.as_ptr() as *const _ as usize;
+	// Gets popped into pc by CORE1_ENTRY_FUNCTION. This is the function
+	// `CORE1_ENTRY_FUNCTION` will jump to, passing the above two values as
+	// arguments.
+	stack[stack.len() - 1] = core1_wrapper as *const () as usize;
+	// Point into the top of the stack (so there are three values pushed onto it, i.e. at/above it)
+	let stack_ptr = unsafe { stack.as_mut_ptr().add(stack.len() - 3) };
+
+	info!("Stack ptr is 0x{:x}", stack_ptr);
+	info!("Stack bottom is 0x{:x}", stack.as_ptr());
+	info!("Stack top is 0x{:x}", &stack[stack.len() - 4..stack.len()]);
+
+	// This is the launch sequence we send to core1, to get it to leave the
+	// boot ROM and run our code.
+	let cmd_sequence: [u32; 6] = [
+		0,
+		0,
+		1,
+		ppb.vtor.read().bits() as usize as u32,
+		stack_ptr as usize as u32,
+		// Have to add 1 to convert from an array pointer to a thumb instruction pointer
+		(CORE1_ENTRY_FUNCTION.as_ptr() as usize as u32) + 1,
+	];
+
+	let enabled = pico::hal::pac::NVIC::is_enabled(pico::hal::pac::Interrupt::SIO_IRQ_PROC0);
+	pico::hal::pac::NVIC::mask(pico::hal::pac::Interrupt::SIO_IRQ_PROC0);
+
+	'outer: loop {
+		for cmd in cmd_sequence.iter() {
+			info!("Sending command {:x}...", *cmd);
+
+			// we drain before sending a 0
+			if *cmd == 0 {
+				info!("Draining FIFO...");
+				fifo.drain();
+				// core 1 may be waiting for fifo space
+				cortex_m::asm::sev();
+			}
+			info!("Pushing to FIFO...");
+			fifo.write_blocking(*cmd);
+
+			info!("Getting response from FIFO...");
+			let response = loop {
+				if let Some(x) = fifo.read() {
+					break x;
+				} else {
+					info!("ST is {:x}", fifo.status());
+				}
+			};
+
+			// move to next state on correct response otherwise start over
+			info!("Got {:x}", response);
+			if *cmd != response {
+				continue 'outer;
+			}
+		}
+		break;
+	}
+
+	if enabled {
+		unsafe { pico::hal::pac::NVIC::unmask(pico::hal::pac::Interrupt::SIO_IRQ_PROC0) };
+	}
+
+	info!("Waiting for Core 1 to start...");
+	while !CORE1_START_FLAG.load(Ordering::Relaxed) {
+		cortex_m::asm::nop();
+	}
+	info!("Core 1 started!!");
+}
+
+/// This function runs the video processing loop on Core 1.
+///
+/// It keeps the odd/even scan-line buffers updated, as per the contents of
+/// the text buffer.
+///
+/// # Safety
+///
+/// Only run this function on Core 1.
+unsafe extern "C" fn core1_main() -> u32 {
+	CORE1_START_FLAG.store(true, Ordering::Relaxed);
+
+	let mut video = VideoEngine::new();
+
+	loop {
+		// This function currently consumes about 70% CPU (or rather, 90% CPU
+		// on each of 400 lines, and 0% CPU on the other 50 lines)
+		video.poll();
+	}
 }
 
 /// Call this function whenever the DMA reports that it has completed a transfer.
@@ -664,7 +705,7 @@ pub unsafe fn irq() {
 		dma.ints0.write(|w| w.bits(1 << TIMING_DMA_CHAN));
 
 		let old_timing_line = CURRENT_TIMING_LINE.load(Ordering::Relaxed);
-		let next_timing_line = if old_timing_line == V_BACK_PORCH_END {
+		let next_timing_line = if old_timing_line == TIMING_BUFFER.back_porch_ends_at {
 			// Wrap around
 			0
 		} else {
@@ -673,13 +714,13 @@ pub unsafe fn irq() {
 		};
 		CURRENT_TIMING_LINE.store(next_timing_line, Ordering::Relaxed);
 
-		let buffer = if next_timing_line <= V_VISIBLE_END {
+		let buffer = if next_timing_line <= TIMING_BUFFER.visible_lines_ends_at {
 			// Visible lines
 			&TIMING_BUFFER.visible_line
-		} else if next_timing_line <= V_FRONT_PORCH_END {
+		} else if next_timing_line <= TIMING_BUFFER.front_porch_end_at {
 			// VGA front porch before VGA sync pulse
 			&TIMING_BUFFER.vblank_porch_buffer
-		} else if next_timing_line <= V_SYNC_END {
+		} else if next_timing_line <= TIMING_BUFFER.sync_pulse_ends_at {
 			// Sync pulse
 			&TIMING_BUFFER.vblank_sync_buffer
 		} else {
@@ -697,7 +738,7 @@ pub unsafe fn irq() {
 		// A pixel DMA transfer is now complete. This only fires on visible lines.
 
 		let mut next_display_line = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed) + 1;
-		if next_display_line > V_VISIBLE_END {
+		if next_display_line > TIMING_BUFFER.visible_lines_ends_at {
 			next_display_line = 0;
 		};
 
@@ -722,58 +763,220 @@ pub unsafe fn irq() {
 	}
 }
 
-/// Generate a 32-bit value we can send to the Timing FIFO.
-///
-/// * `period` - The length of this portion of the scan-line, in system clock ticks
-/// * `hsync` - true if the H-Sync pin should be high during this period, else false
-/// * `vsync` - true if the H-Sync pin should be high during this period, else false
-/// * `raise_irq` - true the timing statemachine should raise an IRQ at the start of this period
-///
-/// Returns a 32-bit value you can post to the Timing FIFO.
-const fn make_timing(period: u32, hsync: bool, vsync: bool, raise_irq: bool) -> u32 {
-	let command = if raise_irq {
-		// This command sets IRQ 0. It is the same as:
-		//
-		// ```
-		// pio::InstructionOperands::IRQ {
-		// 	clear: false,
-		// 	wait: false,
-		// 	index: 0,
-		// 	relative: false,
-		// }.encode()
-		// ```
-		//
-		// Unfortunately encoding this isn't a const-fn, so we cheat:
-		0xc000
-	} else {
-		// This command is a no-op (it moves Y into Y)
-		//
-		// ```
-		// pio::InstructionOperands::MOV {
-		// 	destination: pio::MovDestination::Y,
-		// 	op: pio::MovOperation::None,
-		// 	source: pio::MovSource::Y,
-		// }.encode()
-		// ```
-		//
-		// Unfortunately encoding this isn't a const-fn, so we cheat:
-		0xa042
-	};
-	let mut value: u32 = 0;
-	if hsync {
-		value |= 1 << 0;
-	}
-	if vsync {
-		value |= 1 << 1;
-	}
-	value |= (period - 6) << 2;
-	value | command << 16
-}
-
 impl LineBuffer {
 	/// Convert the line buffer to a 32-bit address that the DMA engine understands.
 	fn as_ptr(&self) -> u32 {
 		self as *const _ as usize as u32
+	}
+}
+
+impl SyncPolarity {
+	const fn enabled(&self) -> bool {
+		match self {
+			SyncPolarity::Positive => true,
+			SyncPolarity::Negative => false,
+		}
+	}
+
+	const fn disabled(&self) -> bool {
+		match self {
+			SyncPolarity::Positive => false,
+			SyncPolarity::Negative => true,
+		}
+	}
+}
+
+impl ScanlineTimingBuffer {
+	/// Create a timing buffer for each scan-line in the V-Sync visible portion.
+	///
+	/// The timings are in the order (front-porch, sync, back-porch, visible) and are in pixel clocks.
+	const fn new_v_visible(
+		hsync: SyncPolarity,
+		vsync: SyncPolarity,
+		timings: (u32, u32, u32, u32),
+	) -> ScanlineTimingBuffer {
+		ScanlineTimingBuffer {
+			data: [
+				// Front porch (as per the spec)
+				Self::make_timing(timings.0 * 5, hsync.disabled(), vsync.disabled(), false),
+				// Sync pulse (as per the spec)
+				Self::make_timing(timings.1 * 5, hsync.enabled(), vsync.disabled(), false),
+				// Back porch. Adjusted by a few clocks to account for interrupt +
+				// PIO SM start latency.
+				Self::make_timing(
+					(timings.2 * 5) - 5,
+					hsync.disabled(),
+					vsync.disabled(),
+					false,
+				),
+				// Visible portion. It also triggers the IRQ to start pixels
+				// moving. Adjusted to compensate for changes made to previous
+				// period to ensure scan-line remains at correct length.
+				Self::make_timing(
+					(timings.3 * 5) + 5,
+					hsync.disabled(),
+					vsync.disabled(),
+					true,
+				),
+			],
+		}
+	}
+
+	/// Create a timing buffer for each scan-line in the V-Sync front-porch and back-porch
+	const fn new_v_porch(
+		hsync: SyncPolarity,
+		vsync: SyncPolarity,
+		timings: (u32, u32, u32, u32),
+	) -> ScanlineTimingBuffer {
+		ScanlineTimingBuffer {
+			data: [
+				// Front porch (as per the spec)
+				Self::make_timing(timings.0 * 5, hsync.disabled(), vsync.disabled(), false),
+				// Sync pulse (as per the spec)
+				Self::make_timing(timings.1 * 5, hsync.enabled(), vsync.disabled(), false),
+				// Back porch.
+				Self::make_timing(timings.2 * 5, hsync.disabled(), vsync.disabled(), false),
+				// Visible portion.
+				Self::make_timing(timings.3 * 5, hsync.disabled(), vsync.disabled(), false),
+			],
+		}
+	}
+
+	/// Create a timing buffer for each scan-line in the V-Sync pulse
+	const fn new_v_pulse(
+		hsync: SyncPolarity,
+		vsync: SyncPolarity,
+		timings: (u32, u32, u32, u32),
+	) -> ScanlineTimingBuffer {
+		ScanlineTimingBuffer {
+			data: [
+				// Front porch (as per the spec)
+				Self::make_timing(timings.0 * 5, hsync.disabled(), vsync.enabled(), false),
+				// Sync pulse (as per the spec)
+				Self::make_timing(timings.1 * 5, hsync.enabled(), vsync.enabled(), false),
+				// Back porch.
+				Self::make_timing(timings.2 * 5, hsync.disabled(), vsync.enabled(), false),
+				// Visible portion.
+				Self::make_timing(timings.3 * 5, hsync.disabled(), vsync.enabled(), false),
+			],
+		}
+	}
+
+	/// Generate a 32-bit value we can send to the Timing FIFO.
+	///
+	/// * `period` - The length of this portion of the scan-line, in system clock ticks
+	/// * `hsync` - true if the H-Sync pin should be high during this period, else false
+	/// * `vsync` - true if the H-Sync pin should be high during this period, else false
+	/// * `raise_irq` - true the timing statemachine should raise an IRQ at the start of this period
+	///
+	/// Returns a 32-bit value you can post to the Timing FIFO.
+	const fn make_timing(period: u32, hsync: bool, vsync: bool, raise_irq: bool) -> u32 {
+		let command = if raise_irq {
+			// This command sets IRQ 0. It is the same as:
+			//
+			// ```
+			// pio::InstructionOperands::IRQ {
+			// 	clear: false,
+			// 	wait: false,
+			// 	index: 0,
+			// 	relative: false,
+			// }.encode()
+			// ```
+			//
+			// Unfortunately encoding this isn't a const-fn, so we cheat:
+			0xc000
+		} else {
+			// This command is a no-op (it moves Y into Y)
+			//
+			// ```
+			// pio::InstructionOperands::MOV {
+			// 	destination: pio::MovDestination::Y,
+			// 	op: pio::MovOperation::None,
+			// 	source: pio::MovSource::Y,
+			// }.encode()
+			// ```
+			//
+			// Unfortunately encoding this isn't a const-fn, so we cheat:
+			0xa042
+		};
+		let mut value: u32 = 0;
+		if hsync {
+			value |= 1 << 0;
+		}
+		if vsync {
+			value |= 1 << 1;
+		}
+		value |= (period - 6) << 2;
+		value | command << 16
+	}
+}
+
+impl TimingBuffer {
+	/// Make a timing buffer suitable for 640 x 400 @ 70 Hz
+	pub const fn make_640x400() -> TimingBuffer {
+		TimingBuffer {
+			visible_line: ScanlineTimingBuffer::new_v_visible(
+				SyncPolarity::Negative,
+				SyncPolarity::Positive,
+				(16, 96, 48, 640),
+			),
+			vblank_porch_buffer: ScanlineTimingBuffer::new_v_porch(
+				SyncPolarity::Negative,
+				SyncPolarity::Positive,
+				(16, 96, 48, 640),
+			),
+			vblank_sync_buffer: ScanlineTimingBuffer::new_v_pulse(
+				SyncPolarity::Negative,
+				SyncPolarity::Positive,
+				(16, 96, 48, 640),
+			),
+			visible_lines_ends_at: 399,
+			front_porch_end_at: 399 + 12,
+			sync_pulse_ends_at: 399 + 12 + 2,
+			back_porch_ends_at: 399 + 12 + 2 + 35,
+		}
+	}
+
+	/// Make a timing buffer suitable for 640 x 480 @ 60 Hz
+	pub const fn make_640x480() -> TimingBuffer {
+		TimingBuffer {
+			visible_line: ScanlineTimingBuffer::new_v_visible(
+				SyncPolarity::Negative,
+				SyncPolarity::Negative,
+				(16, 96, 48, 640),
+			),
+			vblank_porch_buffer: ScanlineTimingBuffer::new_v_porch(
+				SyncPolarity::Negative,
+				SyncPolarity::Negative,
+				(16, 96, 48, 640),
+			),
+			vblank_sync_buffer: ScanlineTimingBuffer::new_v_pulse(
+				SyncPolarity::Negative,
+				SyncPolarity::Negative,
+				(16, 96, 48, 640),
+			),
+			visible_lines_ends_at: 479,
+			front_porch_end_at: 479 + 10,
+			sync_pulse_ends_at: 479 + 10 + 2,
+			back_porch_ends_at: 479 + 10 + 2 + 33,
+		}
+	}
+}
+
+impl RGBColour {
+	pub const fn from_24bit(red: u8, green: u8, blue: u8) -> RGBColour {
+		let red: u16 = (red as u16) & 0x00F;
+		let green: u16 = (green as u16) & 0x00F;
+		let blue: u16 = (blue as u16) & 0x00F;
+		RGBColour((blue << 12) | (green << 4) | red)
+	}
+}
+
+impl RGBPair {
+	pub const fn from_pixels(first: RGBColour, second: RGBColour) -> RGBPair {
+		let first: u32 = first.0 as u32;
+		let second: u32 = second.0 as u32;
+		RGBPair((second << 16) | first)
 	}
 }
 

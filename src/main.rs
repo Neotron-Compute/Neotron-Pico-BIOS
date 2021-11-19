@@ -154,7 +154,7 @@ fn main() -> ! {
 	// sio is the *Single-cycle Input/Output* peripheral. It has all our GPIO
 	// pins, as well as some mailboxes and other useful things for inter-core
 	// communications.
-	let sio = hal::sio::Sio::new(pac.SIO);
+	let mut sio = hal::sio::Sio::new(pac.SIO);
 
 	// Configure and grab all the RP2040 pins the Pico exposes.
 	let pins = pico::Pins::new(
@@ -186,24 +186,22 @@ fn main() -> ! {
 	let _blue2 = pins.gpio12.into_mode::<hal::gpio::FunctionPio0>();
 	let _blue3 = pins.gpio13.into_mode::<hal::gpio::FunctionPio0>();
 
-	vga::init(pac.PIO0, pac.DMA, &mut pac.RESETS);
-
-	core.SYST
-		.set_clock_source(cortex_m::peripheral::syst::SystClkSource::External);
-	core.SYST.set_reload(0x00FF_FFFF);
-	core.SYST.clear_current();
-	core.SYST.enable_counter();
-
-	let mut video = vga::VideoEngine::new();
+	vga::init(
+		pac.PIO0,
+		pac.DMA,
+		&mut pac.RESETS,
+		&mut pac.PPB,
+		&mut sio.fifo,
+		&mut pac.PSM,
+	);
 
 	loop {
 		cortex_m::asm::wfi();
-		// This function currently consumes about 70% CPU (or rather, 90% CPU
-		// on each of 400 lines, and 0% CPU on the other 50 lines)
-		video.poll();
 	}
 }
 
+/// Called when DMA raises IRQ0; i.e. when a DMA transfer to the pixel FIFO or
+/// the timing FIFO has completed.
 #[interrupt]
 fn DMA_IRQ_0() {
 	unsafe {
