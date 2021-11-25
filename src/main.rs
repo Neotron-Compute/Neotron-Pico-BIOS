@@ -34,6 +34,12 @@
 #![no_main]
 
 // -----------------------------------------------------------------------------
+// Sub-modules
+// -----------------------------------------------------------------------------
+
+pub mod vga;
+
+// -----------------------------------------------------------------------------
 // Imports
 // -----------------------------------------------------------------------------
 
@@ -43,11 +49,20 @@ use defmt_rtt as _;
 use embedded_hal::digital::v2::OutputPin;
 use embedded_time::rate::*;
 use git_version::git_version;
-use hal::clocks::Clock;
 use panic_probe as _;
-use pico;
-use pico::hal;
-use pico::hal::pac;
+use pico::{
+	self,
+	hal::{
+		self,
+		pac::{self, interrupt},
+	},
+};
+
+// -----------------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------------
+
+// None
 
 // -----------------------------------------------------------------------------
 // Static and Const Data
@@ -61,58 +76,111 @@ use pico::hal::pac;
 /// See `memory.x` for a definition of the `.boot2` section.
 #[link_section = ".boot2"]
 #[used]
-pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER;
+pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 
 /// BIOS version
 const GIT_VERSION: &str = git_version!();
 
-// -----------------------------------------------------------------------------
-// Types
-// -----------------------------------------------------------------------------
-
-// None
+/// Create a new Text Console
+static TEXT_CONSOLE: vga::TextConsole = vga::TextConsole::new();
 
 // -----------------------------------------------------------------------------
 // Functions
 // -----------------------------------------------------------------------------
 
+/// Prints to the screen
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => {
+        {
+            use core::fmt::Write as _;
+            write!(&TEXT_CONSOLE, $($arg)*).unwrap();
+        }
+    };
+}
+
+/// Prints to the screen and puts a new-line on the end
+#[macro_export]
+macro_rules! println {
+    () => (print!("\n"));
+    ($($arg:tt)*) => {
+        {
+            use core::fmt::Write as _;
+            writeln!(&TEXT_CONSOLE, $($arg)*).unwrap();
+        }
+    };
+}
+
 /// This is the entry-point to the BIOS. It is called by cortex-m-rt once the
 /// `.bss` and `.data` sections have been initialised.
 #[entry]
 fn main() -> ! {
+	cortex_m::interrupt::disable();
+
 	info!("Neotron BIOS {} starting...", GIT_VERSION);
 
 	// Grab the singleton containing all the RP2040 peripherals
 	let mut pac = pac::Peripherals::take().unwrap();
 	// Grab the singleton containing all the generic Cortex-M peripherals
-	let core = pac::CorePeripherals::take().unwrap();
+	let _core = pac::CorePeripherals::take().unwrap();
+
+	// Reset the DMA engine. If we don't do this, starting from probe-run
+	// (as opposed to a cold-start) is unreliable.
+	pac.RESETS.reset.modify(|_r, w| w.dma().set_bit());
+	cortex_m::asm::nop();
+	pac.RESETS.reset.modify(|_r, w| w.dma().clear_bit());
+	while pac.RESETS.reset_done.read().dma().bit_is_clear() {}
 
 	// Needed by the clock setup
 	let mut watchdog = hal::watchdog::Watchdog::new(pac.WATCHDOG);
 
-	// Get ourselves up to a decent clock speed.
-	let clocks = hal::clocks::init_clocks_and_plls(
-		pico::XOSC_CRYSTAL_FREQ,
-		pac.XOSC,
-		pac.CLOCKS,
+	// Run at 126 MHz SYS_PLL, 48 MHz, USB_PLL
+
+	let xosc = hal::xosc::setup_xosc_blocking(pac.XOSC, pico::XOSC_CRYSTAL_FREQ.Hz())
+		.map_err(|_x| false)
+		.unwrap();
+
+	// Configure watchdog tick generation to tick over every microsecond
+	watchdog.enable_tick_generation((pico::XOSC_CRYSTAL_FREQ / 1_000_000) as u8);
+
+	let mut clocks = hal::clocks::ClocksManager::new(pac.CLOCKS);
+
+	let pll_sys = hal::pll::setup_pll_blocking(
 		pac.PLL_SYS,
-		pac.PLL_USB,
+		xosc.operating_frequency().into(),
+		hal::pll::PLLConfig {
+			vco_freq: Megahertz(1512),
+			refdiv: 1,
+			post_div1: 6,
+			post_div2: 2,
+		},
+		&mut clocks,
 		&mut pac.RESETS,
-		&mut watchdog,
 	)
-	.ok()
+	.map_err(|_x| false)
 	.unwrap();
 
-	info!("Clocks OK");
+	let pll_usb = hal::pll::setup_pll_blocking(
+		pac.PLL_USB,
+		xosc.operating_frequency().into(),
+		hal::pll::common_configs::PLL_USB_48MHZ,
+		&mut clocks,
+		&mut pac.RESETS,
+	)
+	.map_err(|_x| false)
+	.unwrap();
 
-	// Create an object we can use to busy-wait for specified numbers of
-	// milliseconds. For this to work, it needs to know our clock speed.
-	let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
+	clocks
+		.init_default(&xosc, &pll_sys, &pll_usb)
+		.map_err(|_x| false)
+		.unwrap();
+
+	info!("Clocks OK");
 
 	// sio is the *Single-cycle Input/Output* peripheral. It has all our GPIO
 	// pins, as well as some mailboxes and other useful things for inter-core
 	// communications.
-	let sio = hal::sio::Sio::new(pac.SIO);
+	let mut sio = hal::sio::Sio::new(pac.SIO);
 
 	// Configure and grab all the RP2040 pins the Pico exposes.
 	let pins = pico::Pins::new(
@@ -122,18 +190,54 @@ fn main() -> ! {
 		&mut pac.RESETS,
 	);
 
+	// Disable power save mode to force SMPS into low-efficiency, low-noise mode.
+	let mut b_power_save = pins.b_power_save.into_push_pull_output();
+	b_power_save.set_high().unwrap();
+
+	// Give H-Sync, V-Sync and 12 RGB colour pins to PIO0 to output video
+	let _h_sync = pins.gpio0.into_mode::<hal::gpio::FunctionPio0>();
+	let _v_sync = pins.gpio1.into_mode::<hal::gpio::FunctionPio0>();
+	let _red0 = pins.gpio2.into_mode::<hal::gpio::FunctionPio0>();
+	let _red1 = pins.gpio3.into_mode::<hal::gpio::FunctionPio0>();
+	let _red2 = pins.gpio4.into_mode::<hal::gpio::FunctionPio0>();
+	let _red3 = pins.gpio5.into_mode::<hal::gpio::FunctionPio0>();
+	let _green0 = pins.gpio6.into_mode::<hal::gpio::FunctionPio0>();
+	let _green1 = pins.gpio7.into_mode::<hal::gpio::FunctionPio0>();
+	let _green2 = pins.gpio8.into_mode::<hal::gpio::FunctionPio0>();
+	let _green3 = pins.gpio9.into_mode::<hal::gpio::FunctionPio0>();
+	let _blue0 = pins.gpio10.into_mode::<hal::gpio::FunctionPio0>();
+	let _blue1 = pins.gpio11.into_mode::<hal::gpio::FunctionPio0>();
+	let _blue2 = pins.gpio12.into_mode::<hal::gpio::FunctionPio0>();
+	let _blue3 = pins.gpio13.into_mode::<hal::gpio::FunctionPio0>();
+
 	info!("Pins OK");
 
-	// Grab the LED pin
-	let mut led_pin = pins.led.into_push_pull_output();
+	vga::init(
+		pac.PIO0,
+		pac.DMA,
+		&mut pac.RESETS,
+		&mut pac.PPB,
+		&mut sio.fifo,
+		&mut pac.PSM,
+	);
 
-	// Do some blinky so we can see it work.
+	TEXT_CONSOLE.set_text_buffer(unsafe { &mut vga::CHAR_ARRAY });
+
+	info!("VGA intialised");
+
+	let mut x: u32 = 0;
 	loop {
-		debug!("Loop...");
-		led_pin.set_high().unwrap();
-		delay.delay_ms(500);
-		led_pin.set_low().unwrap();
-		delay.delay_ms(500);
+		println!("x = {}", x);
+		x = x.wrapping_add(1);
+	}
+}
+
+/// Called when DMA raises IRQ0; i.e. when a DMA transfer to the pixel FIFO or
+/// the timing FIFO has completed.
+#[interrupt]
+fn DMA_IRQ_0() {
+	unsafe {
+		vga::irq();
 	}
 }
 
