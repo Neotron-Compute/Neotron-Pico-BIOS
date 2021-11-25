@@ -11,7 +11,7 @@ version = "0.2.0"
 # Useful Cortex-M specific functions (e.g. SysTick)
 cortex-m = "0.7"
 # The Raspberry Pi Pico HAL
-pico = { git = "https://github.com/rp-rs/rp-hal.git", branch="add_sio_fifo" }
+pico = { git = "https://github.com/rp-rs/rp-hal.git" }
 # Cortex-M run-time (or start-up) code
 cortex-m-rt = "0.7"
 # The BIOS API we export to the OS
