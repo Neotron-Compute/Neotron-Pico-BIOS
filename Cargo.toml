@@ -11,8 +11,7 @@ version = "0.2.0"
 # Useful Cortex-M specific functions (e.g. SysTick)
 cortex-m = "0.7"
 # The Raspberry Pi Pico HAL
-pico = { git = "https://github.com/rp-rs/rp-hal.git" }
-# pico = { path = "/home/jonathan/Documents/rp-rs/rp-hal/boards/pico" }
+pico = { git = "https://github.com/rp-rs/rp-hal.git", branch="add_sio_fifo" }
 # Cortex-M run-time (or start-up) code
 cortex-m-rt = "0.7"
 # The BIOS API we export to the OS
@@ -20,13 +19,13 @@ neotron-common-bios = { git = "https://github.com/Neotron-Compute/Neotron-Common
 # For time keeping/handling
 embedded-time = "0.12"
 # For the RP2040 bootloader
-rp2040-boot2 = "0.1"
+rp2040-boot2 = "0.2"
 # For hardware abstraction traits
 embedded-hal ="0.2"
 # Gives us formatted PC-side logging
-defmt = "0.2"
+defmt = "0.3"
 # Sends defmt logs to the SWD debugger
-defmt-rtt = "0.2"
+defmt-rtt = "0.3"
 # Send panics to the debugger
 panic-probe = "0.2"
 # Fetches the BIOS version from git
@@ -64,6 +63,3 @@ codegen-units = 1
 debug = true
 # better optimizations
 lto = true
-
-[patch.crates-io]
-rp2040-pac = { path = "/home/jonathan/Documents/rp-rs/rp2040-pac" }
