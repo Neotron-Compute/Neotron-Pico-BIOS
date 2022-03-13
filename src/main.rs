@@ -74,6 +74,13 @@ const GIT_VERSION: &str = git_version!();
 /// Create a new Text Console
 static TEXT_CONSOLE: vga::TextConsole = vga::TextConsole::new();
 
+extern "C" {
+	static mut _flash_os_start: u32;
+	static mut _flash_os_len: u32;
+	static mut _ram_os_start: u32;
+	static mut _ram_os_len: u32;
+}
+
 // -----------------------------------------------------------------------------
 // Functions
 // -----------------------------------------------------------------------------
@@ -217,8 +224,9 @@ fn main() -> ! {
 		&mut pac.PSM,
 	);
 
-	TEXT_CONSOLE.set_text_buffer(unsafe { &mut vga::CHAR_ARRAY });
+	TEXT_CONSOLE.set_text_buffer(unsafe { &mut vga::GLYPH_ATTR_ARRAY });
 
+	// A crude way to clear the screen
 	for _col in 0..vga::NUM_TEXT_ROWS {
 		println!();
 	}
@@ -244,29 +252,18 @@ fn main() -> ! {
 	println!();
 	println!("Searching for Neotron OS...");
 
-	extern "C" {
-		static mut _flash_os_start: u32;
-		static mut _flash_os_len: u32;
-		static mut _ram_os_start: u32;
-		static mut _ram_os_len: u32;
-	}
+	let flash_os_start = unsafe { &mut _flash_os_start as *mut u32 as usize };
+	let flash_os_len = unsafe { &mut _flash_os_len as *mut u32 as usize };
+	let ram_os_start = unsafe { &mut _ram_os_start as *mut u32 as usize };
+	let ram_os_len = unsafe { &mut _ram_os_len as *mut u32 as usize };
 
-	let flash_os_start = unsafe {
-		&mut _flash_os_start as *mut u32 as usize
-	};
-	let flash_os_len = unsafe {
-		&mut _flash_os_len as *mut u32 as usize
-	};
-	let ram_os_start = unsafe {
-		&mut _ram_os_start as *mut u32 as usize
-	};
-	let ram_os_len = unsafe {
-		&mut _ram_os_len as *mut u32 as usize
-	};
+	println!(
+		"OS Flash @ 0x{:08x}, {} bytes",
+		flash_os_start, flash_os_len
+	);
+	println!("OS RAM   @ 0x{:08x}, {} bytes", ram_os_start, ram_os_len);
 
-	println!("OS Flash is {:08x}, {} bytes", flash_os_start, flash_os_len);
-	println!("OS RAM is {:08x}, {} bytes", ram_os_start, ram_os_len);
-
+	// A dummy loop so we know it's running
 	let mut x: u32 = 0;
 	loop {
 		print!("\rx = {}", x);

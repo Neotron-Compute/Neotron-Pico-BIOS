@@ -66,7 +66,7 @@ struct RenderEngine {
 pub struct TextConsole {
 	current_col: AtomicU16,
 	current_row: AtomicU16,
-	text_buffer: AtomicPtr<u8>,
+	text_buffer: AtomicPtr<GlyphAttr>,
 }
 
 /// Describes one scan-line's worth of pixels, including the length word required by the Pixel FIFO.
@@ -132,6 +132,22 @@ pub struct RGBColour(u16);
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct RGBPair(u32);
+
+/// Represents a glyph in the current font.
+#[repr(transparent)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct Glyph(u8);
+
+/// Represents VGA format foreground/background attributes.
+#[repr(transparent)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct Attr(u8);
+
+/// Represents a glyph/attribute pair. This is what out text console is made
+/// out of. They work in exactly the same way as IBM PC VGA.
+#[repr(transparent)]
+#[derive(Copy, Clone, PartialEq, Eq, Default)]
+pub struct GlyphAttr(u16);
 
 // -----------------------------------------------------------------------------
 // Static and Const Data
@@ -206,11 +222,12 @@ static mut PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer {
 /// This is our text buffer.
 ///
 /// This is arranged as `NUM_TEXT_ROWS` rows of `NUM_TEXT_COLS` columns. Each
-/// item is an index into `font::FONT_DATA` (or a Code-Page 850 character).
+/// item is an index into `font::FONT_DATA` (or a Code-Page 850 character)
+/// plus an 8-bit attribute.
 ///
 /// Written to by Core 0, and read from by `RenderEngine` running on Core 1.
-pub static mut CHAR_ARRAY: [u8; NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize] =
-	[0u8; NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize];
+pub static mut GLYPH_ATTR_ARRAY: [GlyphAttr; NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize] =
+	[GlyphAttr(0); NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize];
 
 /// Core 1 entry function.
 ///
@@ -740,7 +757,7 @@ impl RenderEngine {
 				// state. At least our platform is fixed, so we can simply
 				// test if it works, for some given version of the Rust compiler.
 				let row_slice = unsafe {
-					&CHAR_ARRAY[(text_row * NUM_TEXT_COLS)..((text_row + 1) * NUM_TEXT_COLS)]
+					&GLYPH_ATTR_ARRAY[(text_row * NUM_TEXT_COLS)..((text_row + 1) * NUM_TEXT_COLS)]
 				};
 				// Every font look-up we are about to do for this row will
 				// involve offsetting by the row within each glyph. As this
@@ -754,14 +771,15 @@ impl RenderEngine {
 				let mut px_idx = 0;
 
 				// Convert from characters to coloured pixels, using the font as a look-up table.
-				for ch in row_slice.iter() {
-					let index = (*ch as isize) * 16;
+				for glyphattr in row_slice.iter() {
+					let index = (glyphattr.glyph().0 as isize) * 16;
 					// Note (unsafe): We use pointer arithmetic here because we
 					// can't afford a bounds-check on an array. This is safe
 					// because the font is `256 * width` bytes long and we can't
 					// index more than `255 * width` bytes into it.
 					let mono_pixels = unsafe { *font_ptr.offset(index) } as usize;
-					// Convert from eight mono pixels in one byte to four RGB pairs
+					// Convert from eight mono pixels in one byte to four RGB
+					// pairs. Hopefully the `& 3` elides the panic calls.
 					unsafe {
 						core::ptr::write_volatile(
 							scan_line_buffer_ptr.offset(px_idx),
@@ -808,7 +826,10 @@ impl TextConsole {
 	/// Update the text buffer we are using.
 	///
 	/// Will reset the cursor. The screen is not cleared.
-	pub fn set_text_buffer(&self, text_buffer: &'static mut [u8; NUM_TEXT_ROWS * NUM_TEXT_COLS]) {
+	pub fn set_text_buffer(
+		&self,
+		text_buffer: &'static mut [GlyphAttr; NUM_TEXT_ROWS * NUM_TEXT_COLS],
+	) {
 		self.text_buffer
 			.store(text_buffer.as_mut_ptr(), Ordering::Relaxed)
 	}
@@ -817,14 +838,14 @@ impl TextConsole {
 	///
 	/// Adjusts the current row and column automatically. Also understands
 	/// Carriage Return and New Line bytes.
-	pub fn write_font_glyph(&self, font_glyph: u8) {
+	pub fn write_font_glyph(&self, glyph: Glyph) {
 		// Load from global state
 		let mut row = self.current_row.load(Ordering::Relaxed);
 		let mut col = self.current_col.load(Ordering::Relaxed);
 		let buffer = self.text_buffer.load(Ordering::Relaxed);
 
 		if !buffer.is_null() {
-			self.write_at(font_glyph, buffer, &mut row, &mut col);
+			self.write_at(glyph, buffer, &mut row, &mut col);
 			// Push back to global state
 			self.current_row.store(row as u16, Ordering::Relaxed);
 			self.current_col.store(col as u16, Ordering::Relaxed);
@@ -848,10 +869,10 @@ impl TextConsole {
 	/// Zero-width and modifier Unicode Scalar Values (e.g. `U+0301 COMBINING,
 	/// ACCENT`) are not supported. Normalise your Unicode before calling
 	/// this function.
-	fn map_char_to_glyph(input: char) -> u8 {
+	fn map_char_to_glyph(input: char) -> Glyph {
 		// This fixed table only works for the default font. When we support
 		// changing font, we will need to plug-in a different table for each font.
-		match input {
+		let index = match input {
 			'\u{0000}'..='\u{007F}' => input as u8,
 			'\u{00A0}' => 255, // NBSP
 			'\u{00A1}' => 173, // ¡
@@ -982,22 +1003,27 @@ impl TextConsole {
 			'\u{2593}' => 178, // ▓
 			'\u{25A0}' => 254, // ■
 			_ => b'?',
-		}
+		};
+		Glyph(index)
 	}
 
 	/// Put a single character at a specified point on screen.
 	///
 	/// The character is relative to the current font.
-	fn write_at(&self, font_glyph: u8, buffer: *mut u8, row: &mut u16, col: &mut u16) {
-		if font_glyph == b'\r' {
+	fn write_at(&self, glyph: Glyph, buffer: *mut GlyphAttr, row: &mut u16, col: &mut u16) {
+		if glyph.0 == b'\r' {
 			*col = 0;
-		} else if font_glyph == b'\n' {
+		} else if glyph.0 == b'\n' {
 			*col = 0;
 			*row += 1;
 		} else {
 			let offset = (*col as usize) + (NUM_TEXT_COLS * (*row as usize));
 			// Note (safety): This is safe as we bound `col` and `row`
-			unsafe { buffer.add(offset).write_volatile(font_glyph) };
+			unsafe {
+				buffer
+					.add(offset)
+					.write_volatile(GlyphAttr::new(glyph, Attr(0)))
+			};
 			*col += 1;
 		}
 		if *col == (NUM_TEXT_COLS as u16) {
@@ -1018,7 +1044,11 @@ impl TextConsole {
 
 			for blank_col in 0..NUM_TEXT_COLS {
 				let offset = (blank_col as usize) + (NUM_TEXT_COLS * (*row as usize));
-				unsafe { buffer.add(offset).write_volatile(b' ') };
+				unsafe {
+					buffer
+						.add(offset)
+						.write_volatile(GlyphAttr::new(Glyph(b' '), Attr(0)))
+				};
 			}
 		}
 	}
@@ -1263,6 +1293,24 @@ impl RGBPair {
 		let first: u32 = first.0 as u32;
 		let second: u32 = second.0 as u32;
 		RGBPair((second << 16) | first)
+	}
+}
+
+impl GlyphAttr {
+	/// Make a new glyph/attribute pair.
+	pub const fn new(glyph: Glyph, attr: Attr) -> GlyphAttr {
+		let value: u16 = (glyph.0 as u16) + ((attr.0 as u16) << 8);
+		GlyphAttr(value)
+	}
+
+	/// Get the glyph component of this pair.
+	pub const fn glyph(self) -> Glyph {
+		Glyph(self.0 as u8)
+	}
+
+	/// Get the attribute component of this pair.
+	pub const fn attr(self) -> Attr {
+		Attr((self.0 >> 8) as u8)
 	}
 }
 
