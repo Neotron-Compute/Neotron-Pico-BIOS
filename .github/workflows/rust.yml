@@ -34,8 +34,6 @@ jobs:
           override: true
       - name: Install Rust targets for ${{ matrix.rust }}
         run: rustup target install --toolchain=${{ matrix.rust }} thumbv6m-none-eabi
-      - name: Build
-        run: cargo build --verbose
       - name: Build Release
         run: cargo build --release --verbose
       - name: Clippy
