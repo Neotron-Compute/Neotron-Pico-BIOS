@@ -44,13 +44,13 @@ pub mod vga;
 // -----------------------------------------------------------------------------
 
 use cortex_m_rt::entry;
-use defmt::*;
+use defmt::info;
 use defmt_rtt as _;
 use embedded_hal::digital::v2::OutputPin;
 use embedded_time::rate::*;
 use git_version::git_version;
 use panic_probe as _;
-use pico::{
+use rp_pico::{
 	self,
 	hal::{
 		self,
@@ -68,27 +68,27 @@ use pico::{
 // Static and Const Data
 // -----------------------------------------------------------------------------
 
-/// This is the standard RP2040 bootloader. It must be stored in the first 256
-/// bytes of the external SPI Flash chip. It will map the external SPI flash
-/// chip to address `0x1000_0000` and jump to an Interrupt Vector Table at
-/// address `0x1000_0100` (i.e. immediately after the bootloader).
-///
-/// See `memory.x` for a definition of the `.boot2` section.
-#[link_section = ".boot2"]
-#[used]
-pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
-
 /// BIOS version
 const GIT_VERSION: &str = git_version!();
 
 /// Create a new Text Console
 static TEXT_CONSOLE: vga::TextConsole = vga::TextConsole::new();
 
+extern "C" {
+	static mut _flash_os_start: u32;
+	static mut _flash_os_len: u32;
+	static mut _ram_os_start: u32;
+	static mut _ram_os_len: u32;
+}
+
 // -----------------------------------------------------------------------------
 // Functions
 // -----------------------------------------------------------------------------
 
-/// Prints to the screen
+/// Prints to the screen.
+///
+/// This function is NOT interrupt safe. Only call from the main thread, on
+/// core 1.
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {
@@ -99,7 +99,10 @@ macro_rules! print {
     };
 }
 
-/// Prints to the screen and puts a new-line on the end
+/// Prints to the screen and puts a new-line on the end.
+///
+/// This function is NOT interrupt safe. Only call from the main thread, on
+/// core 1.
 #[macro_export]
 macro_rules! println {
     () => (print!("\n"));
@@ -136,12 +139,12 @@ fn main() -> ! {
 
 	// Run at 126 MHz SYS_PLL, 48 MHz, USB_PLL
 
-	let xosc = hal::xosc::setup_xosc_blocking(pac.XOSC, pico::XOSC_CRYSTAL_FREQ.Hz())
+	let xosc = hal::xosc::setup_xosc_blocking(pac.XOSC, rp_pico::XOSC_CRYSTAL_FREQ.Hz())
 		.map_err(|_x| false)
 		.unwrap();
 
 	// Configure watchdog tick generation to tick over every microsecond
-	watchdog.enable_tick_generation((pico::XOSC_CRYSTAL_FREQ / 1_000_000) as u8);
+	watchdog.enable_tick_generation((rp_pico::XOSC_CRYSTAL_FREQ / 1_000_000) as u8);
 
 	let mut clocks = hal::clocks::ClocksManager::new(pac.CLOCKS);
 
@@ -183,7 +186,7 @@ fn main() -> ! {
 	let mut sio = hal::sio::Sio::new(pac.SIO);
 
 	// Configure and grab all the RP2040 pins the Pico exposes.
-	let pins = pico::Pins::new(
+	let pins = rp_pico::Pins::new(
 		pac.IO_BANK0,
 		pac.PADS_BANK0,
 		sio.gpio_bank0,
@@ -221,13 +224,49 @@ fn main() -> ! {
 		&mut pac.PSM,
 	);
 
-	TEXT_CONSOLE.set_text_buffer(unsafe { &mut vga::CHAR_ARRAY });
+	TEXT_CONSOLE.set_text_buffer(unsafe { &mut vga::GLYPH_ATTR_ARRAY });
 
-	info!("VGA intialised");
+	// A crude way to clear the screen
+	for _col in 0..vga::NUM_TEXT_ROWS {
+		println!();
+	}
 
+	TEXT_CONSOLE.move_to(0, 0);
+
+	println!("Neotron Pico BIOS, for the Raspberry Pi RP2040");
+	println!("Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2021");
+	println!("Version {}", GIT_VERSION);
+	println!();
+	println!("This program is free software: you can redistribute it and/or modify");
+	println!("it under the terms of the GNU General Public License as published by");
+	println!("the Free Software Foundation, either version 3 of the License, or");
+	println!("(at your option) any later version.");
+	println!();
+	println!("This program is distributed in the hope that it will be useful,");
+	println!("but WITHOUT ANY WARRANTY; without even the implied warranty of");
+	println!("MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the");
+	println!("GNU General Public License for more details.");
+	println!();
+	println!("You should have received a copy of the GNU General Public License");
+	println!("along with this program.  If not, see https://www.gnu.org/licenses/.");
+	println!();
+	println!("Searching for Neotron OS...");
+
+	let flash_os_start = unsafe { &mut _flash_os_start as *mut u32 as usize };
+	let flash_os_len = unsafe { &mut _flash_os_len as *mut u32 as usize };
+	let ram_os_start = unsafe { &mut _ram_os_start as *mut u32 as usize };
+	let ram_os_len = unsafe { &mut _ram_os_len as *mut u32 as usize };
+
+	println!(
+		"OS Flash @ 0x{:08x}, {} bytes",
+		flash_os_start, flash_os_len
+	);
+	println!("OS RAM   @ 0x{:08x}, {} bytes", ram_os_start, ram_os_len);
+
+	// A dummy loop so we know it's running
 	let mut x: u32 = 0;
 	loop {
-		println!("x = {}", x);
+		print!("\rx = {}", x);
 		x = x.wrapping_add(1);
 	}
 }

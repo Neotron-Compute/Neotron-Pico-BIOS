@@ -11,7 +11,7 @@ version = "0.2.0"
 # Useful Cortex-M specific functions (e.g. SysTick)
 cortex-m = "0.7"
 # The Raspberry Pi Pico HAL
-pico = { git = "https://github.com/rp-rs/rp-hal.git" }
+rp-pico = "0.3"
 # Cortex-M run-time (or start-up) code
 cortex-m-rt = "0.7"
 # The BIOS API we export to the OS
@@ -28,12 +28,12 @@ defmt = "0.3"
 defmt-rtt = "0.3"
 # Send panics to the debugger
 panic-probe = "0.2"
-# Fetches the BIOS version from git
+# Fetches git hashes from git at compile time
 git-version = "0.3"
-# RP2040 PIO driver
-pio = { git = "https://github.com/rp-rs/pio-rs.git", branch = "main" }
-# RP2040 PIO driver macros
-pio-proc = { git = "https://github.com/rp-rs/pio-rs.git", branch = "main" }
+# RP2040 PIO assembler
+pio = "0.2"
+# Macros for RP2040 PIO assembler
+pio-proc = "0.2"
 
 [features]
 default = [
