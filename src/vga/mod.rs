@@ -40,8 +40,8 @@ pub(crate) mod font;
 // -----------------------------------------------------------------------------
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, Ordering};
-use defmt::*;
-use pico::hal::pio::PIOExt;
+use defmt::{debug, trace};
+use rp_pico::hal::pio::PIOExt;
 
 // -----------------------------------------------------------------------------
 // Types
@@ -210,7 +210,7 @@ static mut PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer {
 ///
 /// Written to by Core 0, and read from by `RenderEngine` running on Core 1.
 pub static mut CHAR_ARRAY: [u8; NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize] =
-	[0xB2; NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize];
+	[0u8; NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize];
 
 /// Core 1 entry function.
 ///
@@ -258,9 +258,9 @@ pub fn init(
 	pio: super::pac::PIO0,
 	dma: super::pac::DMA,
 	resets: &mut super::pac::RESETS,
-	ppb: &mut pico::hal::pac::PPB,
-	fifo: &mut pico::hal::sio::SioFifo,
-	psm: &mut pico::hal::pac::PSM,
+	ppb: &mut crate::pac::PPB,
+	fifo: &mut rp_pico::hal::sio::SioFifo,
+	psm: &mut crate::pac::PSM,
 ) {
 	// Grab PIO0 and the state machines it contains
 	let (mut pio, sm0, sm1, _sm2, _sm3) = pio.split(resets);
@@ -279,21 +279,18 @@ pub fn init(
 	// of clock cycles.
 	//
 	// Note: autopull should be set to 32-bits, OSR is set to shift right.
-	let timing_program = pio_proc::pio!(
-		32,
-		"
-		.wrap_target
-		; Step 1. Push next 2 bits of OSR into `pins`, to set H-Sync and V-Sync
-		out pins, 2
-		; Step 2. Push last 14 bits of OSR into X for the timing loop.
-		out x, 14
-		; Step 3. Execute bottom 16-bits of OSR as an instruction. This take two cycles.
-		out exec, 16
-		loop0:
-			; Spin until X is zero
-			jmp x-- loop0
-		.wrap
-		"
+	let timing_program = pio_proc::pio_asm!(
+		".wrap_target"
+		// Step 1. Push next 2 bits of OSR into `pins`, to set H-Sync and V-Sync
+		"out pins, 2"
+		// Step 2. Push last 14 bits of OSR into X for the timing loop.
+		"out x, 14"
+		// Step 3. Execute bottom 16-bits of OSR as an instruction. This take two cycles.
+		"out exec, 16"
+		// Spin until X is zero
+		"loop0:"
+			"jmp x-- loop0"
+		".wrap"
 	);
 
 	// This is the video pixels program. It waits for an IRQ
@@ -308,25 +305,22 @@ pub fn init(
 	// we read the length from the FIFO as well, all hell breaks loose.
 	//
 	// Note autopull should be set to 32-bits, OSR is set to shift right.
-	let pixel_program = pio_proc::pio!(
-		32,
-		"
-		.wrap_target
-		; Wait for timing state machine to start visible line
-		wait 1 irq 0
-		; Read the line length (in pixel-pairs)
-		out x, 32
-		loop1:
-			; Write out first pixel - takes 5 clocks per pixel
-			out pins, 16 [4]
-			; Write out second pixel - takes 5 clocks per pixel (allowing one clock for the jump)
-			out pins, 16 [3]
-			; Repeat until all pixel pairs sent
-			jmp x-- loop1
-		; Clear all pins after visible section
-		mov pins null
-		.wrap
-		"
+	let pixel_program = pio_proc::pio_asm!(
+		".wrap_target"
+		// Wait for timing state machine to start visible line
+		"wait 1 irq 0"
+		// Read the line length (in pixel-pairs)
+		"out x, 32"
+		"loop1:"
+			// Write out first pixel - takes 5 clocks per pixel
+			"out pins, 16 [4]"
+			// Write out second pixel - takes 5 clocks per pixel (allowing one clock for the jump)
+			"out pins, 16 [3]"
+			// Repeat until all pixel pairs sent
+			"jmp x-- loop1"
+		// Clear all pins after visible section
+		"mov pins null"
+		".wrap"
 	);
 
 	// These two state machines run thus:
@@ -356,16 +350,16 @@ pub fn init(
 
 	let timing_installed = pio.install(&timing_program.program).unwrap();
 	let (mut timing_sm, _, timing_fifo) =
-		pico::hal::pio::PIOBuilder::from_program(timing_installed)
-			.buffers(pico::hal::pio::Buffers::OnlyTx)
+		rp_pico::hal::pio::PIOBuilder::from_program(timing_installed)
+			.buffers(rp_pico::hal::pio::Buffers::OnlyTx)
 			.out_pins(0, 2) // H-Sync is GPIO0, V-Sync is GPIO1
 			.autopull(true)
-			.out_shift_direction(pico::hal::pio::ShiftDirection::Right)
+			.out_shift_direction(rp_pico::hal::pio::ShiftDirection::Right)
 			.pull_threshold(32)
 			.build(sm0);
 	timing_sm.set_pindirs([
-		(0, pico::hal::pio::PinDir::Output),
-		(1, pico::hal::pio::PinDir::Output),
+		(0, rp_pico::hal::pio::PinDir::Output),
+		(1, rp_pico::hal::pio::PinDir::Output),
 	]);
 
 	// Important notes!
@@ -376,14 +370,15 @@ pub fn init(
 	// each line differs by some number of 126 MHz clock cycles).
 
 	let pixels_installed = pio.install(&pixel_program.program).unwrap();
-	let (mut pixel_sm, _, pixel_fifo) = pico::hal::pio::PIOBuilder::from_program(pixels_installed)
-		.buffers(pico::hal::pio::Buffers::OnlyTx)
-		.out_pins(2, 12) // Red0 is GPIO2, Blue3 is GPIO13
-		.autopull(true)
-		.out_shift_direction(pico::hal::pio::ShiftDirection::Right)
-		.pull_threshold(32) // We read all 32-bits in each FIFO word
-		.build(sm1);
-	pixel_sm.set_pindirs((2..=13).map(|x| (x, pico::hal::pio::PinDir::Output)));
+	let (mut pixel_sm, _, pixel_fifo) =
+		rp_pico::hal::pio::PIOBuilder::from_program(pixels_installed)
+			.buffers(rp_pico::hal::pio::Buffers::OnlyTx)
+			.out_pins(2, 12) // Red0 is GPIO2, Blue3 is GPIO13
+			.autopull(true)
+			.out_shift_direction(rp_pico::hal::pio::ShiftDirection::Right)
+			.pull_threshold(32) // We read all 32-bits in each FIFO word
+			.build(sm1);
+	pixel_sm.set_pindirs((2..=13).map(|x| (x, rp_pico::hal::pio::PinDir::Output)));
 
 	// Read from the timing buffer and write to the timing FIFO. We get an
 	// IRQ when the transfer is complete (i.e. when line has been fully
@@ -453,8 +448,8 @@ pub fn init(
 
 		// Enable the interrupts (DMA_PERIPH has to be set first)
 		cortex_m::interrupt::enable();
-		pico::hal::pac::NVIC::unpend(pico::hal::pac::Interrupt::DMA_IRQ_0);
-		pico::hal::pac::NVIC::unmask(pico::hal::pac::Interrupt::DMA_IRQ_0);
+		crate::pac::NVIC::unpend(crate::pac::Interrupt::DMA_IRQ_0);
+		crate::pac::NVIC::unmask(crate::pac::Interrupt::DMA_IRQ_0);
 	}
 
 	debug!("IRQs enabled");
@@ -470,11 +465,24 @@ pub fn init(
 	// cannot be reconfigured at a later time, but they do keep on running
 	// as-is.
 
-	static mut CORE1_STACK: [usize; 1024] = [0usize; 1024];
+	let core1_stack: &'static mut [usize] = unsafe {
+		extern "C" {
+			static mut _core1_stack_bottom: usize;
+			static mut _core1_stack_len: usize;
+		}
+		core::slice::from_raw_parts_mut(
+			&mut _core1_stack_bottom as *mut _,
+			&mut _core1_stack_len as *const _ as usize / 4,
+		)
+	};
 
-	unsafe {
-		multicore_launch_core1_with_stack(core1_main, &mut CORE1_STACK, ppb, fifo, psm);
-	}
+	debug!(
+		"Core 1 stack: {:08x}, {} bytes",
+		core1_stack.as_ptr(),
+		core1_stack.len()
+	);
+
+	multicore_launch_core1_with_stack(core1_main, core1_stack, ppb, fifo, psm);
 
 	debug!("Core 1 running");
 }
@@ -489,9 +497,9 @@ extern "C" fn core1_wrapper(entry_func: extern "C" fn() -> u32, _stack_base: *mu
 fn multicore_launch_core1_with_stack(
 	main_func: unsafe extern "C" fn() -> u32,
 	stack: &mut [usize],
-	ppb: &mut pico::hal::pac::PPB,
-	fifo: &mut pico::hal::sio::SioFifo,
-	psm: &mut pico::hal::pac::PSM,
+	ppb: &mut crate::pac::PPB,
+	fifo: &mut rp_pico::hal::sio::SioFifo,
+	psm: &mut crate::pac::PSM,
 ) {
 	debug!("Resetting CPU1...");
 
@@ -535,8 +543,8 @@ fn multicore_launch_core1_with_stack(
 		(CORE1_ENTRY_FUNCTION.as_ptr() as usize as u32) + 1,
 	];
 
-	let enabled = pico::hal::pac::NVIC::is_enabled(pico::hal::pac::Interrupt::SIO_IRQ_PROC0);
-	pico::hal::pac::NVIC::mask(pico::hal::pac::Interrupt::SIO_IRQ_PROC0);
+	let enabled = crate::pac::NVIC::is_enabled(crate::pac::Interrupt::SIO_IRQ_PROC0);
+	crate::pac::NVIC::mask(crate::pac::Interrupt::SIO_IRQ_PROC0);
 
 	'outer: loop {
 		for cmd in cmd_sequence.iter() {
@@ -571,7 +579,7 @@ fn multicore_launch_core1_with_stack(
 	}
 
 	if enabled {
-		unsafe { pico::hal::pac::NVIC::unmask(pico::hal::pac::Interrupt::SIO_IRQ_PROC0) };
+		unsafe { crate::pac::NVIC::unmask(crate::pac::Interrupt::SIO_IRQ_PROC0) };
 	}
 
 	debug!("Waiting for Core 1 to start...");
@@ -706,7 +714,7 @@ impl RenderEngine {
 			DMA_READY.store(false, Ordering::Relaxed);
 			let current_line_num = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
 			if current_line_num == 0 {
-				debug!("Frame {}", self.frame_count);
+				trace!("Frame {}", self.frame_count);
 				self.frame_count += 1;
 			}
 
@@ -809,30 +817,187 @@ impl TextConsole {
 	///
 	/// Adjusts the current row and column automatically. Also understands
 	/// Carriage Return and New Line bytes.
-	pub fn write_cp850_char(&self, cp850_char: u8) {
+	pub fn write_font_glyph(&self, font_glyph: u8) {
 		// Load from global state
 		let mut row = self.current_row.load(Ordering::Relaxed);
 		let mut col = self.current_col.load(Ordering::Relaxed);
 		let buffer = self.text_buffer.load(Ordering::Relaxed);
 
 		if !buffer.is_null() {
-			self.write_at(cp850_char, buffer, &mut row, &mut col);
+			self.write_at(font_glyph, buffer, &mut row, &mut col);
 			// Push back to global state
 			self.current_row.store(row as u16, Ordering::Relaxed);
 			self.current_col.store(col as u16, Ordering::Relaxed);
 		}
 	}
 
-	fn write_at(&self, cp850_char: u8, buffer: *mut u8, row: &mut u16, col: &mut u16) {
-		if cp850_char == b'\r' {
+	/// Moves the text cursor to the specified row and column.
+	///
+	/// If a value is out of bounds, the cursor is not moved in that axis.
+	pub fn move_to(&self, row: u16, col: u16) {
+		if row < (NUM_TEXT_ROWS as u16) {
+			self.current_row.store(row, Ordering::Relaxed);
+		}
+		if col < (NUM_TEXT_COLS as u16) {
+			self.current_col.store(col, Ordering::Relaxed);
+		}
+	}
+
+	/// Convert a Unicode Scalar Value to a font glyph.
+	///
+	/// Zero-width and modifier Unicode Scalar Values (e.g. `U+0301 COMBINING,
+	/// ACCENT`) are not supported. Normalise your Unicode before calling
+	/// this function.
+	fn map_char_to_glyph(input: char) -> u8 {
+		// This fixed table only works for the default font. When we support
+		// changing font, we will need to plug-in a different table for each font.
+		match input {
+			'\u{0000}'..='\u{007F}' => input as u8,
+			'\u{00A0}' => 255, // NBSP
+			'\u{00A1}' => 173, // ¡
+			'\u{00A2}' => 189, // ¢
+			'\u{00A3}' => 156, // £
+			'\u{00A4}' => 207, // ¤
+			'\u{00A5}' => 190, // ¥
+			'\u{00A6}' => 221, // ¦
+			'\u{00A7}' => 245, // §
+			'\u{00A8}' => 249, // ¨
+			'\u{00A9}' => 184, // ©
+			'\u{00AA}' => 166, // ª
+			'\u{00AB}' => 174, // «
+			'\u{00AC}' => 170, // ¬
+			'\u{00AD}' => 240, // SHY
+			'\u{00AE}' => 169, // ®
+			'\u{00AF}' => 238, // ¯
+			'\u{00B0}' => 248, // °
+			'\u{00B1}' => 241, // ±
+			'\u{00B2}' => 253, // ²
+			'\u{00B3}' => 252, // ³
+			'\u{00B4}' => 239, // ´
+			'\u{00B5}' => 230, // µ
+			'\u{00B6}' => 244, // ¶
+			'\u{00B7}' => 250, // ·
+			'\u{00B8}' => 247, // ¸
+			'\u{00B9}' => 251, // ¹
+			'\u{00BA}' => 167, // º
+			'\u{00BB}' => 175, // »
+			'\u{00BC}' => 172, // ¼
+			'\u{00BD}' => 171, // ½
+			'\u{00BE}' => 243, // ¾
+			'\u{00BF}' => 168, // ¿
+			'\u{00C0}' => 183, // À
+			'\u{00C1}' => 181, // Á
+			'\u{00C2}' => 182, // Â
+			'\u{00C3}' => 199, // Ã
+			'\u{00C4}' => 142, // Ä
+			'\u{00C5}' => 143, // Å
+			'\u{00C6}' => 146, // Æ
+			'\u{00C7}' => 128, // Ç
+			'\u{00C8}' => 212, // È
+			'\u{00C9}' => 144, // É
+			'\u{00CA}' => 210, // Ê
+			'\u{00CB}' => 211, // Ë
+			'\u{00CC}' => 222, // Ì
+			'\u{00CD}' => 214, // Í
+			'\u{00CE}' => 215, // Î
+			'\u{00CF}' => 216, // Ï
+			'\u{00D0}' => 209, // Ð
+			'\u{00D1}' => 165, // Ñ
+			'\u{00D2}' => 227, // Ò
+			'\u{00D3}' => 224, // Ó
+			'\u{00D4}' => 226, // Ô
+			'\u{00D5}' => 229, // Õ
+			'\u{00D6}' => 153, // Ö
+			'\u{00D7}' => 158, // ×
+			'\u{00D8}' => 157, // Ø
+			'\u{00D9}' => 235, // Ù
+			'\u{00DA}' => 233, // Ú
+			'\u{00DB}' => 234, // Û
+			'\u{00DC}' => 154, // Ü
+			'\u{00DD}' => 237, // Ý
+			'\u{00DE}' => 232, // Þ
+			'\u{00DF}' => 225, // ß
+			'\u{00E0}' => 133, // à
+			'\u{00E1}' => 160, // á
+			'\u{00E2}' => 131, // â
+			'\u{00E3}' => 198, // ã
+			'\u{00E4}' => 132, // ä
+			'\u{00E5}' => 134, // å
+			'\u{00E6}' => 145, // æ
+			'\u{00E7}' => 135, // ç
+			'\u{00E8}' => 138, // è
+			'\u{00E9}' => 130, // é
+			'\u{00EA}' => 136, // ê
+			'\u{00EB}' => 137, // ë
+			'\u{00EC}' => 141, // ì
+			'\u{00ED}' => 161, // í
+			'\u{00EE}' => 140, // î
+			'\u{00EF}' => 139, // ï
+			'\u{00F0}' => 208, // ð
+			'\u{00F1}' => 164, // ñ
+			'\u{00F2}' => 149, // ò
+			'\u{00F3}' => 162, // ó
+			'\u{00F4}' => 147, // ô
+			'\u{00F5}' => 228, // õ
+			'\u{00F6}' => 148, // ö
+			'\u{00F7}' => 246, // ÷
+			'\u{00F8}' => 155, // ø
+			'\u{00F9}' => 151, // ù
+			'\u{00FA}' => 163, // ú
+			'\u{00FB}' => 150, // û
+			'\u{00FC}' => 129, // ü
+			'\u{00FD}' => 236, // ý
+			'\u{00FE}' => 231, // þ
+			'\u{00FF}' => 152, // ÿ
+			'\u{0131}' => 213, // ı
+			'\u{0192}' => 159, // ƒ
+			'\u{2017}' => 242, // ‗
+			'\u{2500}' => 196, // ─
+			'\u{2502}' => 179, // │
+			'\u{250C}' => 218, // ┌
+			'\u{2510}' => 191, // ┐
+			'\u{2514}' => 192, // └
+			'\u{2518}' => 217, // ┘
+			'\u{251C}' => 195, // ├
+			'\u{2524}' => 180, // ┤
+			'\u{252C}' => 194, // ┬
+			'\u{2534}' => 193, // ┴
+			'\u{253C}' => 197, // ┼
+			'\u{2550}' => 205, // ═
+			'\u{2551}' => 186, // ║
+			'\u{2554}' => 201, // ╔
+			'\u{2557}' => 187, // ╗
+			'\u{255A}' => 200, // ╚
+			'\u{255D}' => 188, // ╝
+			'\u{2560}' => 204, // ╠
+			'\u{2563}' => 185, // ╣
+			'\u{2566}' => 203, // ╦
+			'\u{2569}' => 202, // ╩
+			'\u{256C}' => 206, // ╬
+			'\u{2580}' => 223, // ▀
+			'\u{2584}' => 220, // ▄
+			'\u{2588}' => 219, // █
+			'\u{2591}' => 176, // ░
+			'\u{2592}' => 177, // ▒
+			'\u{2593}' => 178, // ▓
+			'\u{25A0}' => 254, // ■
+			_ => b'?',
+		}
+	}
+
+	/// Put a single character at a specified point on screen.
+	///
+	/// The character is relative to the current font.
+	fn write_at(&self, font_glyph: u8, buffer: *mut u8, row: &mut u16, col: &mut u16) {
+		if font_glyph == b'\r' {
 			*col = 0;
-		} else if cp850_char == b'\n' {
+		} else if font_glyph == b'\n' {
 			*col = 0;
 			*row += 1;
 		} else {
 			let offset = (*col as usize) + (NUM_TEXT_COLS * (*row as usize));
 			// Note (safety): This is safe as we bound `col` and `row`
-			unsafe { buffer.add(offset).write_volatile(cp850_char) };
+			unsafe { buffer.add(offset).write_volatile(font_glyph) };
 			*col += 1;
 		}
 		if *col == (NUM_TEXT_COLS as u16) {
@@ -870,10 +1035,8 @@ impl core::fmt::Write for &TextConsole {
 		let buffer = self.text_buffer.load(Ordering::Relaxed);
 
 		if !buffer.is_null() {
-			// Convert a String (a collection of bytes which are valid UTF-8) to CP850 (very badly)
 			for ch in s.chars() {
-				let b = if (ch as u32) < 127 { ch as u8 } else { b'?' };
-
+				let b = TextConsole::map_char_to_glyph(ch);
 				self.write_at(b, buffer, &mut row, &mut col);
 			}
 
