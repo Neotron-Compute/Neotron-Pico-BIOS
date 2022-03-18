@@ -8,15 +8,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.experimental || false }}
-    strategy:
-      matrix:
-        # All code should be running on stable now
-        rust: [nightly, stable]
-        include:
-          # Nightly is only for reference and allowed to fail
-          - rust: nightly
-            experimental: true
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
@@ -27,7 +18,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: ${{ matrix.rust }}
+          toolchain: stable
           override: true
           target: thumbv6m-none-eabi
 
