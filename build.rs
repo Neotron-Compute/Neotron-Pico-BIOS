@@ -28,4 +28,22 @@ fn main() {
 	// here, we ensure the build script is only re-run when
 	// `memory.x` is changed.
 	println!("cargo:rerun-if-changed=memory.x");
+
+	// Get git version
+	if let Ok(cmd_output) = std::process::Command::new("git")
+		.arg("describe")
+		.arg("--all")
+		.arg("--dirty")
+		.arg("--long")
+		.output()
+	{
+		let git_version = std::str::from_utf8(&cmd_output.stdout).unwrap();
+		println!(
+			"cargo:rustc-env=BIOS_VERSION={} (git:{})",
+			env!("CARGO_PKG_VERSION"),
+			git_version.trim()
+		);
+	} else {
+		println!("cargo:rustc-env=BIOS_VERSION={}", env!("CARGO_PKG_VERSION"));
+	}
 }
