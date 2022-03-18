@@ -68,4 +68,12 @@ SECTIONS {
     {
         KEEP(*(.boot2));
     } > BOOT2
+
+    /* ### Neotron OS */
+    .flash_os ORIGIN(FLASH_OS) :
+    {
+        KEEP(*(.flash_os));
+    } > FLASH_OS
 } INSERT BEFORE .text;
+
+
