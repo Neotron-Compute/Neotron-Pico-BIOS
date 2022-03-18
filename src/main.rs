@@ -55,7 +55,8 @@ use rp_pico::{
 	self,
 	hal::{
 		self,
-		pac::{self, interrupt}, Clock,
+		pac::{self, interrupt},
+		Clock,
 	},
 };
 
@@ -70,14 +71,10 @@ use rp_pico::{
 // -----------------------------------------------------------------------------
 
 /// The BIOS version string
-static BIOS_VERSION: &str = concat!(
-	"Neotron Pico BIOS version ",
-	env!("BIOS_VERSION"),
-	"\0"
-);
+static BIOS_VERSION: &str = concat!("Neotron Pico BIOS version ", env!("BIOS_VERSION"), "\0");
 
 /// This is our Operating System. It must be compiled separately.
-/// 
+///
 /// The RP2040 requires an OS linked at `0x1002_0000`, which is the OS binary
 /// `flash1002`. Use `objdump` as per the README file to make a `flash1002.bin`.
 #[link_section = ".flash_os"]
@@ -220,9 +217,9 @@ fn main() -> ! {
 		&mut pp.PSM,
 	);
 
-    // Say hello over VGA (with a bit of a pause)
-    let mut delay = cortex_m::delay::Delay::new(cp.SYST, clocks.system_clock.freq().integer());
-    sign_on(&mut delay);
+	// Say hello over VGA (with a bit of a pause)
+	let mut delay = cortex_m::delay::Delay::new(cp.SYST, clocks.system_clock.freq().integer());
+	sign_on(&mut delay);
 
 	// Now jump to the OS
 	let flash_os_start = unsafe { &mut _flash_os_start as *mut u32 as usize };
@@ -254,7 +251,7 @@ fn sign_on(delay: &mut cortex_m::delay::Delay) {
 	// A crude way to clear the screen
 	for _col in 0..vga::NUM_TEXT_ROWS {
 		writeln!(&tc).unwrap();
-    }
+	}
 
 	tc.move_to(0, 0);
 
@@ -264,10 +261,10 @@ fn sign_on(delay: &mut cortex_m::delay::Delay) {
 	write!(&tc, "Loading Neotron OS...\n").unwrap();
 
 	// Wait for a bit
-    for n in [5, 4, 3, 2, 1].iter() {
-        write!(&tc, "{}...", n).unwrap();
-        delay.delay_ms(1000);
-    }
+	for n in [5, 4, 3, 2, 1].iter() {
+		write!(&tc, "{}...", n).unwrap();
+		delay.delay_ms(1000);
+	}
 
 	// A crude way to clear the screen
 	for _col in 0..vga::NUM_TEXT_ROWS {
