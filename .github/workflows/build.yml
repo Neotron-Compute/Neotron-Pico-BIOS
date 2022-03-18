@@ -48,6 +48,6 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            target/thumbv6m-none-eabi/release/neotron-pico
+            ./target/thumbv6m-none-eabi/release/neotron-pico-bios
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
