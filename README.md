@@ -47,18 +47,27 @@ The Neotron BIOS uses the [defmt](https://crates.io/crates/defmt) crate to provi
 
 2. Flash your *Debugger* Pico with https://github.com/majbthrd/DapperMime firmware (e.g. by copying the UF2 file to the USB Mass Storage device)
 
-3. On your PC, install *probe-rs-rp* from the RP2040-specific [probe-run](https://github.com/knurling-rs/probe-run) fork at https://github.com/rp-rs/probe-run.
+3. On your PC, install [*probe-rs*](https://github.com/knurling-rs/probe-run), the programming tool from [Ferrous System's](https://www.ferrous-systems.com) [Knurling Project](https://github.com/knurling).
 
 ```console
-user@host ~ $ cargo install probe-rs-rp
+user@host ~ $ cargo install probe-rs
 ```
 
 4. Power on your Neotron Pico.
 
-5. Build and load the Neotron BIOS, and view the debug output stream, with `cargo run`:
+5. Build the Neotron OS
+
+We use the "neotron-os-pico.ld" linker script to link it at `0x1002_0000`.
 
 ```console
-user@host ~/neotron-pico-bios $ cargo run --release
+user@host ~/neotron-os $ cargo build --release
+user@host ~/neotron-os $ arm-none-eabi-objcopy -O binary ./target/thumbv6m-none-eabi/release/flash1002 ../neotron-pico-bios/src/flash1002.bin
+```
+
+6. Build and load the Neotron BIOS, and view the debug output stream, with `cargo run --release`:
+
+```console
+user@host ~/neotron-pico-bios $ DEFMT_LOG=debug cargo run --release
    Compiling neotron-pico-bios v0.1.0 (/home/jonathan/Documents/neotron/neotron-pico-bios)
     Finished release [optimized + debuginfo] target(s) in 0.76s
      Running `probe-run-rp --chip RP2040 target/thumbv6m-none-eabi/release/neotron-pico-bios`
@@ -74,6 +83,8 @@ user@host ~/neotron-pico-bios $ cargo run --release
  DEBUG Loop...
 └─ neotron_pico_bios::__cortex_m_rt_main @ src/main.rs:128
 ``` 
+
+You should see your Neotron Pico boot, both over RTT in the `probe-run` output, and also on the VGA output.
 
 ## Changelog
 

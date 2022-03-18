@@ -21,23 +21,46 @@ MEMORY {
     /*
      * This is the remainder of the 2048 KiB flash chip.
      */
-    FLASH_OS: ORIGIN = 0x10020000, LENGTH = 2048K - 128K
+    FLASH_OS : ORIGIN = 0x10020000, LENGTH = 2048K - 128K
     /*
-     * This is the internal SRAM in the RP2040.
+     * This is the bottom of the four striped banks of SRAM in the RP2040.
      */
-    RAM   : ORIGIN = 0x20000000, LENGTH = 256K
+    RAM_OS : ORIGIN = 0x20000000, LENGTH = 0x3C000
+    /*
+     * This is the top of the four striped banks of SRAM in the RP2040.
+     */
+    RAM : ORIGIN = 0x2003C000, LENGTH = 16K
+    /*
+     * This is the fifth bank, a 4KB block. We use this for Core 0 Stack.
+     */
+    RAM_CORE0_STACK : ORIGIN = 0x20040000, LENGTH = 4K
+    /*
+     * This is the sixth bank, a 4KB block. We use this for Core 1 Stack.
+     */
+    RAM_CORE1_STACK : ORIGIN = 0x20041000, LENGTH = 4K
 }
-/* This is where the call stack will be allocated. */
-/* The stack is of the full descending type. */
-/* You may want to use this variable to locate the call stack and static
-   variables in different memory regions. Below is shown the default value */
-_stack_start = ORIGIN(RAM) + LENGTH(RAM);
+
+/*
+ * This is where the call stack for Core 0 will be located. The stack is of
+ * the full descending type. You may want to use this variable to locate the
+ * call stack and static variables in different memory regions. Below is
+ * shown the default value
+ */
+_stack_start = ORIGIN(RAM_CORE0_STACK) + LENGTH(RAM_CORE0_STACK);
+
+/*
+ * This is where the call stack for Core 1 will be located.
+ */
+_core1_stack_bottom = ORIGIN(RAM_CORE1_STACK);
+_core1_stack_len = LENGTH(RAM_CORE1_STACK);
 
 /*
  * Export some symbols to tell the BIOS where it might find the OS.
  */
 _flash_os_start = ORIGIN(FLASH_OS);
 _flash_os_len = LENGTH(FLASH_OS);
+_ram_os_start = ORIGIN(RAM_OS);
+_ram_os_len = LENGTH(RAM_OS);
 
 SECTIONS {
     /* ### RP2040 Boot loader */
@@ -45,4 +68,12 @@ SECTIONS {
     {
         KEEP(*(.boot2));
     } > BOOT2
+
+    /* ### Neotron OS */
+    .flash_os ORIGIN(FLASH_OS) :
+    {
+        KEEP(*(.flash_os));
+    } > FLASH_OS
 } INSERT BEFORE .text;
+
+
