@@ -1,8 +1,14 @@
 # Changelog
 
-## Unreleased Changes ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/master) | [Changes](https://github.com/neotron-compute/neotron-pico-bios/compare/v0.1.0...master))
+## Unreleased Changes ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/develop) | [Changes](https://github.com/neotron-compute/neotron-pico-bios/compare/v0.3.0...develop))
 
 * None
+
+## v0.3.0 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.3.0) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.3.0))
+
+* Boots OS 0.1.0
+* VGA 80x30 text mode (640x480 @ 60Hz)
+* Update defmt and other crates
 
 ## v0.2.0 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.2.0) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.2.0))
 
