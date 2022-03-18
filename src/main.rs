@@ -255,10 +255,10 @@ fn sign_on(delay: &mut cortex_m::delay::Delay) {
 
 	tc.move_to(0, 0);
 
-	write!(&tc, "{}\n", &BIOS_VERSION[0..BIOS_VERSION.len() - 1]).unwrap();
+	writeln!(&tc, "{}", &BIOS_VERSION[0..BIOS_VERSION.len() - 1]).unwrap();
 	write!(&tc, "{}", LICENCE_TEXT).unwrap();
 
-	write!(&tc, "Loading Neotron OS...\n").unwrap();
+	writeln!(&tc, "Loading Neotron OS...").unwrap();
 
 	// Wait for a bit
 	for n in [5, 4, 3, 2, 1].iter() {
@@ -461,11 +461,15 @@ pub extern "C" fn video_set_framebuffer(_buffer: *mut u8) -> common::Result<()> 
 /// (other than Region 0), so faster memory should be listed first.
 ///
 /// If the region number given is invalid, the function returns `(null, 0)`.
+///
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn memory_get_region(
 	region: u8,
 	out_start: *mut *mut u8,
 	out_len: *mut usize,
 ) -> common::Result<()> {
+	// The clippy allow is because the API isn't marked as 'unsafe', and so we
+	// can't mark this function as 'unsafe'.
 	match region {
 		// Application Region
 		0 => {
