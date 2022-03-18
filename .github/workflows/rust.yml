@@ -10,17 +10,12 @@ jobs:
     continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       matrix:
-        # All generated code should be running on stable now
+        # All code should be running on stable now
         rust: [nightly, stable]
         include:
           # Nightly is only for reference and allowed to fail
           - rust: nightly
             experimental: true
-        os:
-          - ubuntu-latest
-          - macOS-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v2
@@ -36,7 +31,12 @@ jobs:
         run: rustup target install --toolchain=${{ matrix.rust }} thumbv6m-none-eabi
       - name: Build Release
         run: cargo build --release --verbose
-      - name: Clippy
-        uses: actions-rs/clippy-check@v1
+  clippy_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v1
+      - run: rustup component add clippy
+      - uses: actions-rs/clippy-check@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          args: --all-features --target=thumbv6m-none-eabi
