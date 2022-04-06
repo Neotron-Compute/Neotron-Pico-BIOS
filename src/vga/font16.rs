@@ -29,14 +29,14 @@
 //! OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 //! SUCH DAMAGE.
 
-/// Width of the font in pixels
-pub const WIDTH_PX: usize = 8;
-
-/// Height of the font in pixels
-pub const HEIGHT_PX: usize = 16;
+/// An 8x16 font
+pub static FONT: super::Font = super::Font {
+	height: 16,
+	data: &DATA,
+};
 
 /// Our font data - arranged as 256 glyphs of 1 byte/row x 16 row/glyph.
-pub static DATA: [u8; 256 * HEIGHT_PX] = [
+static DATA: [u8; 256 * 16] = [
 	// Char::Null
 	0b0000_0000,
 	0b0000_0000,

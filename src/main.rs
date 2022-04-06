@@ -43,6 +43,7 @@ pub mod vga;
 // Imports
 // -----------------------------------------------------------------------------
 
+use common::MemoryRegion;
 use core::fmt::Write;
 use cortex_m_rt::entry;
 use defmt::info;
@@ -222,14 +223,13 @@ fn main() -> ! {
 	sign_on(&mut delay);
 
 	// Now jump to the OS
-	let flash_os_start = unsafe { &mut _flash_os_start as *mut u32 as usize };
-	let code: &common::OsStartFn = unsafe { ::core::mem::transmute(flash_os_start) };
+	let code: &common::OsStartFn = unsafe { ::core::mem::transmute(&_flash_os_start) };
 	code(&API_CALLS);
 }
 
 fn sign_on(delay: &mut cortex_m::delay::Delay) {
 	static LICENCE_TEXT: &str = "\
-        Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2021\n\
+        Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2022\n\
         \n\
         This program is free software: you can redistribute it and/or modify\n\
         it under the terms of the GNU General Public License as published by\n\
@@ -249,7 +249,7 @@ fn sign_on(delay: &mut cortex_m::delay::Delay) {
 	tc.set_text_buffer(unsafe { &mut vga::GLYPH_ATTR_ARRAY });
 
 	// A crude way to clear the screen
-	for _col in 0..vga::NUM_TEXT_ROWS {
+	for _col in 0..vga::MAX_TEXT_ROWS {
 		writeln!(&tc).unwrap();
 	}
 
@@ -267,7 +267,7 @@ fn sign_on(delay: &mut cortex_m::delay::Delay) {
 	}
 
 	// A crude way to clear the screen
-	for _col in 0..vga::NUM_TEXT_ROWS {
+	for _col in 0..vga::MAX_TEXT_ROWS {
 		writeln!(&tc).unwrap();
 	}
 	tc.move_to(0, 0);
@@ -399,8 +399,12 @@ pub extern "C" fn video_is_valid_mode(mode: common::video::Mode) -> bool {
 /// `video_get_framebuffer` will return `null`. You must then supply a
 /// pointer to a block of size `Mode::frame_size_bytes()` to
 /// `video_set_framebuffer` before any video will appear.
-pub extern "C" fn video_set_mode(_mode: common::video::Mode) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+pub extern "C" fn video_set_mode(mode: common::video::Mode) -> common::Result<()> {
+	if vga::set_video_mode(mode) {
+		common::Result::Ok(())
+	} else {
+		common::Result::Err(common::Error::UnsupportedConfiguration(0))
+	}
 }
 
 /// Returns the video mode the BIOS is currently in.
@@ -409,10 +413,7 @@ pub extern "C" fn video_set_mode(_mode: common::video::Mode) -> common::Result<(
 /// the value - this is the `default` video mode which can always be
 /// serviced without supplying extra RAM.
 pub extern "C" fn video_get_mode() -> common::video::Mode {
-	common::video::Mode::new(
-		common::video::Timing::T640x480,
-		common::video::Format::Text8x16,
-	)
+	vga::get_video_mode()
 }
 
 /// Get the framebuffer address.
@@ -434,12 +435,16 @@ pub extern "C" fn video_get_framebuffer() -> *mut u8 {
 
 /// Set the framebuffer address.
 ///
-/// Tell the BIOS where it should start fetching pixel or textual data
-/// from (depending on the current video mode).
+/// Tell the BIOS where it should start fetching pixel or textual data from
+/// (depending on the current video mode).
 ///
-/// This value is forgotten after a video mode change and must be
-/// re-supplied.
-pub extern "C" fn video_set_framebuffer(_buffer: *mut u8) -> common::Result<()> {
+/// This value is forgotten after a video mode change and must be re-supplied.
+///
+/// # Safety
+///
+/// The pointer must point to enough video memory to handle the current video
+/// mode, and any future video mode you set.
+pub unsafe extern "C" fn video_set_framebuffer(_buffer: *const u8) -> common::Result<()> {
 	common::Result::Err(common::Error::Unimplemented)
 }
 
@@ -461,31 +466,15 @@ pub extern "C" fn video_set_framebuffer(_buffer: *mut u8) -> common::Result<()> 
 /// (other than Region 0), so faster memory should be listed first.
 ///
 /// If the region number given is invalid, the function returns `(null, 0)`.
-///
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn memory_get_region(
-	region: u8,
-	out_start: *mut *mut u8,
-	out_len: *mut usize,
-) -> common::Result<()> {
-	// The clippy allow is because the API isn't marked as 'unsafe', and so we
-	// can't mark this function as 'unsafe'.
+pub extern "C" fn memory_get_region(region: u8) -> common::Result<common::MemoryRegion> {
 	match region {
-		// Application Region
 		0 => {
-			if !out_start.is_null() {
-				unsafe {
-					let ram_os_start = &mut _ram_os_start as *mut u32 as *mut u8;
-					out_start.write(ram_os_start);
-				}
-			}
-			if !out_len.is_null() {
-				unsafe {
-					let ram_os_len = &mut _ram_os_len as *const u32 as usize;
-					out_len.write(ram_os_len);
-				}
-			}
-			common::Result::Ok(())
+			// Application Region
+			common::Result::Ok(MemoryRegion {
+				start: unsafe { &mut _ram_os_start as *mut u32 } as *mut u8,
+				length: unsafe { &mut _ram_os_len as *const u32 } as usize,
+				kind: common::MemoryKind::Ram,
+			})
 		}
 		_ => common::Result::Err(common::Error::InvalidDevice),
 	}

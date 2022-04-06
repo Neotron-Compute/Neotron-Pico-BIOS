@@ -33,13 +33,14 @@
 // Sub-modules
 // -----------------------------------------------------------------------------
 
-pub(crate) mod font;
+mod font16;
+mod font8;
 
 // -----------------------------------------------------------------------------
 // Imports
 // -----------------------------------------------------------------------------
 
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, AtomicUsize, Ordering};
 use defmt::{debug, trace};
 use rp_pico::hal::pio::PIOExt;
 
@@ -58,6 +59,12 @@ struct RenderEngine {
 	///
 	/// You can adjust this table to convert text to different colours.
 	lookup: [RGBPair; 4],
+}
+
+/// A font
+pub struct Font<'a> {
+	height: usize,
+	data: &'a [u8],
 }
 
 /// Holds some data necessary to present a text console.
@@ -160,28 +167,94 @@ pub struct GlyphAttr(u16);
 /// make the pixel PIO take twice as long per pixel.
 const MAX_NUM_PIXELS_PER_LINE: usize = 640;
 
+/// Maximum number of lines on screen.
+const MAX_NUM_LINES: usize = 480;
+
 /// How many pixel pairs we send out.
 ///
 /// Each pixel is two 12-bit values packed into one 32-bit word(an `RGBPair`).
 /// This is to make more efficient use of DMA and FIFO resources.
 const MAX_NUM_PIXEL_PAIRS_PER_LINE: usize = MAX_NUM_PIXELS_PER_LINE / 2;
 
-/// Maximum number of lines on screen.
-const MAX_NUM_LINES: usize = 480;
-
 /// The highest number of columns in any text mode.
-pub const NUM_TEXT_COLS: usize = MAX_NUM_PIXELS_PER_LINE / font::WIDTH_PX;
+pub const MAX_TEXT_COLS: usize = MAX_NUM_PIXELS_PER_LINE / 8;
 
 /// The highest number of rows in any text mode.
-pub const NUM_TEXT_ROWS: usize = MAX_NUM_LINES as usize / font::HEIGHT_PX;
+pub const MAX_TEXT_ROWS: usize = MAX_NUM_LINES as usize / 8;
+
+/// Current number of visible columns.
+///
+/// Must be `<= MAX_TEXT_COLS`
+pub static NUM_TEXT_COLS: AtomicUsize = AtomicUsize::new(80);
+
+/// Current number of visible rows.
+///
+/// Must be `<= MAX_TEXT_ROWS`
+pub static NUM_TEXT_ROWS: AtomicUsize = AtomicUsize::new(25);
 
 /// Used to signal when Core 1 has started
 static CORE1_START_FLAG: AtomicBool = AtomicBool::new(false);
 
 /// Stores our timing data which we DMA into the timing PIO State Machine
-static TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x480();
+static mut TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x480();
 
-/// Tracks which scan-line we are currently on (for timing purposes => it goes 0..=449)
+/// Stores which mode we are in
+static mut VIDEO_MODE: crate::common::video::Mode = crate::common::video::Mode::new(
+	crate::common::video::Timing::T640x480,
+	crate::common::video::Format::Text8x16,
+);
+
+/// Gets the current video mode
+pub fn get_video_mode() -> crate::common::video::Mode {
+	unsafe { VIDEO_MODE }
+}
+
+/// Sets the current video mode
+pub fn set_video_mode(mode: crate::common::video::Mode) -> bool {
+	cortex_m::interrupt::disable();
+	let mode_ok = match (
+		mode.timing(),
+		mode.format(),
+		mode.is_horiz_2x(),
+		mode.is_vert_2x(),
+	) {
+		(
+			crate::common::video::Timing::T640x480,
+			crate::common::video::Format::Text8x16 | crate::common::video::Format::Text8x8,
+			false,
+			false,
+		) => {
+			unsafe {
+				VIDEO_MODE = mode;
+				TIMING_BUFFER = TimingBuffer::make_640x480();
+			}
+			true
+		}
+		(
+			crate::common::video::Timing::T640x400,
+			crate::common::video::Format::Text8x16 | crate::common::video::Format::Text8x8,
+			false,
+			false,
+		) => {
+			unsafe {
+				VIDEO_MODE = mode;
+				TIMING_BUFFER = TimingBuffer::make_640x400();
+			}
+			true
+		}
+		_ => false,
+	};
+	if mode_ok {
+		NUM_TEXT_COLS.store(mode.text_width().unwrap_or(0) as usize, Ordering::SeqCst);
+		NUM_TEXT_ROWS.store(mode.text_height().unwrap_or(0) as usize, Ordering::SeqCst);
+	}
+	unsafe {
+		cortex_m::interrupt::enable();
+	}
+	mode_ok
+}
+
+/// Tracks which scan-line we are currently on (for timing purposes => it goes 0..`TIMING_BUFFER.back_porch_ends_at`)
 static CURRENT_TIMING_LINE: AtomicU16 = AtomicU16::new(0);
 
 /// Tracks which scan-line we are currently on (for pixel purposes => it goes 0..NUM_LINES)
@@ -222,12 +295,11 @@ static mut PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer {
 /// This is our text buffer.
 ///
 /// This is arranged as `NUM_TEXT_ROWS` rows of `NUM_TEXT_COLS` columns. Each
-/// item is an index into `font::FONT_DATA` (or a Code-Page 850 character)
-/// plus an 8-bit attribute.
+/// item is an index into `font16::FONT_DATA` plus an 8-bit attribute.
 ///
 /// Written to by Core 0, and read from by `RenderEngine` running on Core 1.
-pub static mut GLYPH_ATTR_ARRAY: [GlyphAttr; NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize] =
-	[GlyphAttr(0); NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize];
+pub static mut GLYPH_ATTR_ARRAY: [GlyphAttr; MAX_TEXT_COLS * MAX_TEXT_ROWS] =
+	[GlyphAttr(0); MAX_TEXT_COLS * MAX_TEXT_ROWS];
 
 /// Core 1 entry function.
 ///
@@ -744,11 +816,22 @@ impl RenderEngine {
 				}
 			};
 
-			// Convert our position in scan-lines to a text row, and a line within each glyph on that row
-			let text_row = (current_line_num / font::HEIGHT_PX as u16) as usize;
-			let font_row = (current_line_num % font::HEIGHT_PX as u16) as usize;
+			let font = match unsafe { VIDEO_MODE.format() } {
+				crate::common::video::Format::Text8x16 => &font16::FONT,
+				crate::common::video::Format::Text8x8 => &font8::FONT,
+				_ => {
+					return;
+				}
+			};
 
-			if text_row < NUM_TEXT_ROWS {
+			let num_rows = NUM_TEXT_ROWS.load(Ordering::Relaxed);
+			let num_cols = NUM_TEXT_COLS.load(Ordering::Relaxed);
+
+			// Convert our position in scan-lines to a text row, and a line within each glyph on that row
+			let text_row = current_line_num as usize / font.height;
+			let font_row = current_line_num as usize % font.height;
+
+			if text_row < num_rows {
 				// Note (unsafe): We could stash the char array inside `self`
 				// but at some point we are going to need one CPU rendering
 				// the text, and the other CPU running code and writing to
@@ -757,14 +840,14 @@ impl RenderEngine {
 				// state. At least our platform is fixed, so we can simply
 				// test if it works, for some given version of the Rust compiler.
 				let row_slice = unsafe {
-					&GLYPH_ATTR_ARRAY[(text_row * NUM_TEXT_COLS)..((text_row + 1) * NUM_TEXT_COLS)]
+					&GLYPH_ATTR_ARRAY[(text_row * num_cols)..((text_row + 1) * num_cols)]
 				};
 				// Every font look-up we are about to do for this row will
 				// involve offsetting by the row within each glyph. As this
 				// is the same for every glyph on this row, we calculate a
 				// new pointer once, in advance, and save ourselves an
 				// addition each time around the loop.
-				let font_ptr = unsafe { font::DATA.as_ptr().add(font_row) };
+				let font_ptr = unsafe { font.data.as_ptr().add(font_row) };
 
 				// Get a pointer into our scan-line buffer
 				let scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
@@ -772,7 +855,7 @@ impl RenderEngine {
 
 				// Convert from characters to coloured pixels, using the font as a look-up table.
 				for glyphattr in row_slice.iter() {
-					let index = (glyphattr.glyph().0 as isize) * 16;
+					let index = (glyphattr.glyph().0 as isize) * font.height as isize;
 					// Note (unsafe): We use pointer arithmetic here because we
 					// can't afford a bounds-check on an array. This is safe
 					// because the font is `256 * width` bytes long and we can't
@@ -828,7 +911,7 @@ impl TextConsole {
 	/// Will reset the cursor. The screen is not cleared.
 	pub fn set_text_buffer(
 		&self,
-		text_buffer: &'static mut [GlyphAttr; NUM_TEXT_ROWS * NUM_TEXT_COLS],
+		text_buffer: &'static mut [GlyphAttr; MAX_TEXT_ROWS * MAX_TEXT_COLS],
 	) {
 		self.text_buffer
 			.store(text_buffer.as_mut_ptr(), Ordering::Relaxed)
@@ -856,10 +939,10 @@ impl TextConsole {
 	///
 	/// If a value is out of bounds, the cursor is not moved in that axis.
 	pub fn move_to(&self, row: u16, col: u16) {
-		if row < (NUM_TEXT_ROWS as u16) {
+		if (row as usize) < NUM_TEXT_ROWS.load(Ordering::Relaxed) {
 			self.current_row.store(row, Ordering::Relaxed);
 		}
-		if col < (NUM_TEXT_COLS as u16) {
+		if (col as usize) < NUM_TEXT_COLS.load(Ordering::Relaxed) {
 			self.current_col.store(col, Ordering::Relaxed);
 		}
 	}
@@ -1011,13 +1094,16 @@ impl TextConsole {
 	///
 	/// The character is relative to the current font.
 	fn write_at(&self, glyph: Glyph, buffer: *mut GlyphAttr, row: &mut u16, col: &mut u16) {
+		let num_rows = NUM_TEXT_ROWS.load(Ordering::Relaxed);
+		let num_cols = NUM_TEXT_COLS.load(Ordering::Relaxed);
+
 		if glyph.0 == b'\r' {
 			*col = 0;
 		} else if glyph.0 == b'\n' {
 			*col = 0;
 			*row += 1;
 		} else {
-			let offset = (*col as usize) + (NUM_TEXT_COLS * (*row as usize));
+			let offset = (*col as usize) + (num_cols * (*row as usize));
 			// Note (safety): This is safe as we bound `col` and `row`
 			unsafe {
 				buffer
@@ -1026,24 +1112,25 @@ impl TextConsole {
 			};
 			*col += 1;
 		}
-		if *col == (NUM_TEXT_COLS as u16) {
+		if *col == (num_cols as u16) {
 			*col = 0;
 			*row += 1;
 		}
-		if *row == (NUM_TEXT_ROWS as u16) {
+
+		if *row == (num_rows as u16) {
 			// Stay on last line
-			*row = (NUM_TEXT_ROWS - 1) as u16;
+			*row = (num_rows - 1) as u16;
 
 			unsafe {
 				core::ptr::copy(
-					buffer.add(NUM_TEXT_COLS as usize),
+					buffer.add(num_cols as usize),
 					buffer,
-					NUM_TEXT_COLS * (NUM_TEXT_ROWS - 1),
+					num_cols * (num_rows - 1),
 				)
 			};
 
-			for blank_col in 0..NUM_TEXT_COLS {
-				let offset = (blank_col as usize) + (NUM_TEXT_COLS * (*row as usize));
+			for blank_col in 0..num_cols {
+				let offset = (blank_col as usize) + (num_cols * (*row as usize));
 				unsafe {
 					buffer
 						.add(offset)
