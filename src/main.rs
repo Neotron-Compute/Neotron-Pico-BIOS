@@ -9,7 +9,7 @@
 //!
 //! The BIOS is started by having standard Cortex-M Interrupt Vector Table at
 //! address `0x1000_0100`. This IVT is found and jumped to by the RP2040 boot
-//! block(`0x1000_0000` to `0x1000_00FF`).
+//! block (`0x1000_0000` to `0x1000_00FF`).
 
 // -----------------------------------------------------------------------------
 // Licence Statement
@@ -89,6 +89,7 @@ static API_CALLS: common::Api = common::Api {
 	serial_configure,
 	serial_get_info,
 	serial_write,
+	serial_read,
 	time_get,
 	time_set,
 	configuration_get,
@@ -99,6 +100,14 @@ static API_CALLS: common::Api = common::Api {
 	video_get_framebuffer,
 	video_set_framebuffer,
 	memory_get_region,
+	video_mode_needs_vram,
+	hid_get_event,
+	hid_set_leds,
+	video_wait_for_line,
+	block_dev_get_info,
+	block_write,
+	block_read,
+	block_verify,
 };
 
 extern "C" {
@@ -336,6 +345,19 @@ pub extern "C" fn serial_write(
 	common::Result::Err(common::Error::Unimplemented)
 }
 
+/// Read bytes from a serial port. There is no sense of 'opening' or
+/// 'closing' the device - serial devices are always open. If the return value
+///  is `Ok(n)`, the value `n` may be less than the size of the given buffer.
+///  If so, that means not all of the data could be received - only the
+///  first `n` bytes were filled in.
+pub extern "C" fn serial_read(
+	_device: u8,
+	_data: common::ApiBuffer,
+	_timeout: common::Option<common::Timeout>,
+) -> common::Result<usize> {
+	common::Result::Err(common::Error::Unimplemented)
+}
+
 /// Get the current wall time.
 ///
 /// The Neotron BIOS does not understand time zones, leap-seconds or the
@@ -448,6 +470,13 @@ pub unsafe extern "C" fn video_set_framebuffer(_buffer: *const u8) -> common::Re
 	common::Result::Err(common::Error::Unimplemented)
 }
 
+/// Find out whether the given video mode needs more VRAM than we currently have.
+///
+/// The answer is no for any currently supported video mode (which is just the four text modes right now).
+pub extern "C" fn video_mode_needs_vram(_mode: common::video::Mode) -> bool {
+	false
+}
+
 /// Find out how large a given region of memory is.
 ///
 /// The first region is the 'main application region' and is defined to always
@@ -478,6 +507,146 @@ pub extern "C" fn memory_get_region(region: u8) -> common::Result<common::Memory
 		}
 		_ => common::Result::Err(common::Error::InvalidDevice),
 	}
+}
+
+/// Get the next available HID event, if any.
+///
+/// This function doesn't block. It will return `Ok(None)` if there is no event ready.
+pub extern "C" fn hid_get_event() -> common::Result<common::Option<common::hid::HidEvent>> {
+	// TODO: Support some HID events
+	common::Result::Ok(common::Option::None)
+}
+
+/// Control the keyboard LEDs.
+pub extern "C" fn hid_set_leds(_leds: common::hid::KeyboardLeds) -> common::Result<()> {
+	common::Result::Err(common::Error::Unimplemented)
+}
+
+/// Wait for the next occurence of the specified video scan-line.
+///
+/// In general we must assume that the video memory is read top-to-bottom
+/// as the picture is being drawn on the monitor (e.g. via a VGA video
+/// signal). If you modify video memory during this *drawing period*
+/// there is a risk that the image on the monitor (however briefly) may
+/// contain some parts from before the modification and some parts from
+/// after. This can given rise to the *tearing effect* where it looks
+/// like the screen has been torn (or ripped) across because there is a
+/// discontinuity part-way through the image.
+///
+/// This function busy-waits until the video drawing has reached a
+/// specified scan-line on the video frame.
+///
+/// There is no error code here. If the line you ask for is beyond the
+/// number of visible scan-lines in the current video mode, it waits util
+/// the last visible scan-line is complete.
+///
+/// If you wait for the last visible line until drawing, you stand the
+/// best chance of your pixels operations on the video RAM being
+/// completed before scan-lines start being sent to the monitor for the
+/// next frame.
+///
+/// You can also use this for a crude `16.7 ms` delay but note that
+/// some video modes run at `70 Hz` and so this would then give you a
+/// `14.3ms` second delay.
+pub extern "C" fn video_wait_for_line(line: u16) {
+	let desired_line = line.min(vga::get_num_scan_lines());
+	loop {
+		let current_line = vga::get_scan_line();
+		if current_line == desired_line {
+			break;
+		}
+	}
+}
+
+/// Get information about the Block Devices in the system.
+///
+/// Block Devices are also known as *disk drives*. They can be read from
+/// (and often written to) but only in units called *blocks* or *sectors*.
+///
+/// The BIOS should enumerate removable devices first, followed by fixed
+/// devices.
+///
+/// The set of devices is not expected to change at run-time - removal of
+/// media is indicated with a boolean field in the
+/// `block_dev::DeviceInfo` structure.
+pub extern "C" fn block_dev_get_info(device: u8) -> common::Option<common::block_dev::DeviceInfo> {
+	match device {
+		0 => {
+			common::Option::Some(common::block_dev::DeviceInfo {
+				// This is the built-in SD card slot
+				name: common::types::ApiString::new("SdCard0"),
+				device_type: common::block_dev::DeviceType::SecureDigitalCard,
+				// This is the standard for SD cards
+				block_size: 512,
+				// TODO: scan the card here
+				num_blocks: 0,
+				// No motorised eject
+				ejectable: false,
+				// But you can take the card out
+				removable: true,
+				// Pretend the card is out
+				media_present: true,
+				// Don't care about this value when card is out
+				read_only: false,
+			})
+		}
+		_ => {
+			// Nothing else supported by this BIOS
+			common::Option::None
+		}
+	}
+}
+
+/// Write one or more sectors to a block device.
+///
+/// The function will block until all data is written. The array pointed
+/// to by `data` must be `num_blocks * block_size` in length, where
+/// `block_size` is given by `block_dev_get_info`.
+///
+/// There are no requirements on the alignment of `data` but if it is
+/// aligned, the BIOS may be able to use a higher-performance code path.
+pub extern "C" fn block_write(
+	_device: u8,
+	_block: u64,
+	_num_blocks: u8,
+	_data: common::ApiByteSlice,
+) -> common::Result<()> {
+	common::Result::Err(common::Error::Unimplemented)
+}
+
+/// Read one or more sectors to a block device.
+///
+/// The function will block until all data is read. The array pointed
+/// to by `data` must be `num_blocks * block_size` in length, where
+/// `block_size` is given by `block_dev_get_info`.
+///
+/// There are no requirements on the alignment of `data` but if it is
+/// aligned, the BIOS may be able to use a higher-performance code path.
+pub extern "C" fn block_read(
+	_device: u8,
+	_block: u64,
+	_num_blocks: u8,
+	_data: common::ApiBuffer,
+) -> common::Result<()> {
+	common::Result::Err(common::Error::Unimplemented)
+}
+
+/// Verify one or more sectors on a block device (that is read them and
+/// check they match the given data).
+///
+/// The function will block until all data is verified. The array pointed
+/// to by `data` must be `num_blocks * block_size` in length, where
+/// `block_size` is given by `block_dev_get_info`.
+///
+/// There are no requirements on the alignment of `data` but if it is
+/// aligned, the BIOS may be able to use a higher-performance code path.
+pub extern "C" fn block_verify(
+	_device: u8,
+	_block: u64,
+	_num_blocks: u8,
+	_data: common::ApiByteSlice,
+) -> common::Result<()> {
+	common::Result::Err(common::Error::Unimplemented)
 }
 
 /// Called when DMA raises IRQ0; i.e. when a DMA transfer to the pixel FIFO or

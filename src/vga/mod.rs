@@ -204,56 +204,6 @@ static mut VIDEO_MODE: crate::common::video::Mode = crate::common::video::Mode::
 	crate::common::video::Format::Text8x16,
 );
 
-/// Gets the current video mode
-pub fn get_video_mode() -> crate::common::video::Mode {
-	unsafe { VIDEO_MODE }
-}
-
-/// Sets the current video mode
-pub fn set_video_mode(mode: crate::common::video::Mode) -> bool {
-	cortex_m::interrupt::disable();
-	let mode_ok = match (
-		mode.timing(),
-		mode.format(),
-		mode.is_horiz_2x(),
-		mode.is_vert_2x(),
-	) {
-		(
-			crate::common::video::Timing::T640x480,
-			crate::common::video::Format::Text8x16 | crate::common::video::Format::Text8x8,
-			false,
-			false,
-		) => {
-			unsafe {
-				VIDEO_MODE = mode;
-				TIMING_BUFFER = TimingBuffer::make_640x480();
-			}
-			true
-		}
-		(
-			crate::common::video::Timing::T640x400,
-			crate::common::video::Format::Text8x16 | crate::common::video::Format::Text8x8,
-			false,
-			false,
-		) => {
-			unsafe {
-				VIDEO_MODE = mode;
-				TIMING_BUFFER = TimingBuffer::make_640x400();
-			}
-			true
-		}
-		_ => false,
-	};
-	if mode_ok {
-		NUM_TEXT_COLS.store(mode.text_width().unwrap_or(0) as usize, Ordering::SeqCst);
-		NUM_TEXT_ROWS.store(mode.text_height().unwrap_or(0) as usize, Ordering::SeqCst);
-	}
-	unsafe {
-		cortex_m::interrupt::enable();
-	}
-	mode_ok
-}
-
 /// Tracks which scan-line we are currently on (for timing purposes => it goes 0..`TIMING_BUFFER.back_porch_ends_at`)
 static CURRENT_TIMING_LINE: AtomicU16 = AtomicU16::new(0);
 
@@ -676,6 +626,67 @@ fn multicore_launch_core1_with_stack(
 		cortex_m::asm::nop();
 	}
 	debug!("Core 1 started!!");
+}
+
+/// Gets the current video mode
+pub fn get_video_mode() -> crate::common::video::Mode {
+	unsafe { VIDEO_MODE }
+}
+
+/// Sets the current video mode
+pub fn set_video_mode(mode: crate::common::video::Mode) -> bool {
+	cortex_m::interrupt::disable();
+	let mode_ok = match (
+		mode.timing(),
+		mode.format(),
+		mode.is_horiz_2x(),
+		mode.is_vert_2x(),
+	) {
+		(
+			crate::common::video::Timing::T640x480,
+			crate::common::video::Format::Text8x16 | crate::common::video::Format::Text8x8,
+			false,
+			false,
+		) => {
+			unsafe {
+				VIDEO_MODE = mode;
+				TIMING_BUFFER = TimingBuffer::make_640x480();
+			}
+			true
+		}
+		(
+			crate::common::video::Timing::T640x400,
+			crate::common::video::Format::Text8x16 | crate::common::video::Format::Text8x8,
+			false,
+			false,
+		) => {
+			unsafe {
+				VIDEO_MODE = mode;
+				TIMING_BUFFER = TimingBuffer::make_640x400();
+			}
+			true
+		}
+		_ => false,
+	};
+	if mode_ok {
+		NUM_TEXT_COLS.store(mode.text_width().unwrap_or(0) as usize, Ordering::SeqCst);
+		NUM_TEXT_ROWS.store(mode.text_height().unwrap_or(0) as usize, Ordering::SeqCst);
+	}
+	unsafe {
+		cortex_m::interrupt::enable();
+	}
+	mode_ok
+}
+
+/// Get the current scan line.
+pub fn get_scan_line() -> u16 {
+	CURRENT_DISPLAY_LINE.load(Ordering::Relaxed)
+}
+
+/// Get how many visible lines there currently are
+pub fn get_num_scan_lines() -> u16 {
+	let mode = get_video_mode();
+	mode.vertical_lines()
 }
 
 /// This function runs the video processing loop on Core 1.
