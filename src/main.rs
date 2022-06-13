@@ -264,9 +264,42 @@ fn main() -> ! {
 
 	info!("VGA Up");
 
-	// Say hello over VGA (with a bit of a pause)
+	// Make a sys-tick based delay object
 	let mut delay = cortex_m::delay::Delay::new(cp.SYST, clocks.system_clock.freq().integer());
-	sign_on(&mut delay);
+
+	// Create a new temporary console for some boot-up messages
+	let tc = vga::TextConsole::new();
+	tc.set_text_buffer(unsafe { &mut vga::GLYPH_ATTR_ARRAY });
+
+	// A crude way to clear the screen
+	for _row in 0..vga::MAX_TEXT_ROWS {
+		writeln!(&tc).unwrap();
+	}
+	// Set up for bright white on black.
+	tc.set_attribute(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::BLACK,
+		false,
+	));
+	tc.move_to(0, 0);
+
+	// Set up SPI comms
+	let spi_csio = pins.gpio17.into_push_pull_output();
+	let spi_bufen = pins.gpio21.into_push_pull_output();
+	let _spi_cipo = pins.gpio16.into_mode::<hal::gpio::FunctionSpi>();
+	let _spi_clk = pins.gpio18.into_mode::<hal::gpio::FunctionSpi>();
+	let _spi_copi = pins.gpio19.into_mode::<hal::gpio::FunctionSpi>();
+	let spi = hal::Spi::<_, _, 8>::new(pp.SPI0);
+	let spi = spi.init(
+		&mut pp.RESETS,
+		clocks.peripheral_clock.freq(),
+		1_000_000.Hz(),
+		&embedded_hal::spi::MODE_0,
+	);
+	talk_to_bus(&tc, spi, spi_csio, spi_bufen, &mut delay);
+
+	// Say hello over VGA (with a bit of a pause)
+	sign_on(&tc, &mut delay);
 
 	unsafe {
 		CONTEXT = Some(Context { delay });
@@ -279,8 +312,176 @@ fn main() -> ! {
 	code(&BIOS_API);
 }
 
+struct Bus<S, IOCS, BUFEN>
+where
+	S: embedded_hal::blocking::spi::Transfer<u8>,
+	IOCS: embedded_hal::digital::v2::OutputPin,
+	BUFEN: embedded_hal::digital::v2::OutputPin,
+{
+	spi: S,
+	iocs: IOCS,
+	bufen: BUFEN,
+	selected_device: Option<u8>,
+}
+
+#[repr(u8)]
+enum McpRegister {
+	IODIRA = 0x00,
+	IODIRB = 0x01,
+	IPOLA = 0x02,
+	IPOLB = 0x03,
+	GPINTENA = 0x04,
+	GPINTENB = 0x05,
+	DEFVALA = 0x06,
+	DEFVALB = 0x07,
+	INTCONA = 0x08,
+	INTCONB = 0x09,
+	IOCONA = 0x0A,
+	IOCONB = 0x0B,
+	GPPUA = 0x0C,
+	GPPUB = 0x0D,
+	INTFA = 0x0E,
+	INTFB = 0x0F0,
+	INTCAPA = 0x10,
+	INTCAPB = 0x11,
+	GPIOA = 0x12,
+	GPIOB = 0x13,
+	OLATA = 0x14,
+	OLATB = 0x15,
+}
+
+impl<S, IOCS, BUFEN> Bus<S, IOCS, BUFEN>
+where
+	S: embedded_hal::blocking::spi::Transfer<u8>,
+	IOCS: embedded_hal::digital::v2::OutputPin,
+	BUFEN: embedded_hal::digital::v2::OutputPin,
+{
+	const READ_HDR: u8 = 0b0100_0001;
+	const WRITE_HDR: u8 = 0b0100_0000;
+
+	fn init(&mut self) {
+		// Disable the 74HC245 buffer whilst we set things up
+		let _ = self.bufen.set_high();
+		// Set CS pins as outputs (high) and IRQ pins as inputs
+		self.mux_write_register16(McpRegister::GPIOA, 0xFF00);
+		self.mux_write_register16(McpRegister::IODIRA, 0x00FF);
+		// Select nothing to start off with
+		self.select_device(None);
+	}
+
+	fn select_device(&mut self, device: Option<u8>) {
+		if self.selected_device != device {
+			let cs_bit = if let Some(device) = device {
+				if device <= 7 {
+					!(1 << device)
+				} else {
+					panic!("Bad device ID {}", device);
+				}
+			} else {
+				0
+			};
+			// Disable the 74HC245 to de-delect all bus devices (so they don't hear
+			// our command to the MCP23S17).
+			let _ = self.bufen.set_high();
+			// Wait for buffer change to take effect
+			for _ in 0..100_000 {
+				cortex_m::asm::nop();
+			}
+			// Change the active CS pin on the MCP23S17
+			self.mux_write_register(McpRegister::GPIOA, cs_bit);
+			// Re-enable the 74HC245 to pass on the newly active CS pin.
+			let _ = self.bufen.set_low();
+			// Wait for buffer change to take effect
+			for _ in 0..100_000 {
+				cortex_m::asm::nop();
+			}
+			// Remember which CS pin the MCP23S17 has loaded
+			self.selected_device = device;
+		}
+	}
+
+	// Write to the bus mux's registers
+	fn mux_write_register(&mut self, reg: McpRegister, value: u8) {
+		let mut buffer = [Self::WRITE_HDR, reg as u8, value];
+		let _ = self.iocs.set_low();
+		let _ = self.spi.transfer(&mut buffer);
+		let _ = self.iocs.set_high();
+	}
+
+	/// Write a 16-bit value to the bus mux's registers.
+	///
+	/// You should pass an `xxxA` register here for this to make sense, and have
+	/// auto address increment function enabled (which it is by default).
+	///
+	/// Only call this function when the bus is disconnect (bufen is high).
+	fn mux_write_register16(&mut self, reg: McpRegister, value: u16) {
+		let mut buffer = [Self::WRITE_HDR, reg as u8, (value >> 8) as u8, value as u8];
+		let _ = self.iocs.set_low();
+		for _ in 0..100_000 {
+			cortex_m::asm::nop();
+		}
+		let _ = self.spi.transfer(&mut buffer);
+		let _ = self.iocs.set_high();
+	}
+
+	/// Read from the bus mux's registers
+	///
+	/// Only call this function when the bus is disconnect (bufen is high).
+	fn mux_read_register(&mut self, reg: McpRegister) -> u8 {
+		let mut buffer = [Self::READ_HDR, reg as u8, 0xFF];
+		let _ = self.iocs.set_low();
+		let _ = self.spi.transfer(&mut buffer);
+		let _ = self.iocs.set_high();
+		// The value we read is in the last place in the buffer
+		buffer[2]
+	}
+
+	fn transact_on_bus<F>(&mut self, slot_id: u8, func: F)
+	where
+		F: FnOnce(&mut S),
+	{
+		self.select_device(Some(slot_id));
+		func(&mut self.spi);
+		self.select_device(None);
+	}
+}
+
+/// Talk to the Bus
+fn talk_to_bus(
+	mut tc: &vga::TextConsole,
+	spi: impl embedded_hal::blocking::spi::Transfer<u8>,
+	iocs: impl embedded_hal::digital::v2::OutputPin,
+	bufen: impl embedded_hal::digital::v2::OutputPin,
+	delay: &mut cortex_m::delay::Delay,
+) {
+	let mut bus = Bus {
+		spi,
+		iocs,
+		bufen,
+		selected_device: None,
+	};
+	bus.init();
+
+	let device = 2;
+	writeln!(tc, "Selecting {}", device).unwrap();
+	debug!("Selecting {}", device);
+	bus.transact_on_bus(device, |spi| {
+		let mut card_command = [0b0100_0000, 0x0, 0x0];
+		let _ = spi.transfer(&mut card_command);
+	});
+	loop {
+		for n in &[1, 2, 4, 8, 16, 32, 64, 128] {
+			bus.transact_on_bus(device, |spi| {
+				let mut card_command = [0b0100_0000, 0x12, *n];
+				let _ = spi.transfer(&mut card_command);
+			});
+			delay.delay_ms(250);
+		}
+	}
+}
+
 /// Tell people about the BIOS, using the VGA output.
-fn sign_on(delay: &mut cortex_m::delay::Delay) {
+fn sign_on(mut tc: &vga::TextConsole, delay: &mut cortex_m::delay::Delay) {
 	static LICENCE_TEXT: &str = "\
         Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2022\n\
 		Licenced under the GNU GPL v3, or later.";
@@ -288,16 +489,6 @@ fn sign_on(delay: &mut cortex_m::delay::Delay) {
 		Neotron \\FB\\B1 This is Yellow on Red \\FF\\B0 This is normal again.\n\
 		Neotron \\FF\\B4 This is White on Blue \\FF\\B0 This is normal again.\n\
 		";
-
-	// Create a new temporary console for some boot-up messages
-	let tc = vga::TextConsole::new();
-	tc.set_text_buffer(unsafe { &mut vga::GLYPH_ATTR_ARRAY });
-
-	// A crude way to clear the screen
-	for _row in 0..vga::MAX_TEXT_ROWS {
-		writeln!(&tc).unwrap();
-	}
-	tc.move_to(0, 0);
 
 	#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 	enum Escape {
@@ -421,7 +612,7 @@ fn sign_on(delay: &mut cortex_m::delay::Delay) {
 				escape = Escape::Back;
 			}
 			(Escape::None, _) => {
-				write!(&tc, "{}", ch).unwrap();
+				write!(tc, "{}", ch).unwrap();
 			}
 			_ => {
 				defmt::panic!("Bad format {} {}", escape as u32, ch);
@@ -438,9 +629,9 @@ fn sign_on(delay: &mut cortex_m::delay::Delay) {
 	));
 
 	// Print the version, skipping the NUL byte at the end.
-	writeln!(&tc, "{}", &BIOS_VERSION[0..BIOS_VERSION.len() - 1]).unwrap();
+	writeln!(tc, "{}", &BIOS_VERSION[0..BIOS_VERSION.len() - 1]).unwrap();
 	// Print the licence text
-	writeln!(&tc, "{}", LICENCE_TEXT).unwrap();
+	writeln!(tc, "{}", LICENCE_TEXT).unwrap();
 
 	// Dump some stats about render times to the screen
 	let mut last_render_count = 0;
@@ -457,7 +648,7 @@ fn sign_on(delay: &mut cortex_m::delay::Delay) {
 		let delta_clashed_count = clashed_count - last_clashed_count;
 		last_clashed_count = clashed_count;
 		write!(
-			&tc,
+			tc,
 			"{} {} clocks/line {} clashed lines              \r",
 			i, delta_render_count, delta_clashed_count
 		)
