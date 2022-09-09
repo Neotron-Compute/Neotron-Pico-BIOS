@@ -270,7 +270,7 @@ static CORE1_ENTRY_FUNCTION: [u16; 2] = [
 /// A set of useful constants representing common RGB colours.
 pub mod colours {
 	/// The colour white
-	pub const WHITE: super::RGBColour = super::RGBColour(0xFFF);
+	pub const WHITE: super::RGBColour = super::RGBColour(0x777);
 
 	/// The colour black
 	pub const BLACK: super::RGBColour = super::RGBColour(0x000);
@@ -801,9 +801,9 @@ impl RenderEngine {
 		RenderEngine {
 			frame_count: 0,
 			lookup: [
-				RGBPair::from_pixels(colours::BLUE, colours::BLUE),
-				RGBPair::from_pixels(colours::BLUE, colours::WHITE),
-				RGBPair::from_pixels(colours::WHITE, colours::BLUE),
+				RGBPair::from_pixels(colours::BLACK, colours::BLACK),
+				RGBPair::from_pixels(colours::BLACK, colours::WHITE),
+				RGBPair::from_pixels(colours::WHITE, colours::BLACK),
 				RGBPair::from_pixels(colours::WHITE, colours::WHITE),
 			],
 		}

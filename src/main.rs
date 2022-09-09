@@ -48,7 +48,10 @@ use core::fmt::Write;
 use cortex_m_rt::entry;
 use defmt::info;
 use defmt_rtt as _;
-use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::{
+	blocking::spi::Transfer as _SpiTransfer, blocking::spi::Write as _SpiWrite,
+	digital::v2::OutputPin,
+};
 use embedded_time::rate::*;
 use neotron_common_bios as common;
 use panic_probe as _;
@@ -56,6 +59,8 @@ use rp_pico::{
 	self,
 	hal::{
 		self,
+		clocks::ClocksManager,
+		gpio::{bank0, Function, Input, Output, Pin, PullUp, PushPull},
 		pac::{self, interrupt},
 		Clock,
 	},
@@ -65,7 +70,55 @@ use rp_pico::{
 // Types
 // -----------------------------------------------------------------------------
 
-// None
+/// All the hardware we use on the Pico
+struct Hardware {
+	/// All the pins we use on the Raspberry Pi Pico
+	pins: Pins,
+	/// The SPI bus connected to all the slots
+	spi_bus: hal::Spi<hal::spi::Enabled, pac::SPI0, 8>,
+	/// Something to perform small delays with. Uses SysTICK.
+	delay: cortex_m::delay::Delay,
+	/// Current 5-bit value shown on the debug LEDs
+	debug_leds: u8,
+	/// The last CS pin we selected
+	last_cs: u8,
+}
+
+/// All the pins we use on the Pico, in the right mode.
+///
+/// We ignore the 'unused' lint, because these pins merely need to exist in
+/// order to demonstrate the hardware is in the right state.
+#[allow(unused)]
+struct Pins {
+	h_sync: Pin<bank0::Gpio0, Function<pac::PIO0>>,
+	v_sync: Pin<bank0::Gpio1, Function<pac::PIO0>>,
+	red0: Pin<bank0::Gpio2, Function<pac::PIO0>>,
+	red1: Pin<bank0::Gpio3, Function<pac::PIO0>>,
+	red2: Pin<bank0::Gpio4, Function<pac::PIO0>>,
+	red3: Pin<bank0::Gpio5, Function<pac::PIO0>>,
+	green0: Pin<bank0::Gpio6, Function<pac::PIO0>>,
+	green1: Pin<bank0::Gpio7, Function<pac::PIO0>>,
+	green2: Pin<bank0::Gpio8, Function<pac::PIO0>>,
+	green3: Pin<bank0::Gpio9, Function<pac::PIO0>>,
+	blue0: Pin<bank0::Gpio10, Function<pac::PIO0>>,
+	blue1: Pin<bank0::Gpio11, Function<pac::PIO0>>,
+	blue2: Pin<bank0::Gpio12, Function<pac::PIO0>>,
+	blue3: Pin<bank0::Gpio13, Function<pac::PIO0>>,
+	npower_save: Pin<bank0::Gpio23, Output<PushPull>>,
+	i2c_sda: Pin<bank0::Gpio14, Function<hal::gpio::I2C>>,
+	i2c_scl: Pin<bank0::Gpio15, Function<hal::gpio::I2C>>,
+	spi_cipo: Pin<bank0::Gpio16, Function<hal::gpio::Spi>>,
+	nspi_cs_io: Pin<bank0::Gpio17, Output<PushPull>>,
+	spi_clk: Pin<bank0::Gpio18, Function<hal::gpio::Spi>>,
+	spi_copi: Pin<bank0::Gpio19, Function<hal::gpio::Spi>>,
+	nirq_io: Pin<bank0::Gpio20, Input<PullUp>>,
+	noutput_en: Pin<bank0::Gpio21, Output<PushPull>>,
+	i2s_adc_data: Pin<bank0::Gpio22, Function<pac::PIO1>>,
+	i2s_dac_data: Pin<bank0::Gpio26, Function<pac::PIO1>>,
+	i2s_bit_clock: Pin<bank0::Gpio27, Function<pac::PIO1>>,
+	i2s_lr_clock: Pin<bank0::Gpio28, Function<pac::PIO1>>,
+	pico_led: Pin<bank0::Gpio25, Output<PushPull>>,
+}
 
 // -----------------------------------------------------------------------------
 // Static and Const Data
@@ -193,28 +246,20 @@ fn main() -> ! {
 	// communications.
 	let mut sio = hal::sio::Sio::new(pp.SIO);
 
-	// Configure and grab all the RP2040 pins the Pico exposes.
-	let pins = rp_pico::Pins::new(pp.IO_BANK0, pp.PADS_BANK0, sio.gpio_bank0, &mut pp.RESETS);
+	// This object lets us wait for long periods of time (to make things readable on screen)
+	let delay = cortex_m::delay::Delay::new(cp.SYST, clocks.system_clock.freq().integer());
 
-	// Disable power save mode to force SMPS into low-efficiency, low-noise mode.
-	let mut b_power_save = pins.b_power_save.into_push_pull_output();
-	b_power_save.set_high().unwrap();
-
-	// Give H-Sync, V-Sync and 12 RGB colour pins to PIO0 to output video
-	let _h_sync = pins.gpio0.into_mode::<hal::gpio::FunctionPio0>();
-	let _v_sync = pins.gpio1.into_mode::<hal::gpio::FunctionPio0>();
-	let _red0 = pins.gpio2.into_mode::<hal::gpio::FunctionPio0>();
-	let _red1 = pins.gpio3.into_mode::<hal::gpio::FunctionPio0>();
-	let _red2 = pins.gpio4.into_mode::<hal::gpio::FunctionPio0>();
-	let _red3 = pins.gpio5.into_mode::<hal::gpio::FunctionPio0>();
-	let _green0 = pins.gpio6.into_mode::<hal::gpio::FunctionPio0>();
-	let _green1 = pins.gpio7.into_mode::<hal::gpio::FunctionPio0>();
-	let _green2 = pins.gpio8.into_mode::<hal::gpio::FunctionPio0>();
-	let _green3 = pins.gpio9.into_mode::<hal::gpio::FunctionPio0>();
-	let _blue0 = pins.gpio10.into_mode::<hal::gpio::FunctionPio0>();
-	let _blue1 = pins.gpio11.into_mode::<hal::gpio::FunctionPio0>();
-	let _blue2 = pins.gpio12.into_mode::<hal::gpio::FunctionPio0>();
-	let _blue3 = pins.gpio13.into_mode::<hal::gpio::FunctionPio0>();
+	// Configure and grab all the RP2040 pins the Pico exposes, along with the non-VGA peripherals.
+	let mut hw = Hardware::build(
+		pp.IO_BANK0,
+		pp.PADS_BANK0,
+		sio.gpio_bank0,
+		&mut pp.RESETS,
+		pp.SPI0,
+		clocks,
+		delay,
+	);
+	hw.init_io_chip();
 
 	info!("Pins OK");
 
@@ -227,16 +272,203 @@ fn main() -> ! {
 		&mut pp.PSM,
 	);
 
+	info!("VGA OK");
+
 	// Say hello over VGA (with a bit of a pause)
-	let mut delay = cortex_m::delay::Delay::new(cp.SYST, clocks.system_clock.freq().integer());
-	sign_on(&mut delay);
+	sign_on(&mut hw);
 
 	// Now jump to the OS
-	let code: &common::OsStartFn = unsafe { ::core::mem::transmute(&_flash_os_start) };
-	code(&API_CALLS);
+	// let code: &common::OsStartFn = unsafe { ::core::mem::transmute(&_flash_os_start) };
+	// code(&API_CALLS);
+
+	// OS has returned?! Just hang.
+	loop {
+		cortex_m::asm::wfi();
+	}
 }
 
-fn sign_on(delay: &mut cortex_m::delay::Delay) {
+impl Hardware {
+	/// How many nano seconds per clock cycle (at 126 MHz)?
+	const NS_PER_CLOCK_CYCLE: u32 = 1_000_000_000 / 126_000_000;
+
+	/// MCP23S17 CS pin setup time (before transaction). At least 50ns, we give 100ns.
+	const CS_IO_SETUP_CPU_CLOCKS: u32 = 100 / Self::NS_PER_CLOCK_CYCLE;
+
+	/// MCP23S17 CS pin hold time (and end of transaction). At least 50ns, we give 100ns.
+	const CS_IO_HOLD_CPU_CLOCKS: u32 = 100 / Self::NS_PER_CLOCK_CYCLE;
+
+	/// MCP23S17 CS pin disable time (between transactions). At least 50ns, we give 100ns.
+	const CS_IO_DISABLE_CPU_CLOCKS: u32 = 100 / Self::NS_PER_CLOCK_CYCLE;
+
+	/// Data Direction Register A on the MCP23S17
+	const MCP23S17_DDRA: u8 = 0x00;
+
+	/// GPIO Data Register A on the MCP23S17
+	const MCP23S17_GPIOA: u8 = 0x12;
+
+	/// GPIO Pull-Up Register B on the MCP23S17
+	const MCP23S17_GPPUB: u8 = 0x0D;
+
+	fn build(
+		bank: pac::IO_BANK0,
+		pads: pac::PADS_BANK0,
+		sio: hal::sio::SioGpioBank0,
+		resets: &mut pac::RESETS,
+		spi: pac::SPI0,
+		clocks: ClocksManager,
+		delay: cortex_m::delay::Delay,
+	) -> Hardware {
+		let hal_pins = rp_pico::Pins::new(bank, pads, sio, resets);
+
+		Hardware {
+			pins: Pins {
+				// Disable power save mode to force SMPS into low-efficiency, low-noise mode.
+				npower_save: {
+					let mut pin = hal_pins.b_power_save.into_push_pull_output();
+					pin.set_high().unwrap();
+					pin
+				},
+				// Give H-Sync, V-Sync and 12 RGB colour pins to PIO0 to output video
+				h_sync: hal_pins.gpio0.into_mode(),
+				v_sync: hal_pins.gpio1.into_mode(),
+				red0: hal_pins.gpio2.into_mode(),
+				red1: hal_pins.gpio3.into_mode(),
+				red2: hal_pins.gpio4.into_mode(),
+				red3: hal_pins.gpio5.into_mode(),
+				green0: hal_pins.gpio6.into_mode(),
+				green1: hal_pins.gpio7.into_mode(),
+				green2: hal_pins.gpio8.into_mode(),
+				green3: hal_pins.gpio9.into_mode(),
+				blue0: hal_pins.gpio10.into_mode(),
+				blue1: hal_pins.gpio11.into_mode(),
+				blue2: hal_pins.gpio12.into_mode(),
+				blue3: hal_pins.gpio13.into_mode(),
+				i2c_sda: hal_pins.gpio14.into_mode(),
+				i2c_scl: hal_pins.gpio15.into_mode(),
+				spi_cipo: hal_pins.gpio16.into_mode(),
+				nspi_cs_io: {
+					let mut pin = hal_pins.gpio17.into_push_pull_output();
+					pin.set_high().unwrap();
+					pin
+				},
+				spi_clk: hal_pins.gpio18.into_mode(),
+				spi_copi: hal_pins.gpio19.into_mode(),
+				nirq_io: hal_pins.gpio20.into_pull_up_input(),
+				noutput_en: {
+					let mut pin = hal_pins.gpio21.into_push_pull_output();
+					pin.set_high().unwrap();
+					pin
+				},
+				i2s_adc_data: hal_pins.gpio22.into_mode(),
+				i2s_dac_data: hal_pins.gpio26.into_mode(),
+				i2s_bit_clock: hal_pins.gpio27.into_mode(),
+				i2s_lr_clock: hal_pins.gpio28.into_mode(),
+				pico_led: hal_pins.led.into_mode(),
+			},
+			// Set SPI up for 1 MHz clock, 8 data bits.
+			spi_bus: hal::Spi::new(spi).init(
+				resets,
+				clocks.peripheral_clock,
+				8_000_000.Hz(),
+				&embedded_hal::spi::MODE_0,
+			),
+			delay,
+			debug_leds: 0,
+			last_cs: 0,
+		}
+	}
+
+	/// Write to a registers on the MCP23S17 I/O chip.
+	///
+	/// * `register` - the address of the register to write to
+	/// * `data` - the value to write
+	fn io_chip_write(&mut self, register: u8, data: u8) {
+		self.pins.nspi_cs_io.set_low().unwrap();
+		cortex_m::asm::delay(Self::CS_IO_SETUP_CPU_CLOCKS);
+		self.spi_bus.write(&[0x40, register, data]).unwrap();
+		cortex_m::asm::delay(Self::CS_IO_HOLD_CPU_CLOCKS);
+		self.pins.nspi_cs_io.set_high().unwrap();
+	}
+
+	/// Write to a registers on the MCP23S17 I/O chip.
+	///
+	/// * `register` - the address of the register to write to
+	fn io_chip_read(&mut self, register: u8) -> u8 {
+		self.pins.nspi_cs_io.set_low().unwrap();
+		cortex_m::asm::delay(Self::CS_IO_SETUP_CPU_CLOCKS);
+		let mut buffer = [0x41, register, 0x00];
+		self.spi_bus.transfer(&mut buffer).unwrap();
+		cortex_m::asm::delay(Self::CS_IO_HOLD_CPU_CLOCKS);
+		self.pins.nspi_cs_io.set_high().unwrap();
+		// Last byte has the value we read
+		buffer[2]
+	}
+
+	/// Set the five debug LEDs on the PCB.
+	///
+	/// These are connected to the top 5 bits of GPIOA on the MCP23S17.
+	fn set_leds(&mut self, leds: u8) {
+		self.debug_leds = leds;
+		self.io_chip_write(0x12, self.debug_leds << 3 | self.last_cs);
+	}
+
+	/// Perform some SPI transaction with a specific chip-select pin active.
+	///
+	/// Activates a specific chip-select line, runs the closure (passing in the
+	/// SPI bus object), then de-activates the CS pin.
+	fn select_cs<F>(&mut self, cs: u8, func: F)
+	where
+		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>),
+	{
+		// Only 0..7 is valid
+		let cs = cs & 0b111;
+
+		if cs != self.last_cs {
+			// Set CS Outputs into decoder/buffer
+			self.io_chip_write(0x12, self.debug_leds << 3 | cs);
+			self.last_cs = cs;
+		}
+
+		// Drive CS lines from decoder/buffer
+		self.pins.noutput_en.set_low().unwrap();
+
+		// Call function
+		func(&mut self.spi_bus);
+
+		// Undrive CS lines from decoder/buffer
+		self.pins.noutput_en.set_high().unwrap();
+	}
+
+	fn init_io_chip(&mut self) {
+		// Inter-packet delay
+		cortex_m::asm::delay(Self::CS_IO_DISABLE_CPU_CLOCKS);
+
+		// Set IODIRA = 0x00 => GPIOA is all outputs
+		self.io_chip_write(Self::MCP23S17_DDRA, 0x00);
+
+		// Inter-packet delay
+		cortex_m::asm::delay(Self::CS_IO_DISABLE_CPU_CLOCKS);
+
+		// Set GPIOA = 0x00 => GPIOA is all low
+		self.io_chip_write(Self::MCP23S17_GPIOA, 0x00);
+
+		// Set GPPUB to = 0xFF => GPIOB is pulled-up
+		self.io_chip_write(Self::MCP23S17_GPPUB, 0xFF);
+	}
+
+	fn dump_io_chip(&mut self) {
+		// Inter-packet delay
+		cortex_m::asm::delay(Self::CS_IO_DISABLE_CPU_CLOCKS);
+
+		// Dump registers
+		for reg in 0x00..=0x15 {
+			let data = self.io_chip_read(reg);
+			defmt::debug!("Reg 0x{:02x} => 0x{:02x}", reg, data);
+		}
+	}
+}
+
+fn sign_on(hw: &mut Hardware) {
 	static LICENCE_TEXT: &str = "\
         Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2022\n\
         \n\
@@ -269,17 +501,25 @@ fn sign_on(delay: &mut cortex_m::delay::Delay) {
 
 	writeln!(&tc, "Loading Neotron OS...").unwrap();
 
-	// Wait for a bit
-	for n in [5, 4, 3, 2, 1].iter() {
-		write!(&tc, "{}...", n).unwrap();
-		delay.delay_ms(1000);
-	}
+	hw.dump_io_chip();
 
-	// A crude way to clear the screen
-	for _col in 0..vga::MAX_TEXT_ROWS {
-		writeln!(&tc).unwrap();
+	loop {
+		for i in 0..=31 {
+			write!(&tc, "LED 0x{:02x} ", i).unwrap();
+			hw.set_leds(i);
+			hw.delay.delay_ms(250);
+		}
+
+		for i in 0..=7 {
+			write!(&tc, "Slot {} ", i).unwrap();
+			hw.select_cs(i, |spi| {
+				for _i in 0..10000 {
+					spi.write(&[0xF0, 0x0F, 0xAA, 0x55, 0xF0, 0x0F]).unwrap();
+				}
+			});
+			hw.delay.delay_ms(1000);
+		}
 	}
-	tc.move_to(0, 0);
 }
 
 /// Reset the DMA Peripheral.
