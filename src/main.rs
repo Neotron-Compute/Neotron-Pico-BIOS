@@ -260,6 +260,7 @@ fn main() -> ! {
 		delay,
 	);
 	hw.init_io_chip();
+	hw.set_hdd_led(false);
 
 	info!("Pins OK");
 
@@ -369,7 +370,7 @@ impl Hardware {
 			spi_bus: hal::Spi::new(spi).init(
 				resets,
 				clocks.peripheral_clock,
-				8_000_000.Hz(),
+				1_000_000.Hz(),
 				&embedded_hal::spi::MODE_0,
 			),
 			delay,
@@ -378,49 +379,88 @@ impl Hardware {
 		}
 	}
 
+	/// Perform some SPI operation with the I/O chip selected.
+	/// 
+	/// You are required to have called `self.release_cs_lines()` previously,
+	/// otherwise the I/O chip and your selected bus device will both see a
+	/// chip-select signal.
+	fn with_io_cs<F>(&mut self, func: F)
+	where
+		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>)
+	{
+		// Select MCP23S17
+		self.pins.nspi_cs_io.set_low().unwrap();
+		// Setup time
+		cortex_m::asm::delay(Self::CS_IO_SETUP_CPU_CLOCKS);
+		// Do the SPI thing
+		func(&mut self.spi_bus);
+		// Hold the CS pin a bit longer
+		cortex_m::asm::delay(Self::CS_IO_HOLD_CPU_CLOCKS);
+		// Release the CS pin
+		self.pins.nspi_cs_io.set_high().unwrap();		
+	}
+
 	/// Write to a registers on the MCP23S17 I/O chip.
 	///
 	/// * `register` - the address of the register to write to
 	/// * `data` - the value to write
 	fn io_chip_write(&mut self, register: u8, data: u8) {
-		self.pins.nspi_cs_io.set_low().unwrap();
-		cortex_m::asm::delay(Self::CS_IO_SETUP_CPU_CLOCKS);
-		self.spi_bus.write(&[0x40, register, data]).unwrap();
-		cortex_m::asm::delay(Self::CS_IO_HOLD_CPU_CLOCKS);
-		self.pins.nspi_cs_io.set_high().unwrap();
+		// Inter-packet delay
+		cortex_m::asm::delay(Self::CS_IO_DISABLE_CPU_CLOCKS);
+
+		// Do the operation with CS pin active
+		self.with_io_cs(|spi| {
+			spi.write(&[0x40, register, data]).unwrap();
+		});
 	}
 
 	/// Write to a registers on the MCP23S17 I/O chip.
 	///
 	/// * `register` - the address of the register to write to
 	fn io_chip_read(&mut self, register: u8) -> u8 {
-		self.pins.nspi_cs_io.set_low().unwrap();
-		cortex_m::asm::delay(Self::CS_IO_SETUP_CPU_CLOCKS);
+		// Inter-packet delay
+		cortex_m::asm::delay(Self::CS_IO_DISABLE_CPU_CLOCKS);
+
+		// Starts with outbound, is replaced with inbound
 		let mut buffer = [0x41, register, 0x00];
-		self.spi_bus.transfer(&mut buffer).unwrap();
-		cortex_m::asm::delay(Self::CS_IO_HOLD_CPU_CLOCKS);
-		self.pins.nspi_cs_io.set_high().unwrap();
+
+		// Do the operation with CS pin active
+		self.with_io_cs(|spi| {
+			spi.transfer(&mut buffer).unwrap();
+		});
+
 		// Last byte has the value we read
 		buffer[2]
 	}
 
-	/// Set the five debug LEDs on the PCB.
+	/// Set the four debug LEDs on the PCB.
 	///
-	/// These are connected to the top 5 bits of GPIOA on the MCP23S17.
-	fn set_leds(&mut self, leds: u8) {
-		self.debug_leds = leds;
+	/// These are connected to the top 4 bits of GPIOA on the MCP23S17.
+	fn set_debug_leds(&mut self, leds: u8) {
+		// LEDs are active-low.
+		let leds = (leds ^ 0xFF) & 0xF;
+		self.debug_leds = leds << 1 | (self.debug_leds & 1);
 		self.io_chip_write(0x12, self.debug_leds << 3 | self.last_cs);
 	}
 
-	/// Perform some SPI transaction with a specific chip-select pin active.
+	/// Set the HDD LED on the PCB.
+	///
+	/// These are connected to the bit 4 of GPIOA on the MCP23S17.
+	fn set_hdd_led(&mut self, enabled: bool) {
+		// LEDs are active-low.
+		self.debug_leds = (self.debug_leds & 0x17) | if enabled { 0 } else { 1 };
+		self.io_chip_write(0x12, self.debug_leds << 3 | self.last_cs);
+	}
+
+	/// Perform some SPI transaction with a specific bus chip-select pin active.
 	///
 	/// Activates a specific chip-select line, runs the closure (passing in the
 	/// SPI bus object), then de-activates the CS pin.
-	fn select_cs<F>(&mut self, cs: u8, func: F)
+	fn with_bus_cs<F>(&mut self, cs: u8, func: F)
 	where
 		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>),
 	{
-		// Only 0..7 is valid
+		// Only CS0..CS7 is valid
 		let cs = cs & 0b111;
 
 		if cs != self.last_cs {
@@ -430,16 +470,36 @@ impl Hardware {
 		}
 
 		// Drive CS lines from decoder/buffer
-		self.pins.noutput_en.set_low().unwrap();
+		self.drive_cs_lines();
 
+		// Setup time
+		cortex_m::asm::delay(Self::CS_IO_SETUP_CPU_CLOCKS);
+		
 		// Call function
 		func(&mut self.spi_bus);
 
+		// Hold the CS pin a bit longer
+		cortex_m::asm::delay(Self::CS_IO_HOLD_CPU_CLOCKS);
+
 		// Undrive CS lines from decoder/buffer
+		self.release_cs_lines();
+	}
+
+	/// Enable the 74HC138 so it drives one of the CS0..CS7 pins active-low
+	/// (according to the 3 input bits).
+	fn drive_cs_lines(&mut self) {
+		self.pins.noutput_en.set_low().unwrap();
+	}
+
+	/// Disable the 74HC138 so it drives none of the CS0..CS7 pins active-low.
+	fn release_cs_lines(&mut self) {
 		self.pins.noutput_en.set_high().unwrap();
 	}
 
 	fn init_io_chip(&mut self) {
+		// Undrive CS lines from decoder/buffer
+		self.release_cs_lines();
+
 		// Inter-packet delay
 		cortex_m::asm::delay(Self::CS_IO_DISABLE_CPU_CLOCKS);
 
@@ -472,18 +532,7 @@ fn sign_on(hw: &mut Hardware) {
 	static LICENCE_TEXT: &str = "\
         Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2022\n\
         \n\
-        This program is free software: you can redistribute it and/or modify\n\
-        it under the terms of the GNU General Public License as published by\n\
-        the Free Software Foundation, either version 3 of the License, or\n\
-        (at your option) any later version.\n\
-        \n\
-        This program is distributed in the hope that it will be useful,\n\
-        but WITHOUT ANY WARRANTY; without even the implied warranty of\n\
-        MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n\
-        GNU General Public License for more details.\n\
-        \n\
-        You should have received a copy of the GNU General Public License\n\
-        along with this program.  If not, see https://www.gnu.org/licenses/.\n";
+        This program is free software under GPL v3 (or later)\n";
 
 	// Create a new temporary console for some boot-up messages
 	let tc = vga::TextConsole::new();
@@ -503,22 +552,20 @@ fn sign_on(hw: &mut Hardware) {
 
 	hw.dump_io_chip();
 
-	loop {
-		for i in 0..=31 {
-			write!(&tc, "LED 0x{:02x} ", i).unwrap();
-			hw.set_leds(i);
-			hw.delay.delay_ms(250);
-		}
-
-		for i in 0..=7 {
-			write!(&tc, "Slot {} ", i).unwrap();
-			hw.select_cs(i, |spi| {
-				for _i in 0..10000 {
-					spi.write(&[0xF0, 0x0F, 0xAA, 0x55, 0xF0, 0x0F]).unwrap();
-				}
+	let mut led_cycle = [1, 1 + 2, 2 + 4, 4 + 8, 8, 0, 8, 8 + 4, 4 + 2, 2 + 1, 1, 0].iter().cycle();
+	for i in 0.. {
+		for reg in 0..24 {
+			let mut buffer = [0x00, reg, 0x00, 0x00, 0x00];
+			write!(&tc, "{:x}: {:02x?}...", i, buffer).unwrap();
+			// Skip the HDD LED
+			hw.set_debug_leds(*led_cycle.next().unwrap_or(&0));
+			hw.with_bus_cs(0, |spi| {
+				spi.transfer(&mut buffer).unwrap();
 			});
-			hw.delay.delay_ms(1000);
+			writeln!(&tc, "{:02x?} {}", buffer, if buffer[3] != 0xFF { buffer[3] as char } else { ' ' }).unwrap();
 		}
+		hw.delay.delay_ms(1000);
+
 	}
 }
 
