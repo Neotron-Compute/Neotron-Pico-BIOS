@@ -475,13 +475,13 @@ impl Hardware {
 	}
 
 	/// Perform some SPI operation with the I/O chip selected.
-	/// 
+	///
 	/// You are required to have called `self.release_cs_lines()` previously,
 	/// otherwise the I/O chip and your selected bus device will both see a
 	/// chip-select signal.
 	fn with_io_cs<F>(&mut self, func: F)
 	where
-		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>)
+		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>),
 	{
 		// Select MCP23S17
 		self.pins.nspi_cs_io.set_low().unwrap();
@@ -492,7 +492,7 @@ impl Hardware {
 		// Hold the CS pin a bit longer
 		cortex_m::asm::delay(Self::CS_IO_HOLD_CPU_CLOCKS);
 		// Release the CS pin
-		self.pins.nspi_cs_io.set_high().unwrap();		
+		self.pins.nspi_cs_io.set_high().unwrap();
 	}
 
 	/// Write to a registers on the MCP23S17 I/O chip.
