@@ -647,20 +647,30 @@ fn sign_on(hw: &mut Hardware) {
 
 	hw.dump_io_chip();
 
-	let mut led_cycle = [1, 1 + 2, 2 + 4, 4 + 8, 8, 0, 8, 8 + 4, 4 + 2, 2 + 1, 1, 0].iter().cycle();
+	let mut led_cycle = [1, 1 + 2, 2 + 4, 4 + 8, 8, 0, 8, 8 + 4, 4 + 2, 2 + 1, 1, 0]
+		.iter()
+		.cycle();
 	for i in 0.. {
-		for reg in 0..24 {
-			let mut buffer = [0x00, reg, 0x00, 0x00, 0x00];
-			write!(&tc, "{:x}: {:02x?}...", i, buffer).unwrap();
-			// Skip the HDD LED
-			hw.set_debug_leds(*led_cycle.next().unwrap_or(&0));
+		let mut firmware_version = [0u8; 24];
+		for (reg, slot) in firmware_version.iter_mut().enumerate() {
+			let mut buffer = [0xC0, reg as u8, 0x01, 0x00, 0x00, 0x00];
+			// write!(&tc, "{:x}: {:02x?}...", i, buffer).unwrap();
 			hw.with_bus_cs(0, |spi| {
 				spi.transfer(&mut buffer).unwrap();
 			});
-			writeln!(&tc, "{:02x?} {}", buffer, if buffer[3] != 0xFF { buffer[3] as char } else { ' ' }).unwrap();
+			let first = buffer
+				.iter()
+				.filter(|x| **x != 0xFF)
+				.take(1)
+				.next()
+				.unwrap_or(&0x20);
+			*slot = *first;
+			// write!(&tc, "{:02x?} {}", buffer, *first as char).unwrap();
+			hw.delay.delay_ms(10);
 		}
-		hw.delay.delay_ms(1000);
-
+		writeln!(&tc, "{:05} {:?}", i, core::str::from_utf8(&firmware_version)).unwrap();
+		hw.delay.delay_ms(250);
+		hw.set_debug_leds(*led_cycle.next().unwrap_or(&0));
 	}
 }
 
