@@ -568,8 +568,8 @@ impl Hardware {
 		self.drive_cs_lines();
 
 		// Setup time
-		cortex_m::asm::delay(Self::CS_IO_SETUP_CPU_CLOCKS);
-		
+		cortex_m::asm::delay(1000);
+
 		// Call function
 		func(&mut self.spi_bus);
 
