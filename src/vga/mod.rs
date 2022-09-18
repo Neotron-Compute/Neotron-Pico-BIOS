@@ -190,7 +190,7 @@ pub static NUM_TEXT_COLS: AtomicUsize = AtomicUsize::new(80);
 /// Current number of visible rows.
 ///
 /// Must be `<= MAX_TEXT_ROWS`
-pub static NUM_TEXT_ROWS: AtomicUsize = AtomicUsize::new(25);
+pub static NUM_TEXT_ROWS: AtomicUsize = AtomicUsize::new(30);
 
 /// Used to signal when Core 1 has started
 static CORE1_START_FLAG: AtomicBool = AtomicBool::new(false);
