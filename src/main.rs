@@ -301,6 +301,12 @@ impl Hardware {
 	/// MCP23S17 CS pin disable time (between transactions). At least 50ns, we give 100ns.
 	const CS_IO_DISABLE_CPU_CLOCKS: u32 = 100 / Self::NS_PER_CLOCK_CYCLE;
 
+	/// Give the device 2us (2 clocks @ 1 MHz) to get ready.
+	const CS_BUS_SETUP_CPU_CLOCKS: u32 = 2000 / Self::NS_PER_CLOCK_CYCLE;
+
+	/// Give the device 2us (2 clocks @ 1 MHz) before we take away CS.
+	const CS_BUS_HOLD_CPU_CLOCKS: u32 = 2000 / Self::NS_PER_CLOCK_CYCLE;
+
 	/// Data Direction Register A on the MCP23S17
 	const MCP23S17_DDRA: u8 = 0x00;
 
@@ -568,13 +574,13 @@ impl Hardware {
 		self.drive_cs_lines();
 
 		// Setup time
-		cortex_m::asm::delay(1000);
+		cortex_m::asm::delay(Self::CS_BUS_SETUP_CPU_CLOCKS);
 
 		// Call function
 		func(&mut self.spi_bus);
 
 		// Hold the CS pin a bit longer
-		cortex_m::asm::delay(Self::CS_IO_HOLD_CPU_CLOCKS);
+		cortex_m::asm::delay(Self::CS_BUS_HOLD_CPU_CLOCKS);
 
 		// Undrive CS lines from decoder/buffer
 		self.release_cs_lines();
@@ -650,6 +656,7 @@ fn sign_on(hw: &mut Hardware) {
 	let mut led_cycle = [1, 1 + 2, 2 + 4, 4 + 8, 8, 0, 8, 8 + 4, 4 + 2, 2 + 1, 1, 0]
 		.iter()
 		.cycle();
+	let mut err_count = 0;
 	for i in 0.. {
 		let mut firmware_version = [0u8; 24];
 		for (reg, slot) in firmware_version.iter_mut().enumerate() {
@@ -666,10 +673,14 @@ fn sign_on(hw: &mut Hardware) {
 				.unwrap_or(&0x20);
 			*slot = *first;
 			// write!(&tc, "{:02x?} {}", buffer, *first as char).unwrap();
-			hw.delay.delay_ms(10);
+			hw.delay.delay_ms(1);
 		}
-		writeln!(&tc, "{:05} {:?}", i, core::str::from_utf8(&firmware_version)).unwrap();
-		hw.delay.delay_ms(250);
+		let fw_ver = core::str::from_utf8(&firmware_version);
+		if fw_ver != Ok("Neotron BMC 0.3.1       ") {
+			err_count += 1;
+		}
+		writeln!(&tc, "{:05} {:?} ({})", i, fw_ver, err_count).unwrap();
+		hw.delay.delay_ms(100);
 		hw.set_debug_leds(*led_cycle.next().unwrap_or(&0));
 	}
 }
