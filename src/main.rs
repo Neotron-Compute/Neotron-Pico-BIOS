@@ -656,31 +656,22 @@ fn sign_on(hw: &mut Hardware) {
 	let mut led_cycle = [1, 1 + 2, 2 + 4, 4 + 8, 8, 0, 8, 8 + 4, 4 + 2, 2 + 1, 1, 0]
 		.iter()
 		.cycle();
-	let mut err_count = 0;
 	for i in 0.. {
-		let mut firmware_version = [0u8; 24];
-		for (reg, slot) in firmware_version.iter_mut().enumerate() {
-			let mut buffer = [0xC0, reg as u8, 0x01, 0x00, 0x00, 0x00];
-			// write!(&tc, "{:x}: {:02x?}...", i, buffer).unwrap();
-			hw.with_bus_cs(0, |spi| {
-				spi.transfer(&mut buffer).unwrap();
-			});
-			let first = buffer
-				.iter()
-				.filter(|x| **x != 0xFF)
-				.take(1)
-				.next()
-				.unwrap_or(&0x20);
-			*slot = *first;
-			// write!(&tc, "{:02x?} {}", buffer, *first as char).unwrap();
-			hw.delay.delay_ms(1);
+		let mut buffer = [
+			0xAA, 0x10, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00,
+		];
+		hw.with_bus_cs(0, |spi| {
+			spi.transfer(&mut buffer).unwrap();
+		});
+		if buffer
+			!= [
+				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0xff, 0xff,
+				0xff, 0xff, 0xff,
+			] {
+			defmt::debug!("{:x}: {=[u8]:x}...", i, buffer);
 		}
-		let fw_ver = core::str::from_utf8(&firmware_version);
-		if fw_ver != Ok("Neotron BMC 0.3.1       ") {
-			err_count += 1;
-		}
-		writeln!(&tc, "{:05} {:?} ({})", i, fw_ver, err_count).unwrap();
-		hw.delay.delay_ms(100);
+		hw.delay.delay_ms(10);
 		hw.set_debug_leds(*led_cycle.next().unwrap_or(&0));
 	}
 }
