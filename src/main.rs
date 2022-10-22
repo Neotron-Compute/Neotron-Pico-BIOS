@@ -656,7 +656,7 @@ fn sign_on(hw: &mut Hardware) {
 	let mut led_cycle = [1, 1 + 2, 2 + 4, 4 + 8, 8, 0, 8, 8 + 4, 4 + 2, 2 + 1, 1, 0]
 		.iter()
 		.cycle();
-	for _i in 0.. {
+	for i in 0.. {
 		let mut buffer = [
 			0xC0, 0x00, 0x14, 0xE1, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 			0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -668,12 +668,28 @@ fn sign_on(hw: &mut Hardware) {
 		});
 		let mut result = &buffer[..];
 		let mut latency = 0;
-		while result[0] == 0xFF {
+		while result.len() > 0 && result[0] == 0xFF {
 			latency += 1;
 			result = &result[1..];
 		}
-		defmt::info!("RX: {=[u8]:a} (latency {})", &result[0..22], latency);
+		let mut strlen = 1;
+		for (idx, byte) in result.iter().enumerate() {
+			if *byte == 0 {
+				strlen = idx;
+				break;
+			}
+		}
+		defmt::info!("RX: {=[u8]:a} (latency {})", &result, latency);
+		write!(
+			&tc,
+			"\nLoop {}: BMC version {:?} (latency {})",
+			i,
+			if result.len() > 0 { core::str::from_utf8(&result[1..strlen]) } else { Ok("??") },
+			latency
+		)
+		.unwrap();
 		hw.delay.delay_ms(100);
+		video_wait_for_line(0);
 		hw.set_debug_leds(*led_cycle.next().unwrap_or(&0));
 	}
 }
