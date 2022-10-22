@@ -190,13 +190,13 @@ pub static NUM_TEXT_COLS: AtomicUsize = AtomicUsize::new(80);
 /// Current number of visible rows.
 ///
 /// Must be `<= MAX_TEXT_ROWS`
-pub static NUM_TEXT_ROWS: AtomicUsize = AtomicUsize::new(30);
+pub static NUM_TEXT_ROWS: AtomicUsize = AtomicUsize::new(25);
 
 /// Used to signal when Core 1 has started
 static CORE1_START_FLAG: AtomicBool = AtomicBool::new(false);
 
 /// Stores our timing data which we DMA into the timing PIO State Machine
-static mut TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x480();
+static mut TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x400();
 
 /// Stores which mode we are in
 static mut VIDEO_MODE: crate::common::video::Mode = crate::common::video::Mode::new(

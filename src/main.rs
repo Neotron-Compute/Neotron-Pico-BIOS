@@ -680,6 +680,8 @@ fn sign_on(hw: &mut Hardware) {
 			}
 		}
 		defmt::info!("RX: {=[u8]:a} (latency {})", &result, latency);
+		// Wait for vertical blank before drawing to the screen
+		video_wait_for_line(399);
 		write!(
 			&tc,
 			"\nLoop {}: BMC version {:?} (latency {})",
@@ -688,9 +690,8 @@ fn sign_on(hw: &mut Hardware) {
 			latency
 		)
 		.unwrap();
-		hw.delay.delay_ms(100);
-		video_wait_for_line(0);
 		hw.set_debug_leds(*led_cycle.next().unwrap_or(&0));
+		hw.delay.delay_ms(100);
 	}
 }
 
