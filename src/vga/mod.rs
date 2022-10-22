@@ -125,7 +125,7 @@ struct TimingBuffer {
 
 /// Represents a 12-bit colour value.
 ///
-/// Each channel has four-bits, and they are packed in `GBR` format. This is
+/// Each channel has four-bits, and they are packed in `BGR` format. This is
 /// so the PIO can shift them out right-first, and we have RED0 assigned to
 /// the lowest GPIO pin.
 #[repr(transparent)]
@@ -269,20 +269,22 @@ static CORE1_ENTRY_FUNCTION: [u16; 2] = [
 
 /// A set of useful constants representing common RGB colours.
 pub mod colours {
-	/// The colour white
-	pub const WHITE: super::RGBColour = super::RGBColour(0x777);
-
-	/// The colour black
-	pub const BLACK: super::RGBColour = super::RGBColour(0x000);
-
-	/// The colour blue
-	pub const BLUE: super::RGBColour = super::RGBColour(0xF00);
-
-	/// The colour green
-	pub const GREEN: super::RGBColour = super::RGBColour(0x0F0);
-
-	/// The colour red
-	pub const RED: super::RGBColour = super::RGBColour(0x00F);
+	pub const BLACK: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x00, 0x00);
+	pub const DARK_GRAY: super::RGBColour = super::RGBColour::from_24bit(0x80, 0x80, 0x80);
+	pub const BLUE: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x00, 0x80);
+	pub const LIGHT_BLUE: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x00, 0xF0);
+	pub const GREEN: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x80, 0x00);
+	pub const LIGHT_GREEN: super::RGBColour = super::RGBColour::from_24bit(0x00, 0xF0, 0x00);
+	pub const CYAN: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x80, 0x80);
+	pub const LIGHT_CYAN: super::RGBColour = super::RGBColour::from_24bit(0x00, 0xF0, 0xF0);
+	pub const RED: super::RGBColour = super::RGBColour::from_24bit(0x80, 0x00, 0x00);
+	pub const LIGHT_RED: super::RGBColour = super::RGBColour::from_24bit(0xF0, 0x00, 0x00);
+	pub const MAGENTA: super::RGBColour = super::RGBColour::from_24bit(0x80, 0x00, 0x80);
+	pub const LIGHT_MAGENTA: super::RGBColour = super::RGBColour::from_24bit(0xF0, 0x00, 0xF0);
+	pub const BROWN: super::RGBColour = super::RGBColour::from_24bit(0x80, 0x80, 0x00);
+	pub const YELLOW: super::RGBColour = super::RGBColour::from_24bit(0xF0, 0xF0, 0x00);
+	pub const LIGHT_GRAY: super::RGBColour = super::RGBColour::from_24bit(0xA0, 0xA0, 0xA0);
+	pub const WHITE: super::RGBColour = super::RGBColour::from_24bit(0xF0, 0xF0, 0xF0);
 }
 
 // -----------------------------------------------------------------------------
@@ -803,9 +805,9 @@ impl RenderEngine {
 		RenderEngine {
 			frame_count: 0,
 			lookup: [
-				RGBPair::from_pixels(colours::BLACK, colours::BLACK),
-				RGBPair::from_pixels(colours::BLACK, colours::WHITE),
-				RGBPair::from_pixels(colours::WHITE, colours::BLACK),
+				RGBPair::from_pixels(colours::BLUE, colours::BLUE),
+				RGBPair::from_pixels(colours::BLUE, colours::WHITE),
+				RGBPair::from_pixels(colours::WHITE, colours::BLUE),
 				RGBPair::from_pixels(colours::WHITE, colours::WHITE),
 			],
 		}
@@ -1380,11 +1382,15 @@ impl TimingBuffer {
 }
 
 impl RGBColour {
+	/// Make an [`RGBColour`] from a 24-bit RGB triplet.
+	///
+	/// Only the top 4 bits of each colour channel are retained, as RGB colour
+	/// is a 12-bit value.
 	pub const fn from_24bit(red: u8, green: u8, blue: u8) -> RGBColour {
-		let red: u16 = (red as u16) & 0x00F;
-		let green: u16 = (green as u16) & 0x00F;
-		let blue: u16 = (blue as u16) & 0x00F;
-		RGBColour((blue << 12) | (green << 4) | red)
+		let red4: u16 = ((red >> 4) & 0x00F) as u16;
+		let green4: u16 = ((green >> 4) & 0x00F) as u16;
+		let blue4: u16 = ((blue >> 4) & 0x00F) as u16;
+		RGBColour((blue4 << 8) | (green4 << 4) | red4)
 	}
 }
 
