@@ -484,14 +484,8 @@ pub fn init(
 	unsafe {
 		// Hand off the DMA peripheral to the interrupt
 		DMA_PERIPH = Some(dma);
-
-		// Enable the interrupts (DMA_PERIPH has to be set first)
-		cortex_m::interrupt::enable();
-		crate::pac::NVIC::unpend(crate::pac::Interrupt::DMA_IRQ_0);
-		crate::pac::NVIC::unmask(crate::pac::Interrupt::DMA_IRQ_0);
+		// We don't enable the interrupts here - we enable them on core 1
 	}
-
-	debug!("IRQs enabled");
 
 	debug!("DMA set-up complete");
 
@@ -699,6 +693,14 @@ pub fn get_num_scan_lines() -> u16 {
 /// Only run this function on Core 1.
 unsafe extern "C" fn core1_main() -> u32 {
 	CORE1_START_FLAG.store(true, Ordering::Relaxed);
+
+	// Enable the interrupts (DMA_PERIPH has to be set first by Core 0)
+	cortex_m::interrupt::enable();
+	// We are on Core 1, so these interrupts will run on Core 1
+	crate::pac::NVIC::unpend(crate::pac::Interrupt::DMA_IRQ_0);
+	crate::pac::NVIC::unmask(crate::pac::Interrupt::DMA_IRQ_0);
+
+	debug!("IRQs enabled");
 
 	let mut video = RenderEngine::new();
 
