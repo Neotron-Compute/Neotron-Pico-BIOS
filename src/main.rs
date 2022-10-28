@@ -43,17 +43,19 @@ pub mod vga;
 // Imports
 // -----------------------------------------------------------------------------
 
-use common::MemoryRegion;
+// Standard Library Stuff
 use core::fmt::Write;
+
+// Third Party Stuff
 use cortex_m_rt::entry;
+use critical_section::Mutex;
 use defmt::info;
 use defmt_rtt as _;
 use embedded_hal::{
 	blocking::spi::Transfer as _SpiTransfer, blocking::spi::Write as _SpiWrite,
 	digital::v2::OutputPin,
 };
-use embedded_time::rate::*;
-use neotron_common_bios as common;
+use fugit::RateExtU32;
 use panic_probe as _;
 use rp_pico::{
 	self,
@@ -65,6 +67,11 @@ use rp_pico::{
 		Clock,
 	},
 };
+
+// Other Neotron Crates
+use common::MemoryRegion;
+use neotron_bmc_protocol::Receivable;
+use neotron_common_bios as common;
 
 // -----------------------------------------------------------------------------
 // Types
@@ -126,6 +133,12 @@ struct Pins {
 
 /// The BIOS version string
 static BIOS_VERSION: &str = concat!("Neotron Pico BIOS version ", env!("BIOS_VERSION"), "\0");
+
+/// Our global hardware object.
+///
+/// You need to grab this to do anything with the hardware.
+static HARDWARE: Mutex<core::cell::RefCell<Option<Hardware>>> =
+	Mutex::new(core::cell::RefCell::new(None));
 
 /// This is our Operating System. It must be compiled separately.
 ///
@@ -213,7 +226,7 @@ fn main() -> ! {
 		pp.PLL_SYS,
 		xosc.operating_frequency().into(),
 		hal::pll::PLLConfig {
-			vco_freq: Megahertz(1512),
+			vco_freq: 1512.MHz(),
 			refdiv: 1,
 			post_div1: 6,
 			post_div2: 2,
@@ -247,7 +260,7 @@ fn main() -> ! {
 	let mut sio = hal::sio::Sio::new(pp.SIO);
 
 	// This object lets us wait for long periods of time (to make things readable on screen)
-	let delay = cortex_m::delay::Delay::new(cp.SYST, clocks.system_clock.freq().integer());
+	let delay = cortex_m::delay::Delay::new(cp.SYST, clocks.system_clock.freq().to_Hz());
 
 	// Configure and grab all the RP2040 pins the Pico exposes, along with the non-VGA peripherals.
 	let mut hw = Hardware::build(
@@ -275,8 +288,13 @@ fn main() -> ! {
 
 	info!("VGA OK");
 
-	// Say hello over VGA (with a bit of a pause)
-	sign_on(&mut hw);
+	critical_section::with(|cs| {
+		let mut hw_cell = HARDWARE.borrow_ref_mut(cs);
+		hw_cell.replace(hw);
+	});
+
+	// Say hello over VGA
+	sign_on();
 
 	// Now jump to the OS
 	// let code: &common::OsStartFn = unsafe { ::core::mem::transmute(&_flash_os_start) };
@@ -470,7 +488,7 @@ impl Hardware {
 			// Set SPI up for 1 MHz clock, 8 data bits.
 			spi_bus: hal::Spi::new(spi).init(
 				resets,
-				clocks.peripheral_clock,
+				clocks.peripheral_clock.freq(),
 				1_000_000.Hz(),
 				&embedded_hal::spi::MODE_0,
 			),
@@ -627,9 +645,58 @@ impl Hardware {
 			defmt::debug!("Reg 0x{:02x} => 0x{:02x}", reg, data);
 		}
 	}
+
+	/// Read the BMC firmware version string.
+	///
+	/// You get 32 bytes of probably UTF-8 data.
+	fn bmc_read_firmware_version(&mut self) -> Result<[u8; 32], ()> {
+		let req = neotron_bmc_protocol::Request::new_read(false, 0, 32);
+		let mut buffer = [0xFF; 64];
+		buffer[0..=3].copy_from_slice(&req.as_bytes());
+		self.with_bus_cs(0, |spi| {
+			spi.transfer(&mut buffer).unwrap();
+		});
+		let mut result = &buffer[..];
+		let mut latency = 0;
+		while result.len() > 0 && result[0] == 0xFF {
+			latency += 1;
+			result = &result[1..];
+		}
+		defmt::info!("latency: {}", latency);
+		// 32 bytes of data requested, plus one bytes of response code and one byte of CRC
+		if result.len() >= 34 {
+			match neotron_bmc_protocol::Response::from_bytes(&result[0..34]) {
+				Ok(res) => {
+					if res.result == neotron_bmc_protocol::ResponseResult::Ok
+						&& res.data.len() == 32
+					{
+						defmt::info!("Got BMC version {=[u8]:a}", res.data);
+						let mut string_bytes = [0u8; 32];
+						string_bytes.copy_from_slice(res.data);
+						return Ok(string_bytes);
+					} else {
+						defmt::warn!(
+							"Error getting BMC version: Error from BMC {:?} {=[u8]:x}",
+							res.result,
+							res.data
+						);
+					}
+				}
+				Err(e) => {
+					defmt::warn!(
+						"Error getting BMC version: Decoding Error {:?} {=[u8]:x}",
+						e,
+						result
+					);
+				}
+			}
+		}
+
+		Err(())
+	}
 }
 
-fn sign_on(hw: &mut Hardware) {
+fn sign_on() {
 	static LICENCE_TEXT: &str = "\
         Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2022\n\
         \n\
@@ -649,49 +716,24 @@ fn sign_on(hw: &mut Hardware) {
 	writeln!(&tc, "{}", &BIOS_VERSION[0..BIOS_VERSION.len() - 1]).unwrap();
 	write!(&tc, "{}", LICENCE_TEXT).unwrap();
 
-	writeln!(&tc, "Loading Neotron OS...").unwrap();
+	let bmc_ver = critical_section::with(|cs| {
+		let mut lock = HARDWARE.borrow_ref_mut(cs);
+		let hw = lock.as_mut().unwrap();
+		hw.bmc_read_firmware_version()
+	});
 
-	hw.dump_io_chip();
-
-	let mut led_cycle = [1, 1 + 2, 2 + 4, 4 + 8, 8, 0, 8, 8 + 4, 4 + 2, 2 + 1, 1, 0]
-		.iter()
-		.cycle();
-	for i in 0.. {
-		let mut buffer = [
-			0xC0, 0x00, 0x14, 0xE1, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-			0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-			0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-			0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-		];
-		hw.with_bus_cs(0, |spi| {
-			spi.transfer(&mut buffer).unwrap();
-		});
-		let mut result = &buffer[..];
-		let mut latency = 0;
-		while result.len() > 0 && result[0] == 0xFF {
-			latency += 1;
-			result = &result[1..];
-		}
-		let mut strlen = 1;
-		for (idx, byte) in result.iter().enumerate() {
-			if *byte == 0 {
-				strlen = idx;
-				break;
+	match bmc_ver {
+		Ok(string_bytes) => match core::str::from_utf8(&string_bytes) {
+			Ok(s) => {
+				writeln!(&tc, "BMC Version: {}", s).unwrap();
 			}
+			Err(_e) => {
+				writeln!(&tc, "BMC Version: Unknown").unwrap();
+			}
+		},
+		Err(_e) => {
+			writeln!(&tc, "BMC Version: Error reading").unwrap();
 		}
-		defmt::info!("RX: {=[u8]:a} (latency {})", &result, latency);
-		// Wait for vertical blank before drawing to the screen
-		video_wait_for_line(399);
-		write!(
-			&tc,
-			"\nLoop {}: BMC version {:?} (latency {})",
-			i,
-			if result.len() > 0 { core::str::from_utf8(&result[1..strlen]) } else { Ok("??") },
-			latency
-		)
-		.unwrap();
-		hw.set_debug_leds(*led_cycle.next().unwrap_or(&0));
-		hw.delay.delay_ms(100);
 	}
 }
 

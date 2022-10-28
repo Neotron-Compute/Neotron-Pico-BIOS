@@ -806,9 +806,9 @@ impl RenderEngine {
 			frame_count: 0,
 			lookup: [
 				RGBPair::from_pixels(colours::BLUE, colours::BLUE),
-				RGBPair::from_pixels(colours::BLUE, colours::WHITE),
-				RGBPair::from_pixels(colours::WHITE, colours::BLUE),
-				RGBPair::from_pixels(colours::WHITE, colours::WHITE),
+				RGBPair::from_pixels(colours::BLUE, colours::YELLOW),
+				RGBPair::from_pixels(colours::YELLOW, colours::BLUE),
+				RGBPair::from_pixels(colours::YELLOW, colours::YELLOW),
 			],
 		}
 	}
