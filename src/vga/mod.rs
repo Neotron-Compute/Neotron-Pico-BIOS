@@ -1392,6 +1392,33 @@ impl RGBColour {
 		let blue4: u16 = ((blue >> 4) & 0x00F) as u16;
 		RGBColour((blue4 << 8) | (green4 << 4) | red4)
 	}
+
+	/// Get the red component as an 8-bit value
+	pub const fn red8(self) -> u8 {
+		let red4 = self.0 & 0x0F;
+		(red4 << 4) as u8
+	}
+
+	/// Get the green component as an 8-bit value
+	pub const fn green8(self) -> u8 {
+		let green4 = (self.0 >> 4) & 0x0F;
+		(green4 << 4) as u8
+	}
+
+	/// Get the blue component as an 8-bit value
+	pub const fn blue8(self) -> u8 {
+		let blue4 = (self.0 >> 8) & 0x0F;
+		(blue4 << 4) as u8
+	}
+}
+
+impl Into<crate::common::video::RGBColour> for RGBColour {
+	fn into(self) -> crate::common::video::RGBColour {
+		let red = self.red8();
+		let green = self.green8();
+		let blue = self.blue8();
+		crate::common::video::RGBColour::from_rgb(red, green, blue)
+	}
 }
 
 impl RGBPair {

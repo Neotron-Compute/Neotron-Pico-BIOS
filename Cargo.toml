@@ -15,7 +15,7 @@ rp-pico = "0.5"
 # Cortex-M run-time (or start-up) code
 cortex-m-rt = "0.7"
 # The BIOS to OS API
-neotron-common-bios = "0.5.0"
+neotron-common-bios = "0.7.0"
 # For the RP2040 bootloader
 rp2040-boot2 = "0.2"
 # For hardware abstraction traits

@@ -156,8 +156,8 @@ static API_CALLS: common::Api = common::Api {
 	serial_get_info,
 	serial_write,
 	serial_read,
-	time_get,
-	time_set,
+	time_clock_get,
+	time_clock_set,
 	configuration_get,
 	configuration_set,
 	video_is_valid_mode,
@@ -174,6 +174,30 @@ static API_CALLS: common::Api = common::Api {
 	block_write,
 	block_read,
 	block_verify,
+	time_ticks_get,
+	time_ticks_per_second,
+	video_get_palette,
+	video_set_palette,
+	video_set_whole_palette,
+	i2c_bus_get_info,
+	i2c_write_read,
+	audio_mixer_channel_get_info,
+	audio_mixer_channel_set_level,
+	audio_output_set_config,
+	audio_output_get_config,
+	audio_output_data,
+	audio_output_get_space,
+	audio_input_set_config,
+	audio_input_get_config,
+	audio_input_data,
+	audio_input_get_count,
+	bus_select,
+	bus_get_info,
+	bus_write_read,
+	bus_exchange,
+	bus_interrupt_status,
+	block_dev_eject,
+	power_idle,
 };
 
 extern "C" {
@@ -297,13 +321,8 @@ fn main() -> ! {
 	sign_on();
 
 	// Now jump to the OS
-	// let code: &common::OsStartFn = unsafe { ::core::mem::transmute(&_flash_os_start) };
-	// code(&API_CALLS);
-
-	// OS has returned?! Just hang.
-	loop {
-		cortex_m::asm::wfi();
-	}
+	let code: &common::OsStartFn = unsafe { ::core::mem::transmute(&_flash_os_start) };
+	code(&API_CALLS);
 }
 
 impl Hardware {
@@ -642,7 +661,6 @@ impl Hardware {
 		// Dump registers
 		for reg in 0x00..=0x15 {
 			let data = self.io_chip_read(reg);
-			defmt::debug!("Reg 0x{:02x} => 0x{:02x}", reg, data);
 		}
 	}
 
@@ -650,12 +668,13 @@ impl Hardware {
 	///
 	/// You get 32 bytes of probably UTF-8 data.
 	fn bmc_read_firmware_version(&mut self) -> Result<[u8; 32], ()> {
-		let req = neotron_bmc_protocol::Request::new_read(false, 0, 32);
+		let req = neotron_bmc_protocol::Request::new_read(false, 0x01, 32);
 		let mut buffer = [0xFF; 64];
 		buffer[0..=3].copy_from_slice(&req.as_bytes());
 		self.with_bus_cs(0, |spi| {
 			spi.transfer(&mut buffer).unwrap();
 		});
+		defmt::info!("buffer: {=[u8]:x}", buffer);
 		let mut result = &buffer[..];
 		let mut latency = 0;
 		while result.len() > 0 && result[0] == 0xFF {
@@ -685,6 +704,53 @@ impl Hardware {
 				Err(e) => {
 					defmt::warn!(
 						"Error getting BMC version: Decoding Error {:?} {=[u8]:x}",
+						e,
+						result
+					);
+				}
+			}
+		}
+
+		Err(())
+	}
+
+	/// Read the BMC PS/2 keyboard FIFO.
+	///
+	/// We ask for 8 bytes of data. We get `1` byte of 'length', then `N` bytes of valid data, and `32 - (N + 1)` bytes of padding.
+	fn bmc_read_ps2_keyboard_fifo(&mut self, buffer: &mut [u8]) -> Result<usize, ()> {
+		let req = neotron_bmc_protocol::Request::new_read(false, 0x40, 8);
+		let mut buffer = [0xFF; 42];
+		buffer[0..=3].copy_from_slice(&req.as_bytes());
+		self.with_bus_cs(0, |spi| {
+			spi.transfer(&mut buffer).unwrap();
+		});
+		defmt::info!("buffer: {=[u8]:x}", buffer);
+		let mut result = &buffer[..];
+		let mut latency = 0;
+		while result.len() > 0 && result[0] == 0xFF {
+			latency += 1;
+			result = &result[1..];
+		}
+		defmt::info!("latency: {}", latency);
+		// 8 bytes of data requested, plus one bytes of response code and one byte of CRC
+		if result.len() >= 10 {
+			match neotron_bmc_protocol::Response::from_bytes(&result[0..10]) {
+				Ok(res) => {
+					if res.result == neotron_bmc_protocol::ResponseResult::Ok && res.data.len() == 8
+					{
+						defmt::info!("Got PS/2 bytes {=[u8]:x}", res.data);
+						return Ok(0);
+					} else {
+						defmt::warn!(
+							"Error getting keyboard bytes: Error from BMC {:?} {=[u8]:x}",
+							res.result,
+							res.data
+						);
+					}
+				}
+				Err(e) => {
+					defmt::warn!(
+						"Error getting BMC keyboard bytes: Decoding Error {:?} {=[u8]:x}",
 						e,
 						result
 					);
@@ -735,6 +801,12 @@ fn sign_on() {
 			writeln!(&tc, "BMC Version: Error reading").unwrap();
 		}
 	}
+
+	critical_section::with(|cs| {
+		let mut lock = HARDWARE.borrow_ref_mut(cs);
+		let hw = lock.as_mut().unwrap();
+		hw.delay.delay_ms(5000);
+	});
 }
 
 /// Reset the DMA Peripheral.
@@ -825,7 +897,7 @@ pub extern "C" fn serial_read(
 ///
 /// If the BIOS does not have a battery-backed clock, or if that battery has
 /// failed to keep time, the system starts up assuming it is the epoch.
-pub extern "C" fn time_get() -> common::Time {
+pub extern "C" fn time_clock_get() -> common::Time {
 	// TODO: Read from the MCP7940N
 	common::Time { secs: 0, nsecs: 0 }
 }
@@ -839,7 +911,7 @@ pub extern "C" fn time_get() -> common::Time {
 /// time (e.g. the user has updated the current time, or if you get a GPS
 /// fix). The BIOS should push the time out to the battery-backed Real
 /// Time Clock, if it has one.
-pub extern "C" fn time_set(_time: common::Time) {
+pub extern "C" fn time_clock_set(_time: common::Time) {
 	// TODO: Update the MCP7940N RTC
 }
 
@@ -950,17 +1022,17 @@ pub extern "C" fn video_mode_needs_vram(_mode: common::video::Mode) -> bool {
 /// (other than Region 0), so faster memory should be listed first.
 ///
 /// If the region number given is invalid, the function returns `(null, 0)`.
-pub extern "C" fn memory_get_region(region: u8) -> common::Result<common::MemoryRegion> {
+pub extern "C" fn memory_get_region(region: u8) -> common::Option<common::MemoryRegion> {
 	match region {
 		0 => {
 			// Application Region
-			common::Result::Ok(MemoryRegion {
+			common::Option::Some(MemoryRegion {
 				start: unsafe { &mut _ram_os_start as *mut u32 } as *mut u8,
 				length: unsafe { &mut _ram_os_len as *const u32 } as usize,
 				kind: common::MemoryKind::Ram,
 			})
 		}
-		_ => common::Result::Err(common::Error::InvalidDevice),
+		_ => common::Option::None,
 	}
 }
 
@@ -968,6 +1040,10 @@ pub extern "C" fn memory_get_region(region: u8) -> common::Result<common::Memory
 ///
 /// This function doesn't block. It will return `Ok(None)` if there is no event ready.
 pub extern "C" fn hid_get_event() -> common::Result<common::Option<common::hid::HidEvent>> {
+	// todo: call bmc_read_ps2_keyboard_fifo()
+	// todo: decode the PS/2 bytes we receive into HidEvents
+	// todo: cache all the bytes that don't make up a full HID event
+
 	// TODO: Support some HID events
 	common::Result::Ok(common::Option::None)
 }
@@ -1011,6 +1087,109 @@ pub extern "C" fn video_wait_for_line(line: u16) {
 			break;
 		}
 	}
+}
+
+/// Read the RGB palette. Currently we only have two colours and you can't
+/// change them.
+extern "C" fn video_get_palette(index: u8) -> common::Option<common::video::RGBColour> {
+	match index {
+		0 => common::Option::Some(vga::colours::BLUE.into()),
+		1 => common::Option::Some(vga::colours::YELLOW.into()),
+		_ => common::Option::None,
+	}
+}
+
+/// Update the RGB palette
+extern "C" fn video_set_palette(index: u8, rgb: common::video::RGBColour) {
+	// TODO set the palette when we actually have one
+}
+
+/// Update all the RGB palette
+unsafe extern "C" fn video_set_whole_palette(
+	palette: *const common::video::RGBColour,
+	length: usize,
+) {
+	// TODO set the palette when we actually have one
+}
+
+extern "C" fn i2c_bus_get_info(_i2c_bus: u8) -> common::Option<common::i2c::BusInfo> {
+	unimplemented!();
+}
+
+extern "C" fn i2c_write_read(
+	_i2c_bus: u8,
+	_i2c_device_address: u8,
+	_tx: common::ApiByteSlice,
+	_tx2: common::ApiByteSlice,
+	_rx: common::ApiBuffer,
+) -> common::Result<()> {
+	unimplemented!();
+}
+
+extern "C" fn audio_mixer_channel_get_info(
+	_audio_mixer_id: u8,
+) -> common::Result<common::audio::MixerChannelInfo> {
+	unimplemented!();
+}
+
+extern "C" fn audio_mixer_channel_set_level(_audio_mixer_id: u8, _level: u8) -> common::Result<()> {
+	unimplemented!();
+}
+
+extern "C" fn audio_output_set_config(_config: common::audio::Config) -> common::Result<()> {
+	unimplemented!();
+}
+
+extern "C" fn audio_output_get_config() -> common::Result<common::audio::Config> {
+	unimplemented!();
+}
+
+unsafe extern "C" fn audio_output_data(_samples: common::ApiByteSlice) -> common::Result<usize> {
+	unimplemented!();
+}
+
+extern "C" fn audio_output_get_space() -> common::Result<usize> {
+	unimplemented!();
+}
+
+extern "C" fn audio_input_set_config(_config: common::audio::Config) -> common::Result<()> {
+	unimplemented!();
+}
+
+extern "C" fn audio_input_get_config() -> common::Result<common::audio::Config> {
+	unimplemented!();
+}
+
+extern "C" fn audio_input_data(_samples: common::ApiBuffer) -> common::Result<usize> {
+	unimplemented!();
+}
+
+extern "C" fn audio_input_get_count() -> common::Result<usize> {
+	unimplemented!();
+}
+
+extern "C" fn bus_select(_periperal_id: common::Option<u8>) {
+	unimplemented!();
+}
+
+extern "C" fn bus_get_info(_periperal_id: u8) -> common::Option<common::bus::PeripheralInfo> {
+	unimplemented!();
+}
+
+extern "C" fn bus_write_read(
+	_tx: common::ApiByteSlice,
+	_tx2: common::ApiByteSlice,
+	_rx: common::ApiBuffer,
+) -> common::Result<()> {
+	unimplemented!();
+}
+
+extern "C" fn bus_exchange(_buffer: common::ApiBuffer) -> common::Result<()> {
+	unimplemented!();
+}
+
+extern "C" fn bus_interrupt_status() -> u32 {
+	0
 }
 
 /// Get information about the Block Devices in the system.
@@ -1062,7 +1241,7 @@ pub extern "C" fn block_dev_get_info(device: u8) -> common::Option<common::block
 /// aligned, the BIOS may be able to use a higher-performance code path.
 pub extern "C" fn block_write(
 	_device: u8,
-	_block: u64,
+	_block: common::block_dev::BlockIdx,
 	_num_blocks: u8,
 	_data: common::ApiByteSlice,
 ) -> common::Result<()> {
@@ -1079,7 +1258,7 @@ pub extern "C" fn block_write(
 /// aligned, the BIOS may be able to use a higher-performance code path.
 pub extern "C" fn block_read(
 	_device: u8,
-	_block: u64,
+	_block: common::block_dev::BlockIdx,
 	_num_blocks: u8,
 	_data: common::ApiBuffer,
 ) -> common::Result<()> {
@@ -1097,11 +1276,30 @@ pub extern "C" fn block_read(
 /// aligned, the BIOS may be able to use a higher-performance code path.
 pub extern "C" fn block_verify(
 	_device: u8,
-	_block: u64,
+	_block: common::block_dev::BlockIdx,
 	_num_blocks: u8,
 	_data: common::ApiByteSlice,
 ) -> common::Result<()> {
 	common::Result::Err(common::Error::Unimplemented)
+}
+
+extern "C" fn block_dev_eject(dev_id: u8) -> common::Result<()> {
+	common::Result::Ok(())
+}
+
+/// Sleep the CPU until the next interrupt.
+extern "C" fn power_idle() {
+	cortex_m::asm::wfe();
+}
+
+/// TODO: Get the monotonic run-time of the system from SysTick.
+extern "C" fn time_ticks_get() -> common::Ticks {
+	common::Ticks(0)
+}
+
+/// We have a 1 kHz SysTick
+extern "C" fn time_ticks_per_second() -> common::Ticks {
+	common::Ticks(1000)
 }
 
 /// Called when DMA raises IRQ0; i.e. when a DMA transfer to the pixel FIFO or
