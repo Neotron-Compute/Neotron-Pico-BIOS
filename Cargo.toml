@@ -23,7 +23,7 @@ embedded-hal ="0.2"
 # Gives us formatted PC-side logging
 defmt = "0.3"
 # Sends defmt logs to the SWD debugger
-defmt-rtt = "0.3"
+defmt-rtt = "0.4"
 # Send panics to the debugger
 panic-probe = "0.2"
 # RP2040 PIO assembler
