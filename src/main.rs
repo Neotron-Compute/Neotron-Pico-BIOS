@@ -217,9 +217,6 @@ extern "C" {
 fn main() -> ! {
 	cortex_m::interrupt::disable();
 
-	// BIOS_VERSION has a trailing `\0` as that is what the BIOS/OS API requires.
-	info!("{} starting...", &BIOS_VERSION[0..BIOS_VERSION.len() - 1]);
-
 	// Grab the singleton containing all the RP2040 peripherals
 	let mut pp = pac::Peripherals::take().unwrap();
 	// Grab the singleton containing all the generic Cortex-M peripherals
@@ -229,8 +226,14 @@ fn main() -> ! {
 	// (as opposed to a cold-start) is unreliable.
 	reset_dma_engine(&mut pp);
 
+	// Reset the spinlocks.
+	pp.SIO.spinlock[31].reset();
+
 	// Needed by the clock setup
 	let mut watchdog = hal::watchdog::Watchdog::new(pp.WATCHDOG);
+
+	// BIOS_VERSION has a trailing `\0` as that is what the BIOS/OS API requires.
+	info!("{} starting...", &BIOS_VERSION[0..BIOS_VERSION.len() - 1]);
 
 	// Run at 126 MHz SYS_PLL, 48 MHz, USB_PLL. This is important, we as clock
 	// the PIO at ÷ 5, to give 25.2 MHz (which is close enough to the 25.175
