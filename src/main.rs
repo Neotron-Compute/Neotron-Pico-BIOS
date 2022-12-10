@@ -44,7 +44,7 @@ pub mod vga;
 // -----------------------------------------------------------------------------
 
 // Standard Library Stuff
-use core::fmt::Write;
+use core::{fmt::Write, sync::atomic::AtomicBool};
 
 // Third Party Stuff
 use cortex_m_rt::entry;
@@ -89,6 +89,26 @@ struct Hardware {
 	debug_leds: u8,
 	/// The last CS pin we selected
 	last_cs: u8,
+	/// Our keyboard decoder
+	keyboard: pc_keyboard::Keyboard<pc_keyboard::layouts::Uk105Key, pc_keyboard::ScancodeSet2>,
+	/// Our queue of HID events
+	event_queue: heapless::Deque<neotron_common_bios::hid::HidEvent, 16>,
+}
+
+/// Flips between true and false so we always send a unique read request
+struct UseAlt(AtomicBool);
+
+impl UseAlt {
+	const fn new() -> UseAlt {
+		UseAlt(AtomicBool::new(false))
+	}
+
+	fn get(&self) -> bool {
+		let use_alt = self.0.load(core::sync::atomic::Ordering::Relaxed);
+		self.0
+			.store(!use_alt, core::sync::atomic::Ordering::Relaxed);
+		use_alt
+	}
 }
 
 /// All the pins we use on the Pico, in the right mode.
@@ -133,6 +153,9 @@ struct Pins {
 
 /// The BIOS version string
 static BIOS_VERSION: &str = concat!("Neotron Pico BIOS version ", env!("BIOS_VERSION"), "\0");
+
+/// Ensures we always send a unique read request
+static USE_ALT: UseAlt = UseAlt::new();
 
 /// Our global hardware object.
 ///
@@ -517,6 +540,8 @@ impl Hardware {
 			delay,
 			debug_leds: 0,
 			last_cs: 0,
+			keyboard: pc_keyboard::Keyboard::new(pc_keyboard::HandleControl::Ignore),
+			event_queue: heapless::Deque::new(),
 		}
 	}
 
@@ -720,48 +745,57 @@ impl Hardware {
 	/// Read the BMC PS/2 keyboard FIFO.
 	///
 	/// We ask for 8 bytes of data. We get `1` byte of 'length', then `N` bytes of valid data, and `32 - (N + 1)` bytes of padding.
-	fn bmc_read_ps2_keyboard_fifo(&mut self, buffer: &mut [u8]) -> Result<usize, ()> {
-		let req = neotron_bmc_protocol::Request::new_read(false, 0x40, 8);
-		let mut buffer = [0xFF; 42];
-		buffer[0..=3].copy_from_slice(&req.as_bytes());
-		self.with_bus_cs(0, |spi| {
-			spi.transfer(&mut buffer).unwrap();
-		});
-		defmt::info!("buffer: {=[u8]:x}", buffer);
-		let mut result = &buffer[..];
-		let mut latency = 0;
-		while result.len() > 0 && result[0] == 0xFF {
-			latency += 1;
-			result = &result[1..];
-		}
-		defmt::info!("latency: {}", latency);
-		// 8 bytes of data requested, plus one bytes of response code and one byte of CRC
-		if result.len() >= 10 {
-			match neotron_bmc_protocol::Response::from_bytes(&result[0..10]) {
-				Ok(res) => {
-					if res.result == neotron_bmc_protocol::ResponseResult::Ok && res.data.len() == 8
-					{
-						defmt::info!("Got PS/2 bytes {=[u8]:x}", res.data);
-						return Ok(0);
-					} else {
+	fn bmc_read_ps2_keyboard_fifo(&mut self, out_buffer: &mut [u8; 8]) -> Result<usize, ()> {
+		let req = neotron_bmc_protocol::Request::new_read(USE_ALT.get(), 0x40, 8);
+		for _retry in 0..4 {
+			let mut buffer = [0xFF; 42];
+			buffer[0..=3].copy_from_slice(&req.as_bytes());
+			self.with_bus_cs(0, |spi| {
+				spi.transfer(&mut buffer).unwrap();
+			});
+			defmt::trace!("buffer: {=[u8]:x}", buffer);
+			let mut result = &buffer[..];
+			let mut latency = 0;
+			while result.len() > 0 && result[0] == 0xFF {
+				latency += 1;
+				result = &result[1..];
+			}
+			defmt::trace!("latency: {}", latency);
+			// 8 bytes of data requested, plus one bytes of response code and one byte of CRC
+			if result.len() >= 10 {
+				match neotron_bmc_protocol::Response::from_bytes(&result[0..10]) {
+					Ok(res) => {
+						if res.result == neotron_bmc_protocol::ResponseResult::Ok
+							&& res.data.len() == 8
+						{
+							if res.data[0] == 0 {
+								defmt::trace!("Got no PS/2 bytes");
+							} else {
+								defmt::debug!("Got PS/2 bytes {=[u8]:x}", res.data);
+							}
+							for (dest, src) in out_buffer.iter_mut().zip(res.data.iter().skip(1)) {
+								*dest = *src;
+							}
+							return Ok(res.data[0] as usize);
+						} else {
+							defmt::warn!(
+								"Error getting keyboard bytes: Error from BMC {:?} {=[u8]:x}",
+								res.result,
+								res.data
+							);
+						}
+					}
+					Err(e) => {
 						defmt::warn!(
-							"Error getting keyboard bytes: Error from BMC {:?} {=[u8]:x}",
-							res.result,
-							res.data
+							"Error getting BMC keyboard bytes: Decoding Error {:?} {=[u8]:x}",
+							e,
+							result
 						);
 					}
 				}
-				Err(e) => {
-					defmt::warn!(
-						"Error getting BMC keyboard bytes: Decoding Error {:?} {=[u8]:x}",
-						e,
-						result
-					);
-				}
 			}
 		}
-
-		Err(())
+		panic!("KB retry timeout");
 	}
 }
 
@@ -1043,12 +1077,206 @@ pub extern "C" fn memory_get_region(region: u8) -> common::Option<common::Memory
 ///
 /// This function doesn't block. It will return `Ok(None)` if there is no event ready.
 pub extern "C" fn hid_get_event() -> common::Result<common::Option<common::hid::HidEvent>> {
-	// todo: call bmc_read_ps2_keyboard_fifo()
-	// todo: decode the PS/2 bytes we receive into HidEvents
-	// todo: cache all the bytes that don't make up a full HID event
+	let mut buffer = [0u8; 8];
 
-	// TODO: Support some HID events
-	common::Result::Ok(common::Option::None)
+	critical_section::with(|cs| {
+		let mut lock = HARDWARE.borrow_ref_mut(cs);
+		let hw = lock.as_mut().unwrap();
+
+		if let Some(ev) = hw.event_queue.pop_front() {
+			// Queued data available, so short-cut
+			return common::Result::Ok(common::Option::Some(ev));
+		}
+
+		match hw.bmc_read_ps2_keyboard_fifo(&mut buffer) {
+			Ok(n) if n > 0 => {
+				let slice = if n >= 8 { &buffer } else { &buffer[0..n] };
+				defmt::info!("{} bytes in KB FIFO, got: {=[u8]:x}", n, &slice);
+				for b in slice.iter() {
+					match hw.keyboard.add_byte(*b) {
+						Ok(Some(key_event)) => {
+							convert_hid_event(key_event, &mut hw.event_queue);
+						}
+						Ok(None) => {
+							// Need more data
+						}
+						Err(e) => {
+							panic!("Keyboard decode error!");
+						}
+					}
+				}
+			}
+			Ok(_) => {
+				// Say nothing - FIFO is empty
+			}
+			Err(e) => {
+				defmt::warn!("Read KB error: {:?}", e);
+			}
+		}
+
+		if let Some(ev) = hw.event_queue.pop_front() {
+			// Queued data available, so short-cut
+			common::Result::Ok(common::Option::Some(ev))
+		} else {
+			common::Result::Ok(common::Option::None)
+		}
+	})
+}
+
+fn convert_hid_event(
+	pc_keyboard_ev: pc_keyboard::KeyEvent,
+	ev_queue: &mut heapless::Deque<common::hid::HidEvent, 16>,
+) {
+	match pc_keyboard_ev.state {
+		pc_keyboard::KeyState::Down => {
+			ev_queue
+				.push_back(common::hid::HidEvent::KeyPress(convert_hid_code(
+					pc_keyboard_ev.code,
+				)))
+				.unwrap();
+		}
+		pc_keyboard::KeyState::Up => {
+			ev_queue
+				.push_back(common::hid::HidEvent::KeyRelease(convert_hid_code(
+					pc_keyboard_ev.code,
+				)))
+				.unwrap();
+		}
+		pc_keyboard::KeyState::SingleShot => {
+			ev_queue
+				.push_back(common::hid::HidEvent::KeyPress(convert_hid_code(
+					pc_keyboard_ev.code,
+				)))
+				.unwrap();
+			ev_queue
+				.push_back(common::hid::HidEvent::KeyRelease(convert_hid_code(
+					pc_keyboard_ev.code,
+				)))
+				.unwrap();
+		}
+	}
+}
+
+fn convert_hid_code(pc_code: pc_keyboard::KeyCode) -> common::hid::KeyCode {
+	match pc_code {
+		pc_keyboard::KeyCode::AltLeft => common::hid::KeyCode::AltLeft,
+		pc_keyboard::KeyCode::AltRight => common::hid::KeyCode::AltRight,
+		pc_keyboard::KeyCode::ArrowDown => common::hid::KeyCode::ArrowDown,
+		pc_keyboard::KeyCode::ArrowLeft => common::hid::KeyCode::ArrowLeft,
+		pc_keyboard::KeyCode::ArrowRight => common::hid::KeyCode::ArrowRight,
+		pc_keyboard::KeyCode::ArrowUp => common::hid::KeyCode::ArrowUp,
+		pc_keyboard::KeyCode::BackSlash => common::hid::KeyCode::BackSlash,
+		pc_keyboard::KeyCode::Backspace => common::hid::KeyCode::Backspace,
+		pc_keyboard::KeyCode::BackTick => common::hid::KeyCode::BackTick,
+		pc_keyboard::KeyCode::BracketSquareLeft => common::hid::KeyCode::BracketSquareLeft,
+		pc_keyboard::KeyCode::BracketSquareRight => common::hid::KeyCode::BracketSquareRight,
+		pc_keyboard::KeyCode::Break => common::hid::KeyCode::PauseBreak,
+		pc_keyboard::KeyCode::CapsLock => common::hid::KeyCode::CapsLock,
+		pc_keyboard::KeyCode::Comma => common::hid::KeyCode::Comma,
+		pc_keyboard::KeyCode::ControlLeft => common::hid::KeyCode::ControlLeft,
+		pc_keyboard::KeyCode::ControlRight => common::hid::KeyCode::ControlRight,
+		pc_keyboard::KeyCode::Delete => common::hid::KeyCode::Delete,
+		pc_keyboard::KeyCode::End => common::hid::KeyCode::End,
+		pc_keyboard::KeyCode::Enter => common::hid::KeyCode::Enter,
+		pc_keyboard::KeyCode::Escape => common::hid::KeyCode::Escape,
+		pc_keyboard::KeyCode::Equals => common::hid::KeyCode::Equals,
+		pc_keyboard::KeyCode::F1 => common::hid::KeyCode::F1,
+		pc_keyboard::KeyCode::F2 => common::hid::KeyCode::F2,
+		pc_keyboard::KeyCode::F3 => common::hid::KeyCode::F3,
+		pc_keyboard::KeyCode::F4 => common::hid::KeyCode::F4,
+		pc_keyboard::KeyCode::F5 => common::hid::KeyCode::F5,
+		pc_keyboard::KeyCode::F6 => common::hid::KeyCode::F6,
+		pc_keyboard::KeyCode::F7 => common::hid::KeyCode::F7,
+		pc_keyboard::KeyCode::F8 => common::hid::KeyCode::F8,
+		pc_keyboard::KeyCode::F9 => common::hid::KeyCode::F9,
+		pc_keyboard::KeyCode::F10 => common::hid::KeyCode::F10,
+		pc_keyboard::KeyCode::F11 => common::hid::KeyCode::F11,
+		pc_keyboard::KeyCode::F12 => common::hid::KeyCode::F12,
+		pc_keyboard::KeyCode::Fullstop => common::hid::KeyCode::Fullstop,
+		pc_keyboard::KeyCode::Home => common::hid::KeyCode::Home,
+		pc_keyboard::KeyCode::Insert => common::hid::KeyCode::Insert,
+		pc_keyboard::KeyCode::Key1 => common::hid::KeyCode::Key1,
+		pc_keyboard::KeyCode::Key2 => common::hid::KeyCode::Key2,
+		pc_keyboard::KeyCode::Key3 => common::hid::KeyCode::Key3,
+		pc_keyboard::KeyCode::Key4 => common::hid::KeyCode::Key4,
+		pc_keyboard::KeyCode::Key5 => common::hid::KeyCode::Key5,
+		pc_keyboard::KeyCode::Key6 => common::hid::KeyCode::Key6,
+		pc_keyboard::KeyCode::Key7 => common::hid::KeyCode::Key7,
+		pc_keyboard::KeyCode::Key8 => common::hid::KeyCode::Key8,
+		pc_keyboard::KeyCode::Key9 => common::hid::KeyCode::Key9,
+		pc_keyboard::KeyCode::Key0 => common::hid::KeyCode::Key0,
+		pc_keyboard::KeyCode::Menus => common::hid::KeyCode::Menus,
+		pc_keyboard::KeyCode::Minus => common::hid::KeyCode::Minus,
+		pc_keyboard::KeyCode::Numpad0 => common::hid::KeyCode::Numpad0,
+		pc_keyboard::KeyCode::Numpad1 => common::hid::KeyCode::Numpad1,
+		pc_keyboard::KeyCode::Numpad2 => common::hid::KeyCode::Numpad2,
+		pc_keyboard::KeyCode::Numpad3 => common::hid::KeyCode::Numpad3,
+		pc_keyboard::KeyCode::Numpad4 => common::hid::KeyCode::Numpad4,
+		pc_keyboard::KeyCode::Numpad5 => common::hid::KeyCode::Numpad5,
+		pc_keyboard::KeyCode::Numpad6 => common::hid::KeyCode::Numpad6,
+		pc_keyboard::KeyCode::Numpad7 => common::hid::KeyCode::Numpad7,
+		pc_keyboard::KeyCode::Numpad8 => common::hid::KeyCode::Numpad8,
+		pc_keyboard::KeyCode::Numpad9 => common::hid::KeyCode::Numpad9,
+		pc_keyboard::KeyCode::NumpadEnter => common::hid::KeyCode::NumpadEnter,
+		pc_keyboard::KeyCode::NumpadLock => common::hid::KeyCode::NumpadLock,
+		pc_keyboard::KeyCode::NumpadSlash => common::hid::KeyCode::NumpadSlash,
+		pc_keyboard::KeyCode::NumpadStar => common::hid::KeyCode::NumpadStar,
+		pc_keyboard::KeyCode::NumpadMinus => common::hid::KeyCode::NumpadMinus,
+		pc_keyboard::KeyCode::NumpadPeriod => common::hid::KeyCode::NumpadPeriod,
+		pc_keyboard::KeyCode::NumpadPlus => common::hid::KeyCode::NumpadPlus,
+		pc_keyboard::KeyCode::PageDown => common::hid::KeyCode::PageDown,
+		pc_keyboard::KeyCode::PageUp => common::hid::KeyCode::PageUp,
+		pc_keyboard::KeyCode::PauseBreak => common::hid::KeyCode::PauseBreak,
+		pc_keyboard::KeyCode::PrintScreen => common::hid::KeyCode::PrintScreen,
+		pc_keyboard::KeyCode::ScrollLock => common::hid::KeyCode::ScrollLock,
+		pc_keyboard::KeyCode::SemiColon => common::hid::KeyCode::SemiColon,
+		pc_keyboard::KeyCode::ShiftLeft => common::hid::KeyCode::ShiftLeft,
+		pc_keyboard::KeyCode::ShiftRight => common::hid::KeyCode::ShiftRight,
+		pc_keyboard::KeyCode::Slash => common::hid::KeyCode::Slash,
+		pc_keyboard::KeyCode::Spacebar => common::hid::KeyCode::Spacebar,
+		pc_keyboard::KeyCode::Tab => common::hid::KeyCode::Tab,
+		pc_keyboard::KeyCode::Quote => common::hid::KeyCode::Quote,
+		pc_keyboard::KeyCode::WindowsLeft => common::hid::KeyCode::WindowsLeft,
+		pc_keyboard::KeyCode::WindowsRight => common::hid::KeyCode::WindowsRight,
+		pc_keyboard::KeyCode::A => common::hid::KeyCode::A,
+		pc_keyboard::KeyCode::B => common::hid::KeyCode::B,
+		pc_keyboard::KeyCode::C => common::hid::KeyCode::C,
+		pc_keyboard::KeyCode::D => common::hid::KeyCode::D,
+		pc_keyboard::KeyCode::E => common::hid::KeyCode::E,
+		pc_keyboard::KeyCode::F => common::hid::KeyCode::F,
+		pc_keyboard::KeyCode::G => common::hid::KeyCode::G,
+		pc_keyboard::KeyCode::H => common::hid::KeyCode::H,
+		pc_keyboard::KeyCode::I => common::hid::KeyCode::I,
+		pc_keyboard::KeyCode::J => common::hid::KeyCode::J,
+		pc_keyboard::KeyCode::K => common::hid::KeyCode::K,
+		pc_keyboard::KeyCode::L => common::hid::KeyCode::L,
+		pc_keyboard::KeyCode::M => common::hid::KeyCode::M,
+		pc_keyboard::KeyCode::N => common::hid::KeyCode::N,
+		pc_keyboard::KeyCode::O => common::hid::KeyCode::O,
+		pc_keyboard::KeyCode::P => common::hid::KeyCode::P,
+		pc_keyboard::KeyCode::Q => common::hid::KeyCode::Q,
+		pc_keyboard::KeyCode::R => common::hid::KeyCode::R,
+		pc_keyboard::KeyCode::S => common::hid::KeyCode::S,
+		pc_keyboard::KeyCode::T => common::hid::KeyCode::T,
+		pc_keyboard::KeyCode::U => common::hid::KeyCode::U,
+		pc_keyboard::KeyCode::V => common::hid::KeyCode::V,
+		pc_keyboard::KeyCode::W => common::hid::KeyCode::W,
+		pc_keyboard::KeyCode::X => common::hid::KeyCode::X,
+		pc_keyboard::KeyCode::Y => common::hid::KeyCode::Y,
+		pc_keyboard::KeyCode::Z => common::hid::KeyCode::Z,
+		pc_keyboard::KeyCode::HashTilde => common::hid::KeyCode::HashTilde,
+		pc_keyboard::KeyCode::PrevTrack => common::hid::KeyCode::PrevTrack,
+		pc_keyboard::KeyCode::NextTrack => common::hid::KeyCode::NextTrack,
+		pc_keyboard::KeyCode::Mute => common::hid::KeyCode::Mute,
+		pc_keyboard::KeyCode::Calculator => common::hid::KeyCode::Calculator,
+		pc_keyboard::KeyCode::Play => common::hid::KeyCode::Play,
+		pc_keyboard::KeyCode::Stop => common::hid::KeyCode::Stop,
+		pc_keyboard::KeyCode::VolumeDown => common::hid::KeyCode::VolumeDown,
+		pc_keyboard::KeyCode::VolumeUp => common::hid::KeyCode::VolumeUp,
+		pc_keyboard::KeyCode::WWWHome => common::hid::KeyCode::WWWHome,
+		pc_keyboard::KeyCode::PowerOnTestOk => common::hid::KeyCode::PowerOnTestOk,
+		_ => common::hid::KeyCode::X,
+	}
 }
 
 /// Control the keyboard LEDs.
@@ -1292,7 +1520,8 @@ extern "C" fn block_dev_eject(dev_id: u8) -> common::Result<()> {
 
 /// Sleep the CPU until the next interrupt.
 extern "C" fn power_idle() {
-	cortex_m::asm::wfe();
+	// cortex_m::asm::wfe();
+	cortex_m::asm::delay(10_000_000);
 }
 
 /// TODO: Get the monotonic run-time of the system from SysTick.

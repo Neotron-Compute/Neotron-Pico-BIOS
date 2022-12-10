@@ -4,6 +4,7 @@
 
 * Updated dependencies
 * Initial support for hardware other than VGA output
+* Basic keyboard support
 
 ## v0.3.0 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.3.0) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.3.0))
 
