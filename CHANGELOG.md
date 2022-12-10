@@ -2,7 +2,8 @@
 
 ## Unreleased Changes ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/develop) | [Changes](https://github.com/neotron-compute/neotron-pico-bios/compare/v0.3.0...develop))
 
-* None
+* Updated dependencies
+* Initial support for hardware other than VGA output
 
 ## v0.3.0 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.3.0) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.3.0))
 
