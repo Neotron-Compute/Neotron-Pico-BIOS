@@ -370,6 +370,9 @@ impl Hardware {
 	/// Give the device 2us (2 clocks @ 1 MHz) before we take away CS.
 	const CS_BUS_HOLD_CPU_CLOCKS: u32 = 2000 / Self::NS_PER_CLOCK_CYCLE;
 
+	/// Give the device 10us when we do a retry.
+	const SPI_RETRY_CPU_CLOCKS: u32 = 10_000 / Self::NS_PER_CLOCK_CYCLE;
+
 	/// Data Direction Register A on the MCP23S17
 	const MCP23S17_DDRA: u8 = 0x00;
 
@@ -534,7 +537,7 @@ impl Hardware {
 			spi_bus: hal::Spi::new(spi).init(
 				resets,
 				clocks.peripheral_clock.freq(),
-				1_000_000.Hz(),
+				2_000_000.Hz(),
 				&embedded_hal::spi::MODE_0,
 			),
 			delay,
@@ -566,7 +569,7 @@ impl Hardware {
 		self.pins.nspi_cs_io.set_high().unwrap();
 	}
 
-	/// Write to a registers on the MCP23S17 I/O chip.
+	/// Write to a register on the MCP23S17 I/O chip.
 	///
 	/// * `register` - the address of the register to write to
 	/// * `data` - the value to write
@@ -580,9 +583,9 @@ impl Hardware {
 		});
 	}
 
-	/// Write to a registers on the MCP23S17 I/O chip.
+	/// Read from a register on the MCP23S17 I/O chip.
 	///
-	/// * `register` - the address of the register to write to
+	/// * `register` - the address of the register to read from
 	fn io_chip_read(&mut self, register: u8) -> u8 {
 		// Inter-packet delay
 		cortex_m::asm::delay(Self::CS_IO_DISABLE_CPU_CLOCKS);
@@ -682,16 +685,6 @@ impl Hardware {
 		self.io_chip_write(Self::MCP23S17_GPPUB, 0xFF);
 	}
 
-	fn dump_io_chip(&mut self) {
-		// Inter-packet delay
-		cortex_m::asm::delay(Self::CS_IO_DISABLE_CPU_CLOCKS);
-
-		// Dump registers
-		for reg in 0x00..=0x15 {
-			let data = self.io_chip_read(reg);
-		}
-	}
-
 	/// Read the BMC firmware version string.
 	///
 	/// You get 32 bytes of probably UTF-8 data.
@@ -705,7 +698,7 @@ impl Hardware {
 		defmt::info!("buffer: {=[u8]:x}", buffer);
 		let mut result = &buffer[..];
 		let mut latency = 0;
-		while result.len() > 0 && result[0] == 0xFF {
+		while result.len() > 0 && ((result[0] == 0xFF) || (result[0] == 0x00)) {
 			latency += 1;
 			result = &result[1..];
 		}
@@ -748,7 +741,7 @@ impl Hardware {
 	fn bmc_read_ps2_keyboard_fifo(&mut self, out_buffer: &mut [u8; 8]) -> Result<usize, ()> {
 		let req = neotron_bmc_protocol::Request::new_read(USE_ALT.get(), 0x40, 8);
 		for _retry in 0..4 {
-			let mut buffer = [0xFF; 42];
+			let mut buffer = [0xFF; 32];
 			buffer[0..=3].copy_from_slice(&req.as_bytes());
 			self.with_bus_cs(0, |spi| {
 				spi.transfer(&mut buffer).unwrap();
@@ -793,8 +786,14 @@ impl Hardware {
 						);
 					}
 				}
+			} else {
+				defmt::warn!("Short packet!?");
 			}
+
+			// Wait a bit before we try again
+			cortex_m::asm::delay(Self::SPI_RETRY_CPU_CLOCKS);
 		}
+		// Ran out of retries
 		panic!("KB retry timeout");
 	}
 }
@@ -1521,7 +1520,7 @@ extern "C" fn block_dev_eject(dev_id: u8) -> common::Result<()> {
 /// Sleep the CPU until the next interrupt.
 extern "C" fn power_idle() {
 	// cortex_m::asm::wfe();
-	cortex_m::asm::delay(10_000_000);
+	cortex_m::asm::delay(1_000_000);
 }
 
 /// TODO: Get the monotonic run-time of the system from SysTick.
