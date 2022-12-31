@@ -44,7 +44,10 @@ pub mod vga;
 // -----------------------------------------------------------------------------
 
 // Standard Library Stuff
-use core::{fmt::Write, sync::atomic::AtomicBool};
+use core::{
+	fmt::Write,
+	sync::atomic::{AtomicBool, AtomicU8, Ordering},
+};
 
 // Third Party Stuff
 use cortex_m_rt::entry;
@@ -533,7 +536,7 @@ impl Hardware {
 				i2s_lr_clock: hal_pins.gpio28.into_mode(),
 				pico_led: hal_pins.led.into_mode(),
 			},
-			// Set SPI up for 1 MHz clock, 8 data bits.
+			// Set SPI up for 2 MHz clock, 8 data bits.
 			spi_bus: hal::Spi::new(spi).init(
 				resets,
 				clocks.peripheral_clock.freq(),
@@ -739,15 +742,21 @@ impl Hardware {
 	///
 	/// We ask for 8 bytes of data. We get `1` byte of 'length', then `N` bytes of valid data, and `32 - (N + 1)` bytes of padding.
 	fn bmc_read_ps2_keyboard_fifo(&mut self, out_buffer: &mut [u8; 8]) -> Result<usize, ()> {
+		static COUNTER: AtomicU8 = AtomicU8::new(0);
 		let req = neotron_bmc_protocol::Request::new_read(USE_ALT.get(), 0x40, 8);
 		for _retry in 0..4 {
 			let mut buffer = [0xFF; 32];
 			buffer[0..=3].copy_from_slice(&req.as_bytes());
+			buffer[4] = COUNTER.load(Ordering::Relaxed);
+			COUNTER.store(buffer[4].wrapping_add(1), Ordering::Relaxed);
+			defmt::trace!("out: {=[u8]:02x}", buffer);
 			self.with_bus_cs(0, |spi| {
 				spi.transfer(&mut buffer).unwrap();
 			});
-			defmt::trace!("buffer: {=[u8]:x}", buffer);
-			let mut result = &buffer[..];
+			defmt::trace!("in : {=[u8]:02x}", buffer);
+			// Skip the first four bytes at least (that's our command, and also
+			// the BMC FIFO length which might have crud in it). Then trip any padding.
+			let mut result = &buffer[4..];
 			let mut latency = 0;
 			while !result.is_empty() && (result[0] == 0xFF || result[0] == 0x00) {
 				latency += 1;
@@ -1520,7 +1529,7 @@ extern "C" fn block_dev_eject(dev_id: u8) -> common::Result<()> {
 /// Sleep the CPU until the next interrupt.
 extern "C" fn power_idle() {
 	// cortex_m::asm::wfe();
-	cortex_m::asm::delay(1_000_000);
+	// cortex_m::asm::delay(20_000_000);
 }
 
 /// TODO: Get the monotonic run-time of the system from SysTick.
