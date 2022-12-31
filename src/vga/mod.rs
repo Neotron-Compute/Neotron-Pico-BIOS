@@ -180,7 +180,7 @@ const MAX_NUM_PIXEL_PAIRS_PER_LINE: usize = MAX_NUM_PIXELS_PER_LINE / 2;
 pub const MAX_TEXT_COLS: usize = MAX_NUM_PIXELS_PER_LINE / 8;
 
 /// The highest number of rows in any text mode.
-pub const MAX_TEXT_ROWS: usize = MAX_NUM_LINES as usize / 8;
+pub const MAX_TEXT_ROWS: usize = MAX_NUM_LINES / 8;
 
 /// Current number of visible columns.
 ///
@@ -945,8 +945,8 @@ impl TextConsole {
 		if !buffer.is_null() {
 			self.write_at(glyph, buffer, &mut row, &mut col);
 			// Push back to global state
-			self.current_row.store(row as u16, Ordering::Relaxed);
-			self.current_col.store(col as u16, Ordering::Relaxed);
+			self.current_row.store(row, Ordering::Relaxed);
+			self.current_col.store(col, Ordering::Relaxed);
 		}
 	}
 
@@ -1136,16 +1136,10 @@ impl TextConsole {
 			// Stay on last line
 			*row = (num_rows - 1) as u16;
 
-			unsafe {
-				core::ptr::copy(
-					buffer.add(num_cols as usize),
-					buffer,
-					num_cols * (num_rows - 1),
-				)
-			};
+			unsafe { core::ptr::copy(buffer.add(num_cols), buffer, num_cols * (num_rows - 1)) };
 
 			for blank_col in 0..num_cols {
-				let offset = (blank_col as usize) + (num_cols * (*row as usize));
+				let offset = blank_col + (num_cols * (*row as usize));
 				unsafe {
 					buffer
 						.add(offset)
@@ -1173,8 +1167,8 @@ impl core::fmt::Write for &TextConsole {
 			}
 
 			// Push back to global state
-			self.current_row.store(row as u16, Ordering::Relaxed);
-			self.current_col.store(col as u16, Ordering::Relaxed);
+			self.current_row.store(row, Ordering::Relaxed);
+			self.current_col.store(col, Ordering::Relaxed);
 		}
 
 		Ok(())
@@ -1412,11 +1406,11 @@ impl RGBColour {
 	}
 }
 
-impl Into<crate::common::video::RGBColour> for RGBColour {
-	fn into(self) -> crate::common::video::RGBColour {
-		let red = self.red8();
-		let green = self.green8();
-		let blue = self.blue8();
+impl From<RGBColour> for crate::common::video::RGBColour {
+	fn from(val: RGBColour) -> crate::common::video::RGBColour {
+		let red = val.red8();
+		let green = val.green8();
+		let blue = val.blue8();
 		crate::common::video::RGBColour::from_rgb(red, green, blue)
 	}
 }
