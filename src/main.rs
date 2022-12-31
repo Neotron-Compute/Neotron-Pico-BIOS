@@ -274,7 +274,7 @@ fn main() -> ! {
 	// ×126 (=1512 MHz), ÷6 (=252 MHz), ÷2 (=126 MHz)
 	let pll_sys = hal::pll::setup_pll_blocking(
 		pp.PLL_SYS,
-		xosc.operating_frequency().into(),
+		xosc.operating_frequency(),
 		hal::pll::PLLConfig {
 			vco_freq: 1512.MHz(),
 			refdiv: 1,
@@ -289,7 +289,7 @@ fn main() -> ! {
 	// Step 5. Set up a 48 MHz PLL for the USB system.
 	let pll_usb = hal::pll::setup_pll_blocking(
 		pp.PLL_USB,
-		xosc.operating_frequency().into(),
+		xosc.operating_frequency(),
 		hal::pll::common_configs::PLL_USB_48MHZ,
 		&mut clocks,
 		&mut pp.RESETS,
@@ -617,7 +617,7 @@ impl Hardware {
 	/// These are connected to the bit 4 of GPIOA on the MCP23S17.
 	fn set_hdd_led(&mut self, enabled: bool) {
 		// LEDs are active-low.
-		self.debug_leds = (self.debug_leds & 0x17) | if enabled { 0 } else { 1 };
+		self.debug_leds = (self.debug_leds & 0x17) | u8::from(enabled);
 		self.io_chip_write(0x12, self.debug_leds << 3 | self.last_cs);
 	}
 
@@ -698,7 +698,7 @@ impl Hardware {
 		defmt::info!("buffer: {=[u8]:x}", buffer);
 		let mut result = &buffer[..];
 		let mut latency = 0;
-		while result.len() > 0 && ((result[0] == 0xFF) || (result[0] == 0x00)) {
+		while !result.is_empty() && ((result[0] == 0xFF) || (result[0] == 0x00)) {
 			latency += 1;
 			result = &result[1..];
 		}
@@ -749,7 +749,7 @@ impl Hardware {
 			defmt::trace!("buffer: {=[u8]:x}", buffer);
 			let mut result = &buffer[..];
 			let mut latency = 0;
-			while result.len() > 0 && result[0] == 0xFF {
+			while !result.is_empty() && (result[0] == 0xFF || result[0] == 0x00) {
 				latency += 1;
 				result = &result[1..];
 			}
