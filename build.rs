@@ -29,21 +29,20 @@ fn main() {
 	// `memory.x` is changed.
 	println!("cargo:rerun-if-changed=memory.x");
 
-	// Get git version
-	if let Ok(cmd_output) = std::process::Command::new("git")
-		.arg("describe")
-		.arg("--all")
-		.arg("--dirty")
-		.arg("--long")
+	// Generate a file containing the firmware version
+	let version_output = std::process::Command::new("git")
+		.current_dir(env::var_os("CARGO_MANIFEST_DIR").unwrap())
+		.args(["describe", "--long", "--dirty"])
 		.output()
-	{
-		let git_version = std::str::from_utf8(&cmd_output.stdout).unwrap();
-		println!(
-			"cargo:rustc-env=BIOS_VERSION={} (git:{})",
-			env!("CARGO_PKG_VERSION"),
-			git_version.trim()
-		);
-	} else {
-		println!("cargo:rustc-env=BIOS_VERSION={}", env!("CARGO_PKG_VERSION"));
-	}
+		.expect("running git-describe");
+
+	// Remove the trailing newline
+	let mut output = version_output.stdout;
+	output.pop();
+
+	// Add a null
+	output.push(0);
+
+	// Write the file
+	std::fs::write(out.join("version.txt"), output).expect("writing version file");
 }
