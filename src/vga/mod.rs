@@ -125,7 +125,7 @@ struct TimingBuffer {
 
 /// Represents a 12-bit colour value.
 ///
-/// Each channel has four-bits, and they are packed in `GBR` format. This is
+/// Each channel has four-bits, and they are packed in `BGR` format. This is
 /// so the PIO can shift them out right-first, and we have RED0 assigned to
 /// the lowest GPIO pin.
 #[repr(transparent)]
@@ -180,7 +180,7 @@ const MAX_NUM_PIXEL_PAIRS_PER_LINE: usize = MAX_NUM_PIXELS_PER_LINE / 2;
 pub const MAX_TEXT_COLS: usize = MAX_NUM_PIXELS_PER_LINE / 8;
 
 /// The highest number of rows in any text mode.
-pub const MAX_TEXT_ROWS: usize = MAX_NUM_LINES as usize / 8;
+pub const MAX_TEXT_ROWS: usize = MAX_NUM_LINES / 8;
 
 /// Current number of visible columns.
 ///
@@ -196,7 +196,7 @@ pub static NUM_TEXT_ROWS: AtomicUsize = AtomicUsize::new(25);
 static CORE1_START_FLAG: AtomicBool = AtomicBool::new(false);
 
 /// Stores our timing data which we DMA into the timing PIO State Machine
-static mut TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x480();
+static mut TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x400();
 
 /// Stores which mode we are in
 static mut VIDEO_MODE: crate::common::video::Mode = crate::common::video::Mode::new(
@@ -269,20 +269,22 @@ static CORE1_ENTRY_FUNCTION: [u16; 2] = [
 
 /// A set of useful constants representing common RGB colours.
 pub mod colours {
-	/// The colour white
-	pub const WHITE: super::RGBColour = super::RGBColour(0xFFF);
-
-	/// The colour black
-	pub const BLACK: super::RGBColour = super::RGBColour(0x000);
-
-	/// The colour blue
-	pub const BLUE: super::RGBColour = super::RGBColour(0xF00);
-
-	/// The colour green
-	pub const GREEN: super::RGBColour = super::RGBColour(0x0F0);
-
-	/// The colour red
-	pub const RED: super::RGBColour = super::RGBColour(0x00F);
+	pub const BLACK: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x00, 0x00);
+	pub const DARK_GRAY: super::RGBColour = super::RGBColour::from_24bit(0x80, 0x80, 0x80);
+	pub const BLUE: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x00, 0x80);
+	pub const LIGHT_BLUE: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x00, 0xF0);
+	pub const GREEN: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x80, 0x00);
+	pub const LIGHT_GREEN: super::RGBColour = super::RGBColour::from_24bit(0x00, 0xF0, 0x00);
+	pub const CYAN: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x80, 0x80);
+	pub const LIGHT_CYAN: super::RGBColour = super::RGBColour::from_24bit(0x00, 0xF0, 0xF0);
+	pub const RED: super::RGBColour = super::RGBColour::from_24bit(0x80, 0x00, 0x00);
+	pub const LIGHT_RED: super::RGBColour = super::RGBColour::from_24bit(0xF0, 0x00, 0x00);
+	pub const MAGENTA: super::RGBColour = super::RGBColour::from_24bit(0x80, 0x00, 0x80);
+	pub const LIGHT_MAGENTA: super::RGBColour = super::RGBColour::from_24bit(0xF0, 0x00, 0xF0);
+	pub const BROWN: super::RGBColour = super::RGBColour::from_24bit(0x80, 0x80, 0x00);
+	pub const YELLOW: super::RGBColour = super::RGBColour::from_24bit(0xF0, 0xF0, 0x00);
+	pub const LIGHT_GRAY: super::RGBColour = super::RGBColour::from_24bit(0xA0, 0xA0, 0xA0);
+	pub const WHITE: super::RGBColour = super::RGBColour::from_24bit(0xF0, 0xF0, 0xF0);
 }
 
 // -----------------------------------------------------------------------------
@@ -484,14 +486,8 @@ pub fn init(
 	unsafe {
 		// Hand off the DMA peripheral to the interrupt
 		DMA_PERIPH = Some(dma);
-
-		// Enable the interrupts (DMA_PERIPH has to be set first)
-		cortex_m::interrupt::enable();
-		crate::pac::NVIC::unpend(crate::pac::Interrupt::DMA_IRQ_0);
-		crate::pac::NVIC::unmask(crate::pac::Interrupt::DMA_IRQ_0);
+		// We don't enable the interrupts here - we enable them on core 1
 	}
-
-	debug!("IRQs enabled");
 
 	debug!("DMA set-up complete");
 
@@ -700,6 +696,14 @@ pub fn get_num_scan_lines() -> u16 {
 unsafe extern "C" fn core1_main() -> u32 {
 	CORE1_START_FLAG.store(true, Ordering::Relaxed);
 
+	// Enable the interrupts (DMA_PERIPH has to be set first by Core 0)
+	cortex_m::interrupt::enable();
+	// We are on Core 1, so these interrupts will run on Core 1
+	crate::pac::NVIC::unpend(crate::pac::Interrupt::DMA_IRQ_0);
+	crate::pac::NVIC::unmask(crate::pac::Interrupt::DMA_IRQ_0);
+
+	debug!("IRQs enabled");
+
 	let mut video = RenderEngine::new();
 
 	loop {
@@ -802,9 +806,9 @@ impl RenderEngine {
 			frame_count: 0,
 			lookup: [
 				RGBPair::from_pixels(colours::BLUE, colours::BLUE),
-				RGBPair::from_pixels(colours::BLUE, colours::WHITE),
-				RGBPair::from_pixels(colours::WHITE, colours::BLUE),
-				RGBPair::from_pixels(colours::WHITE, colours::WHITE),
+				RGBPair::from_pixels(colours::BLUE, colours::YELLOW),
+				RGBPair::from_pixels(colours::YELLOW, colours::BLUE),
+				RGBPair::from_pixels(colours::YELLOW, colours::YELLOW),
 			],
 		}
 	}
@@ -941,8 +945,8 @@ impl TextConsole {
 		if !buffer.is_null() {
 			self.write_at(glyph, buffer, &mut row, &mut col);
 			// Push back to global state
-			self.current_row.store(row as u16, Ordering::Relaxed);
-			self.current_col.store(col as u16, Ordering::Relaxed);
+			self.current_row.store(row, Ordering::Relaxed);
+			self.current_col.store(col, Ordering::Relaxed);
 		}
 	}
 
@@ -1132,16 +1136,10 @@ impl TextConsole {
 			// Stay on last line
 			*row = (num_rows - 1) as u16;
 
-			unsafe {
-				core::ptr::copy(
-					buffer.add(num_cols as usize),
-					buffer,
-					num_cols * (num_rows - 1),
-				)
-			};
+			unsafe { core::ptr::copy(buffer.add(num_cols), buffer, num_cols * (num_rows - 1)) };
 
 			for blank_col in 0..num_cols {
-				let offset = (blank_col as usize) + (num_cols * (*row as usize));
+				let offset = blank_col + (num_cols * (*row as usize));
 				unsafe {
 					buffer
 						.add(offset)
@@ -1169,8 +1167,8 @@ impl core::fmt::Write for &TextConsole {
 			}
 
 			// Push back to global state
-			self.current_row.store(row as u16, Ordering::Relaxed);
-			self.current_col.store(col as u16, Ordering::Relaxed);
+			self.current_row.store(row, Ordering::Relaxed);
+			self.current_col.store(col, Ordering::Relaxed);
 		}
 
 		Ok(())
@@ -1378,11 +1376,42 @@ impl TimingBuffer {
 }
 
 impl RGBColour {
+	/// Make an [`RGBColour`] from a 24-bit RGB triplet.
+	///
+	/// Only the top 4 bits of each colour channel are retained, as RGB colour
+	/// is a 12-bit value.
 	pub const fn from_24bit(red: u8, green: u8, blue: u8) -> RGBColour {
-		let red: u16 = (red as u16) & 0x00F;
-		let green: u16 = (green as u16) & 0x00F;
-		let blue: u16 = (blue as u16) & 0x00F;
-		RGBColour((blue << 12) | (green << 4) | red)
+		let red4: u16 = ((red >> 4) & 0x00F) as u16;
+		let green4: u16 = ((green >> 4) & 0x00F) as u16;
+		let blue4: u16 = ((blue >> 4) & 0x00F) as u16;
+		RGBColour((blue4 << 8) | (green4 << 4) | red4)
+	}
+
+	/// Get the red component as an 8-bit value
+	pub const fn red8(self) -> u8 {
+		let red4 = self.0 & 0x0F;
+		(red4 << 4) as u8
+	}
+
+	/// Get the green component as an 8-bit value
+	pub const fn green8(self) -> u8 {
+		let green4 = (self.0 >> 4) & 0x0F;
+		(green4 << 4) as u8
+	}
+
+	/// Get the blue component as an 8-bit value
+	pub const fn blue8(self) -> u8 {
+		let blue4 = (self.0 >> 8) & 0x0F;
+		(blue4 << 4) as u8
+	}
+}
+
+impl From<RGBColour> for crate::common::video::RGBColour {
+	fn from(val: RGBColour) -> crate::common::video::RGBColour {
+		let red = val.red8();
+		let green = val.green8();
+		let blue = val.blue8();
+		crate::common::video::RGBColour::from_rgb(red, green, blue)
 	}
 }
 
