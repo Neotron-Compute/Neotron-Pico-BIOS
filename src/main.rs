@@ -168,11 +168,14 @@ static HARDWARE: Mutex<core::cell::RefCell<Option<Hardware>>> =
 
 /// This is our Operating System. It must be compiled separately.
 ///
-/// The RP2040 requires an OS linked at `0x1002_0000`, which is the OS binary
-/// `flash1002`. Use `objdump` as per the README file to make a `flash1002.bin`.
+/// The RP2040 requires an OS linked at `0x1002_0000` and compiled for the
+/// `thumbv6m-none-eabi` target. You should therefore use the binary
+/// `thumbv6m-none-eabi-flash1002-libneotron_os.bin` from
+/// <https://github.com/Neotron-Compute/Neotron-OS/releases>
 #[link_section = ".flash_os"]
 #[used]
-pub static OS_IMAGE: [u8; include_bytes!("flash1002.bin").len()] = *include_bytes!("flash1002.bin");
+pub static OS_IMAGE: [u8; include_bytes!("thumbv6m-none-eabi-flash1002-libneotron_os.bin").len()] =
+	*include_bytes!("thumbv6m-none-eabi-flash1002-libneotron_os.bin");
 
 /// The table of API calls we provide the OS
 static API_CALLS: common::Api = common::Api {
