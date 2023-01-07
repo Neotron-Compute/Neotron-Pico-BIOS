@@ -1081,9 +1081,31 @@ pub extern "C" fn memory_get_region(region: u8) -> common::Option<common::Memory
 	}
 }
 
-/// Get the next available HID event, if any.
+/// This function doesn't block. It will return `Ok(None)` if there is no event
+/// ready.
 ///
-/// This function doesn't block. It will return `Ok(None)` if there is no event ready.
+/// The Pico BIOS gets PS/2 scan-codes (in PS/2 Scan Code Set 2 format) from the
+/// BMC. The BMC receives them from the PS/2 keyboard (as 11-bit words with
+/// stop, stop and parity bits) and buffers them (as raw 8-bit values with the
+/// start/stop/parity bits removed). These scan-codes are converted into
+/// human-readable labels here in this function. The labels are applied as if
+/// you had a US-English keyboard. If you do not have a US-English keyboard, the
+/// labels, will be incorrect, but that doesn't matter. It is the OS's job to
+/// convert those labels (along with the key up or key down event) into Unicode
+/// characters, which is where the country-specific keyboard mapping comes in.
+///
+/// This is a similar model used to that in the IBM PC. Your PC's BIOS cares not
+/// for which country you are; that was MS-DOS's job.
+///
+/// The reason we don't just pass keyboard scan-codes in Scan Code Set 2 (the
+/// power-up default for almost every IBM PS/2 compatible keyboard) is that in
+/// the future your BIOS key get the keyboard input from another source. If it
+/// came from a USB Keyboard, you would have USB HID Scan Codes. If it came from
+/// an SDL2 window under Linux/Windows/macOS, you would have SDL2 specific key
+/// codes. So the BIOS must convert this wide and varied set of HID inputs into
+/// a single KeyCode enum. Plus, Scan Code Set 2 is a pain, because most of the
+/// 'extended' keys they added on the IBM PC/AT actually generate two bytes, not
+/// one. It's much nicer when your Scan Codes always have one byte per key.
 pub extern "C" fn hid_get_event() -> common::Result<common::Option<common::hid::HidEvent>> {
 	let mut buffer = [0u8; 8];
 
