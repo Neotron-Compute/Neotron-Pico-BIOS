@@ -5,19 +5,17 @@ resolver = "2"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 name = "neotron-pico-bios"
-version = "0.3.0"
+version = "0.4.0"
 
 [dependencies]
 # Useful Cortex-M specific functions (e.g. SysTick)
 cortex-m = "0.7"
 # The Raspberry Pi Pico HAL
-rp-pico = "0.3"
+rp-pico = "0.5"
 # Cortex-M run-time (or start-up) code
 cortex-m-rt = "0.7"
 # The BIOS to OS API
-neotron-common-bios = "0.1.0"
-# For time keeping/handling
-embedded-time = "0.12"
+neotron-common-bios = "0.7.0"
 # For the RP2040 bootloader
 rp2040-boot2 = "0.2"
 # For hardware abstraction traits
@@ -25,29 +23,23 @@ embedded-hal ="0.2"
 # Gives us formatted PC-side logging
 defmt = "0.3"
 # Sends defmt logs to the SWD debugger
-defmt-rtt = "0.3"
+defmt-rtt = "0.4"
 # Send panics to the debugger
 panic-probe = "0.2"
 # RP2040 PIO assembler
 pio = "0.2"
 # Macros for RP2040 PIO assembler
 pio-proc = "0.2"
-
-[features]
-default = [
-    "defmt-default",
-]
-defmt-default = []
-# Enables trace logs
-defmt-trace = []
-# Enables debug logs
-defmt-debug = []
-# Enables info logs
-defmt-info = []
-# Enables warn logs
-defmt-warn = []
-# Enables error logs
-defmt-error = []
+# Hardware locks for sharing data with interrupts
+critical-section = "1.0"
+# Protocol for talking to a Neotron BMC. The tag is for the repo as a whole, of which the protocol crate is a small part.
+neotron-bmc-protocol = { version = "0.1.0", git = "https://github.com/neotron-compute/neotron-bmc", tag="v0.4.0" }
+# Time and frequency related functions
+fugit = "0.3"
+# PS/2 scancode decoding
+pc-keyboard = "0.6"
+# Useful queues and other structures
+heapless = "0.7"
 
 [[bin]]
 name = "neotron-pico-bios"

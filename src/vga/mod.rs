@@ -33,13 +33,14 @@
 // Sub-modules
 // -----------------------------------------------------------------------------
 
-pub(crate) mod font;
+mod font16;
+mod font8;
 
 // -----------------------------------------------------------------------------
 // Imports
 // -----------------------------------------------------------------------------
 
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, AtomicUsize, Ordering};
 use defmt::{debug, trace};
 use rp_pico::hal::pio::PIOExt;
 
@@ -58,6 +59,12 @@ struct RenderEngine {
 	///
 	/// You can adjust this table to convert text to different colours.
 	lookup: [RGBPair; 4],
+}
+
+/// A font
+pub struct Font<'a> {
+	height: usize,
+	data: &'a [u8],
 }
 
 /// Holds some data necessary to present a text console.
@@ -118,7 +125,7 @@ struct TimingBuffer {
 
 /// Represents a 12-bit colour value.
 ///
-/// Each channel has four-bits, and they are packed in `GBR` format. This is
+/// Each channel has four-bits, and they are packed in `BGR` format. This is
 /// so the PIO can shift them out right-first, and we have RED0 assigned to
 /// the lowest GPIO pin.
 #[repr(transparent)]
@@ -160,28 +167,44 @@ pub struct GlyphAttr(u16);
 /// make the pixel PIO take twice as long per pixel.
 const MAX_NUM_PIXELS_PER_LINE: usize = 640;
 
+/// Maximum number of lines on screen.
+const MAX_NUM_LINES: usize = 480;
+
 /// How many pixel pairs we send out.
 ///
 /// Each pixel is two 12-bit values packed into one 32-bit word(an `RGBPair`).
 /// This is to make more efficient use of DMA and FIFO resources.
 const MAX_NUM_PIXEL_PAIRS_PER_LINE: usize = MAX_NUM_PIXELS_PER_LINE / 2;
 
-/// Maximum number of lines on screen.
-const MAX_NUM_LINES: usize = 480;
-
 /// The highest number of columns in any text mode.
-pub const NUM_TEXT_COLS: usize = MAX_NUM_PIXELS_PER_LINE / font::WIDTH_PX;
+pub const MAX_TEXT_COLS: usize = MAX_NUM_PIXELS_PER_LINE / 8;
 
 /// The highest number of rows in any text mode.
-pub const NUM_TEXT_ROWS: usize = MAX_NUM_LINES as usize / font::HEIGHT_PX;
+pub const MAX_TEXT_ROWS: usize = MAX_NUM_LINES / 8;
+
+/// Current number of visible columns.
+///
+/// Must be `<= MAX_TEXT_COLS`
+pub static NUM_TEXT_COLS: AtomicUsize = AtomicUsize::new(80);
+
+/// Current number of visible rows.
+///
+/// Must be `<= MAX_TEXT_ROWS`
+pub static NUM_TEXT_ROWS: AtomicUsize = AtomicUsize::new(25);
 
 /// Used to signal when Core 1 has started
 static CORE1_START_FLAG: AtomicBool = AtomicBool::new(false);
 
 /// Stores our timing data which we DMA into the timing PIO State Machine
-static TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x480();
+static mut TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x400();
 
-/// Tracks which scan-line we are currently on (for timing purposes => it goes 0..=449)
+/// Stores which mode we are in
+static mut VIDEO_MODE: crate::common::video::Mode = crate::common::video::Mode::new(
+	crate::common::video::Timing::T640x480,
+	crate::common::video::Format::Text8x16,
+);
+
+/// Tracks which scan-line we are currently on (for timing purposes => it goes 0..`TIMING_BUFFER.back_porch_ends_at`)
 static CURRENT_TIMING_LINE: AtomicU16 = AtomicU16::new(0);
 
 /// Tracks which scan-line we are currently on (for pixel purposes => it goes 0..NUM_LINES)
@@ -222,12 +245,11 @@ static mut PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer {
 /// This is our text buffer.
 ///
 /// This is arranged as `NUM_TEXT_ROWS` rows of `NUM_TEXT_COLS` columns. Each
-/// item is an index into `font::FONT_DATA` (or a Code-Page 850 character)
-/// plus an 8-bit attribute.
+/// item is an index into `font16::FONT_DATA` plus an 8-bit attribute.
 ///
 /// Written to by Core 0, and read from by `RenderEngine` running on Core 1.
-pub static mut GLYPH_ATTR_ARRAY: [GlyphAttr; NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize] =
-	[GlyphAttr(0); NUM_TEXT_COLS as usize * NUM_TEXT_ROWS as usize];
+pub static mut GLYPH_ATTR_ARRAY: [GlyphAttr; MAX_TEXT_COLS * MAX_TEXT_ROWS] =
+	[GlyphAttr(0); MAX_TEXT_COLS * MAX_TEXT_ROWS];
 
 /// Core 1 entry function.
 ///
@@ -247,20 +269,22 @@ static CORE1_ENTRY_FUNCTION: [u16; 2] = [
 
 /// A set of useful constants representing common RGB colours.
 pub mod colours {
-	/// The colour white
-	pub const WHITE: super::RGBColour = super::RGBColour(0xFFF);
-
-	/// The colour black
-	pub const BLACK: super::RGBColour = super::RGBColour(0x000);
-
-	/// The colour blue
-	pub const BLUE: super::RGBColour = super::RGBColour(0xF00);
-
-	/// The colour green
-	pub const GREEN: super::RGBColour = super::RGBColour(0x0F0);
-
-	/// The colour red
-	pub const RED: super::RGBColour = super::RGBColour(0x00F);
+	pub const BLACK: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x00, 0x00);
+	pub const DARK_GRAY: super::RGBColour = super::RGBColour::from_24bit(0x80, 0x80, 0x80);
+	pub const BLUE: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x00, 0x80);
+	pub const LIGHT_BLUE: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x00, 0xF0);
+	pub const GREEN: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x80, 0x00);
+	pub const LIGHT_GREEN: super::RGBColour = super::RGBColour::from_24bit(0x00, 0xF0, 0x00);
+	pub const CYAN: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x80, 0x80);
+	pub const LIGHT_CYAN: super::RGBColour = super::RGBColour::from_24bit(0x00, 0xF0, 0xF0);
+	pub const RED: super::RGBColour = super::RGBColour::from_24bit(0x80, 0x00, 0x00);
+	pub const LIGHT_RED: super::RGBColour = super::RGBColour::from_24bit(0xF0, 0x00, 0x00);
+	pub const MAGENTA: super::RGBColour = super::RGBColour::from_24bit(0x80, 0x00, 0x80);
+	pub const LIGHT_MAGENTA: super::RGBColour = super::RGBColour::from_24bit(0xF0, 0x00, 0xF0);
+	pub const BROWN: super::RGBColour = super::RGBColour::from_24bit(0x80, 0x80, 0x00);
+	pub const YELLOW: super::RGBColour = super::RGBColour::from_24bit(0xF0, 0xF0, 0x00);
+	pub const LIGHT_GRAY: super::RGBColour = super::RGBColour::from_24bit(0xA0, 0xA0, 0xA0);
+	pub const WHITE: super::RGBColour = super::RGBColour::from_24bit(0xF0, 0xF0, 0xF0);
 }
 
 // -----------------------------------------------------------------------------
@@ -462,14 +486,8 @@ pub fn init(
 	unsafe {
 		// Hand off the DMA peripheral to the interrupt
 		DMA_PERIPH = Some(dma);
-
-		// Enable the interrupts (DMA_PERIPH has to be set first)
-		cortex_m::interrupt::enable();
-		crate::pac::NVIC::unpend(crate::pac::Interrupt::DMA_IRQ_0);
-		crate::pac::NVIC::unmask(crate::pac::Interrupt::DMA_IRQ_0);
+		// We don't enable the interrupts here - we enable them on core 1
 	}
-
-	debug!("IRQs enabled");
 
 	debug!("DMA set-up complete");
 
@@ -606,6 +624,67 @@ fn multicore_launch_core1_with_stack(
 	debug!("Core 1 started!!");
 }
 
+/// Gets the current video mode
+pub fn get_video_mode() -> crate::common::video::Mode {
+	unsafe { VIDEO_MODE }
+}
+
+/// Sets the current video mode
+pub fn set_video_mode(mode: crate::common::video::Mode) -> bool {
+	cortex_m::interrupt::disable();
+	let mode_ok = match (
+		mode.timing(),
+		mode.format(),
+		mode.is_horiz_2x(),
+		mode.is_vert_2x(),
+	) {
+		(
+			crate::common::video::Timing::T640x480,
+			crate::common::video::Format::Text8x16 | crate::common::video::Format::Text8x8,
+			false,
+			false,
+		) => {
+			unsafe {
+				VIDEO_MODE = mode;
+				TIMING_BUFFER = TimingBuffer::make_640x480();
+			}
+			true
+		}
+		(
+			crate::common::video::Timing::T640x400,
+			crate::common::video::Format::Text8x16 | crate::common::video::Format::Text8x8,
+			false,
+			false,
+		) => {
+			unsafe {
+				VIDEO_MODE = mode;
+				TIMING_BUFFER = TimingBuffer::make_640x400();
+			}
+			true
+		}
+		_ => false,
+	};
+	if mode_ok {
+		NUM_TEXT_COLS.store(mode.text_width().unwrap_or(0) as usize, Ordering::SeqCst);
+		NUM_TEXT_ROWS.store(mode.text_height().unwrap_or(0) as usize, Ordering::SeqCst);
+	}
+	unsafe {
+		cortex_m::interrupt::enable();
+	}
+	mode_ok
+}
+
+/// Get the current scan line.
+pub fn get_scan_line() -> u16 {
+	CURRENT_DISPLAY_LINE.load(Ordering::Relaxed)
+}
+
+/// Get how many visible lines there currently are
+pub fn get_num_scan_lines() -> u16 {
+	let mode = get_video_mode();
+	mode.vertical_lines()
+}
+
 /// This function runs the video processing loop on Core 1.
 ///
 /// It keeps the odd/even scan-line buffers updated, as per the contents of
@@ -616,6 +695,14 @@ fn multicore_launch_core1_with_stack(
 /// Only run this function on Core 1.
 unsafe extern "C" fn core1_main() -> u32 {
 	CORE1_START_FLAG.store(true, Ordering::Relaxed);
+
+	// Enable the interrupts (DMA_PERIPH has to be set first by Core 0)
+	cortex_m::interrupt::enable();
+	// We are on Core 1, so these interrupts will run on Core 1
+	crate::pac::NVIC::unpend(crate::pac::Interrupt::DMA_IRQ_0);
+	crate::pac::NVIC::unmask(crate::pac::Interrupt::DMA_IRQ_0);
+
+	debug!("IRQs enabled");
 
 	let mut video = RenderEngine::new();
 
@@ -719,9 +806,9 @@ impl RenderEngine {
 			frame_count: 0,
 			lookup: [
 				RGBPair::from_pixels(colours::BLUE, colours::BLUE),
-				RGBPair::from_pixels(colours::BLUE, colours::WHITE),
-				RGBPair::from_pixels(colours::WHITE, colours::BLUE),
-				RGBPair::from_pixels(colours::WHITE, colours::WHITE),
+				RGBPair::from_pixels(colours::BLUE, colours::YELLOW),
+				RGBPair::from_pixels(colours::YELLOW, colours::BLUE),
+				RGBPair::from_pixels(colours::YELLOW, colours::YELLOW),
 			],
 		}
 	}
@@ -744,11 +831,22 @@ impl RenderEngine {
 				}
 			};
 
-			// Convert our position in scan-lines to a text row, and a line within each glyph on that row
-			let text_row = (current_line_num / font::HEIGHT_PX as u16) as usize;
-			let font_row = (current_line_num % font::HEIGHT_PX as u16) as usize;
+			let font = match unsafe { VIDEO_MODE.format() } {
+				crate::common::video::Format::Text8x16 => &font16::FONT,
+				crate::common::video::Format::Text8x8 => &font8::FONT,
+				_ => {
+					return;
+				}
+			};
 
-			if text_row < NUM_TEXT_ROWS {
+			let num_rows = NUM_TEXT_ROWS.load(Ordering::Relaxed);
+			let num_cols = NUM_TEXT_COLS.load(Ordering::Relaxed);
+
+			// Convert our position in scan-lines to a text row, and a line within each glyph on that row
+			let text_row = current_line_num as usize / font.height;
+			let font_row = current_line_num as usize % font.height;
+
+			if text_row < num_rows {
 				// Note (unsafe): We could stash the char array inside `self`
 				// but at some point we are going to need one CPU rendering
 				// the text, and the other CPU running code and writing to
@@ -757,14 +855,14 @@ impl RenderEngine {
 				// state. At least our platform is fixed, so we can simply
 				// test if it works, for some given version of the Rust compiler.
 				let row_slice = unsafe {
-					&GLYPH_ATTR_ARRAY[(text_row * NUM_TEXT_COLS)..((text_row + 1) * NUM_TEXT_COLS)]
+					&GLYPH_ATTR_ARRAY[(text_row * num_cols)..((text_row + 1) * num_cols)]
 				};
 				// Every font look-up we are about to do for this row will
 				// involve offsetting by the row within each glyph. As this
 				// is the same for every glyph on this row, we calculate a
 				// new pointer once, in advance, and save ourselves an
 				// addition each time around the loop.
-				let font_ptr = unsafe { font::DATA.as_ptr().add(font_row) };
+				let font_ptr = unsafe { font.data.as_ptr().add(font_row) };
 
 				// Get a pointer into our scan-line buffer
 				let scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
@@ -772,7 +870,7 @@ impl RenderEngine {
 
 				// Convert from characters to coloured pixels, using the font as a look-up table.
 				for glyphattr in row_slice.iter() {
-					let index = (glyphattr.glyph().0 as isize) * 16;
+					let index = (glyphattr.glyph().0 as isize) * font.height as isize;
 					// Note (unsafe): We use pointer arithmetic here because we
 					// can't afford a bounds-check on an array. This is safe
 					// because the font is `256 * width` bytes long and we can't
@@ -828,7 +926,7 @@ impl TextConsole {
 	/// Will reset the cursor. The screen is not cleared.
 	pub fn set_text_buffer(
 		&self,
-		text_buffer: &'static mut [GlyphAttr; NUM_TEXT_ROWS * NUM_TEXT_COLS],
+		text_buffer: &'static mut [GlyphAttr; MAX_TEXT_ROWS * MAX_TEXT_COLS],
 	) {
 		self.text_buffer
 			.store(text_buffer.as_mut_ptr(), Ordering::Relaxed)
@@ -847,8 +945,8 @@ impl TextConsole {
 		if !buffer.is_null() {
 			self.write_at(glyph, buffer, &mut row, &mut col);
 			// Push back to global state
-			self.current_row.store(row as u16, Ordering::Relaxed);
-			self.current_col.store(col as u16, Ordering::Relaxed);
+			self.current_row.store(row, Ordering::Relaxed);
+			self.current_col.store(col, Ordering::Relaxed);
 		}
 	}
 
@@ -856,10 +954,10 @@ impl TextConsole {
 	///
 	/// If a value is out of bounds, the cursor is not moved in that axis.
 	pub fn move_to(&self, row: u16, col: u16) {
-		if row < (NUM_TEXT_ROWS as u16) {
+		if (row as usize) < NUM_TEXT_ROWS.load(Ordering::Relaxed) {
 			self.current_row.store(row, Ordering::Relaxed);
 		}
-		if col < (NUM_TEXT_COLS as u16) {
+		if (col as usize) < NUM_TEXT_COLS.load(Ordering::Relaxed) {
 			self.current_col.store(col, Ordering::Relaxed);
 		}
 	}
@@ -1011,13 +1109,16 @@ impl TextConsole {
 	///
 	/// The character is relative to the current font.
 	fn write_at(&self, glyph: Glyph, buffer: *mut GlyphAttr, row: &mut u16, col: &mut u16) {
+		let num_rows = NUM_TEXT_ROWS.load(Ordering::Relaxed);
+		let num_cols = NUM_TEXT_COLS.load(Ordering::Relaxed);
+
 		if glyph.0 == b'\r' {
 			*col = 0;
 		} else if glyph.0 == b'\n' {
 			*col = 0;
 			*row += 1;
 		} else {
-			let offset = (*col as usize) + (NUM_TEXT_COLS * (*row as usize));
+			let offset = (*col as usize) + (num_cols * (*row as usize));
 			// Note (safety): This is safe as we bound `col` and `row`
 			unsafe {
 				buffer
@@ -1026,24 +1127,19 @@ impl TextConsole {
 			};
 			*col += 1;
 		}
-		if *col == (NUM_TEXT_COLS as u16) {
+		if *col == (num_cols as u16) {
 			*col = 0;
 			*row += 1;
 		}
-		if *row == (NUM_TEXT_ROWS as u16) {
+
+		if *row == (num_rows as u16) {
 			// Stay on last line
-			*row = (NUM_TEXT_ROWS - 1) as u16;
+			*row = (num_rows - 1) as u16;
 
-			unsafe {
-				core::ptr::copy(
-					buffer.add(NUM_TEXT_COLS as usize),
-					buffer,
-					NUM_TEXT_COLS * (NUM_TEXT_ROWS - 1),
-				)
-			};
+			unsafe { core::ptr::copy(buffer.add(num_cols), buffer, num_cols * (num_rows - 1)) };
 
-			for blank_col in 0..NUM_TEXT_COLS {
-				let offset = (blank_col as usize) + (NUM_TEXT_COLS * (*row as usize));
+			for blank_col in 0..num_cols {
+				let offset = blank_col + (num_cols * (*row as usize));
 				unsafe {
 					buffer
 						.add(offset)
@@ -1071,8 +1167,8 @@ impl core::fmt::Write for &TextConsole {
 			}
 
 			// Push back to global state
-			self.current_row.store(row as u16, Ordering::Relaxed);
-			self.current_col.store(col as u16, Ordering::Relaxed);
+			self.current_row.store(row, Ordering::Relaxed);
+			self.current_col.store(col, Ordering::Relaxed);
 		}
 
 		Ok(())
@@ -1280,11 +1376,42 @@ impl TimingBuffer {
 }
 
 impl RGBColour {
+	/// Make an [`RGBColour`] from a 24-bit RGB triplet.
+	///
+	/// Only the top 4 bits of each colour channel are retained, as RGB colour
+	/// is a 12-bit value.
 	pub const fn from_24bit(red: u8, green: u8, blue: u8) -> RGBColour {
-		let red: u16 = (red as u16) & 0x00F;
-		let green: u16 = (green as u16) & 0x00F;
-		let blue: u16 = (blue as u16) & 0x00F;
-		RGBColour((blue << 12) | (green << 4) | red)
+		let red4: u16 = ((red >> 4) & 0x00F) as u16;
+		let green4: u16 = ((green >> 4) & 0x00F) as u16;
+		let blue4: u16 = ((blue >> 4) & 0x00F) as u16;
+		RGBColour((blue4 << 8) | (green4 << 4) | red4)
+	}
+
+	/// Get the red component as an 8-bit value
+	pub const fn red8(self) -> u8 {
+		let red4 = self.0 & 0x0F;
+		(red4 << 4) as u8
+	}
+
+	/// Get the green component as an 8-bit value
+	pub const fn green8(self) -> u8 {
+		let green4 = (self.0 >> 4) & 0x0F;
+		(green4 << 4) as u8
+	}
+
+	/// Get the blue component as an 8-bit value
+	pub const fn blue8(self) -> u8 {
+		let blue4 = (self.0 >> 8) & 0x0F;
+		(blue4 << 4) as u8
+	}
+}
+
+impl From<RGBColour> for crate::common::video::RGBColour {
+	fn from(val: RGBColour) -> crate::common::video::RGBColour {
+		let red = val.red8();
+		let green = val.green8();
+		let blue = val.blue8();
+		crate::common::video::RGBColour::from_rgb(red, green, blue)
 	}
 }
 

@@ -60,8 +60,8 @@ user@host ~ $ cargo install probe-rs
 We use the "neotron-os-pico.ld" linker script to link it at `0x1002_0000`.
 
 ```console
-user@host ~/neotron-os $ cargo build --release
-user@host ~/neotron-os $ arm-none-eabi-objcopy -O binary ./target/thumbv6m-none-eabi/release/flash1002 ../neotron-pico-bios/src/flash1002.bin
+user@host ~/neotron-os $ cargo build --bin=flash1002 --release --target=thumbv6m-none-eabi
+user@host ~/neotron-os $ arm-none-eabi-objcopy -O binary ./target/thumbv6m-none-eabi/release/flash1002 ../neotron-pico-bios/src/thumbv6m-none-eabi-flash1002-libneotron_os.bin
 ```
 
 6. Build and load the Neotron BIOS, and view the debug output stream, with `cargo run --release`:
