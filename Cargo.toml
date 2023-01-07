@@ -27,7 +27,7 @@ defmt-rtt = "0.4"
 # Send panics to the debugger
 panic-probe = "0.2"
 # RP2040 PIO assembler
-pio = "0.2"
+pio = "0.2.1"
 # Macros for RP2040 PIO assembler
 pio-proc = "0.2"
 # Hardware locks for sharing data with interrupts
