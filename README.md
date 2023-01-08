@@ -57,7 +57,7 @@ user@host ~ $ cargo install probe-rs
 
 5. Build the Neotron OS
 
-We use the "neotron-os-pico.ld" linker script to link it at `0x1002_0000`.
+We use the "neotron-flash-1002.ld" linker script to link it at `0x1002_0000`.
 
 ```console
 user@host ~/neotron-os $ cargo build --bin=flash1002 --release --target=thumbv6m-none-eabi
