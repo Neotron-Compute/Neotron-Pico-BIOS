@@ -1284,33 +1284,23 @@ impl ScanlineTimingBuffer {
 	/// Returns a 32-bit value you can post to the Timing FIFO.
 	const fn make_timing(period: u32, hsync: bool, vsync: bool, raise_irq: bool) -> u32 {
 		let command = if raise_irq {
-			// This command sets IRQ 0. It is the same as:
-			//
-			// ```
-			// pio::InstructionOperands::IRQ {
-			// 	clear: false,
-			// 	wait: false,
-			// 	index: 0,
-			// 	relative: false,
-			// }.encode()
-			// ```
-			//
-			// Unfortunately encoding this isn't a const-fn, so we cheat:
-			0xc000
+			// This command sets IRQ 0
+			pio::InstructionOperands::IRQ {
+				clear: false,
+				wait: false,
+				index: 0,
+				relative: false,
+			}
+			.encode()
 		} else {
 			// This command is a no-op (it moves Y into Y)
-			//
-			// ```
-			// pio::InstructionOperands::MOV {
-			// 	destination: pio::MovDestination::Y,
-			// 	op: pio::MovOperation::None,
-			// 	source: pio::MovSource::Y,
-			// }.encode()
-			// ```
-			//
-			// Unfortunately encoding this isn't a const-fn, so we cheat:
-			0xa042
-		};
+			pio::InstructionOperands::MOV {
+				destination: pio::MovDestination::Y,
+				op: pio::MovOperation::None,
+				source: pio::MovSource::Y,
+			}
+			.encode()
+		} as u32;
 		let mut value: u32 = 0;
 		if hsync {
 			value |= 1 << 0;
