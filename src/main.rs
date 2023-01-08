@@ -83,6 +83,7 @@ use rp_pico::{
 
 // Other Neotron Crates
 use common::MemoryRegion;
+use neotron_bmc_commands::Command;
 use neotron_bmc_protocol::Receivable;
 use neotron_common_bios as common;
 
@@ -911,6 +912,65 @@ impl Hardware {
 		panic!("Failed to talk to BMC after several retries.");
 	}
 
+	/// Make the BMC produce a sequence of beeps using the Speaker
+	fn play_startup_tune(&mut self) -> Result<(), ()> {
+		// (delay (ms), command, data)
+		let seq: &[(u16, Command, u8)] = &[
+			(0, Command::SpeakerPeriodLow, 137),
+			(0, Command::SpeakerPeriodHigh, 0),
+			(0, Command::SpeakerDutyCycle, 127),
+			(0, Command::SpeakerDuration, 7),
+			(0, Command::SpeakerPeriodLow, 116),
+			(70, Command::SpeakerDuration, 7),
+			(0, Command::SpeakerPeriodLow, 97),
+			(70, Command::SpeakerDuration, 7),
+		];
+
+		'outer: for (delay, reg, val) in seq {
+			if *delay > 0 {
+				self.delay.delay_ms(*delay as u32);
+			}
+			for _attempt in 0..4 {
+				let mut buffer = [0xFF; 32];
+
+				let req =
+					neotron_bmc_protocol::Request::new_short_write(false, (*reg).into(), *val);
+				buffer[0..=3].copy_from_slice(&req.as_bytes());
+				self.with_bus_cs(0, |spi| {
+					spi.transfer(&mut buffer).unwrap();
+				});
+
+				defmt::info!("buffer: {=[u8]:x}", buffer);
+				let mut result = &buffer[..];
+				let mut latency = 0;
+				while !result.is_empty() && ((result[0] == 0xFF) || (result[0] == 0x00)) {
+					latency += 1;
+					result = &result[1..];
+				}
+				defmt::info!("latency: {} res: {=[u8]:x}", latency, result);
+
+				if result.len() >= 2 {
+					let response = neotron_bmc_protocol::Response::from_bytes(&result[0..2]);
+					if let Ok(neotron_bmc_protocol::Response {
+						result: neotron_bmc_protocol::ResponseResult::Ok,
+						..
+					}) = response
+					{
+						// Response was OK
+						continue 'outer;
+					}
+				} else {
+					return Err(());
+				}
+				// Wait a bit before we try again
+				cortex_m::asm::delay(Self::SPI_RETRY_CPU_CLOCKS);
+			}
+			panic!("Speaker retry timeout");
+		}
+
+		Ok(())
+	}
+
 	/// Read the BMC firmware version string.
 	///
 	/// You get 32 bytes of probably UTF-8 data.
@@ -954,9 +1014,9 @@ impl Hardware {
 
 fn sign_on() {
 	static LICENCE_TEXT: &str = "\
-        Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2022\n\
-        \n\
-        This program is free software under GPL v3 (or later)\n";
+		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2022\n\
+		\n\
+		This program is free software under GPL v3 (or later)\n";
 
 	// Create a new temporary console for some boot-up messages
 	let tc = vga::TextConsole::new();
@@ -975,13 +1035,15 @@ fn sign_on() {
 	let bmc_ver = critical_section::with(|cs| {
 		let mut lock = HARDWARE.borrow_ref_mut(cs);
 		let hw = lock.as_mut().unwrap();
-		hw.bmc_read_firmware_version()
+		let ver = hw.bmc_read_firmware_version();
+		hw.play_startup_tune().unwrap();
+		ver
 	});
 
 	match bmc_ver {
 		Ok(string_bytes) => match core::str::from_utf8(&string_bytes) {
 			Ok(s) => {
-				writeln!(&tc, "BMC Version: {}", s).unwrap();
+				writeln!(&tc, "BMC Version: {s}").unwrap();
 			}
 			Err(_e) => {
 				writeln!(&tc, "BMC Version: Unknown").unwrap();
