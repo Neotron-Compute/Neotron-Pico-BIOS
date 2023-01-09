@@ -45,12 +45,12 @@ The Neotron BIOS uses the [defmt](https://crates.io/crates/defmt) crate to provi
     * connect Pin 5 on the *Debugger* Pico to SWDIO on the *Neotron* Pico
     * connect USB on the *Debugger* Pico to your PC
 
-2. Flash your *Debugger* Pico with https://github.com/majbthrd/DapperMime firmware (e.g. by copying the UF2 file to the USB Mass Storage device)
+2. Flash your *Debugger* Pico with https://github.com/raspberrypi/picoprobe or https://github.com/majbthrd/DapperMime firmware (e.g. by copying the UF2 file to the USB Mass Storage device)
 
-3. On your PC, install [*probe-rs*](https://github.com/knurling-rs/probe-run), the programming tool from [Ferrous System's](https://www.ferrous-systems.com) [Knurling Project](https://github.com/knurling).
+3. On your PC, install [*probe-run*](https://github.com/knurling-rs/probe-run), the programming tool from [Ferrous System's](https://www.ferrous-systems.com) [Knurling Project](https://github.com/knurling).
 
 ```console
-user@host ~ $ cargo install probe-rs
+user@host ~ $ cargo install probe-run
 ```
 
 4. Power on your Neotron Pico.
@@ -85,6 +85,28 @@ user@host ~/neotron-pico-bios $ DEFMT_LOG=debug cargo run --release
 ``` 
 
 You should see your Neotron Pico boot, both over RTT in the `probe-run` output, and also on the VGA output.
+
+6a. Multiple probes
+
+If you have multiple probe-rs compatible probes attached to your computer,
+you will receive an error message.
+
+You can set the PROBE_RUN_PROBE environment variable to select one of the 
+available probes, like so:
+
+```console
+$ probe-run --list-probes
+the following probes were found:
+[0]: Picoprobe CMSIS-DAP (VID: 2e8a, PID: 000c, Serial: Exxxxxxxxxxxxxx6, CmsisDap)
+[1]: STLink V2 (VID: 0483, PID: 3748, Serial: 0xxxxxxxxxxxxxxxxxxxxxxE, StLink)
+user@host ~/neotron-pico-bios $ PROBE_RUN_PROBE='0483:3748' DEFMT_LOG=debug cargo run --release
+```
+
+You can also just provide the probe Serial, for example if you have multiple 
+identical probes.
+
+The documentation for this feature can be found at 
+<https://github.com/knurling-rs/probe-run#12-multiple-probes>
 
 ## Changelog
 
