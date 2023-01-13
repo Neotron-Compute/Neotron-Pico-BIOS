@@ -52,10 +52,7 @@ pub mod vga;
 // -----------------------------------------------------------------------------
 
 // Standard Library Stuff
-use core::{
-	fmt::Write,
-	sync::atomic::{AtomicBool, AtomicU8, Ordering},
-};
+use core::{fmt::Write, sync::atomic::AtomicBool};
 
 // Third Party Stuff
 use cortex_m_rt::entry;
@@ -63,7 +60,7 @@ use critical_section::Mutex;
 use defmt::info;
 use defmt_rtt as _;
 use embedded_hal::{
-	blocking::spi::Transfer as _SpiTransfer, blocking::spi::Write as _SpiWrite,
+	blocking::spi::{Transfer as _SpiTransfer, Write as _SpiWrite},
 	digital::v2::OutputPin,
 };
 use fugit::RateExtU32;
@@ -104,6 +101,8 @@ struct Hardware {
 	keyboard: pc_keyboard::Keyboard<pc_keyboard::layouts::Uk105Key, pc_keyboard::ScancodeSet2>,
 	/// Our queue of HID events
 	event_queue: heapless::Deque<neotron_common_bios::hid::HidEvent, 16>,
+	/// A place to send/receive bytes to/from the BMC
+	bmc_buffer: [u8; 64],
 }
 
 /// Flips between true and false so we always send a unique read request
@@ -393,6 +392,9 @@ impl Hardware {
 	/// Give the device 10us when we do a retry.
 	const SPI_RETRY_CPU_CLOCKS: u32 = 10_000 / Self::NS_PER_CLOCK_CYCLE;
 
+	/// Give the BMC 4us to calculate its response
+	const BMC_REQUEST_RESPONSE_DELAY_CLOCKS: u32 = 4_000 / Self::NS_PER_CLOCK_CYCLE;
+
 	/// Data Direction Register A on the MCP23S17
 	const MCP23S17_DDRA: u8 = 0x00;
 
@@ -553,11 +555,11 @@ impl Hardware {
 				i2s_lr_clock: hal_pins.gpio28.into_mode(),
 				pico_led: hal_pins.led.into_mode(),
 			},
-			// Set SPI up for 2 MHz clock, 8 data bits.
+			// Set SPI up for 4 MHz clock, 8 data bits.
 			spi_bus: hal::Spi::new(spi).init(
 				resets,
 				clocks.peripheral_clock.freq(),
-				2_000_000.Hz(),
+				4_000_000.Hz(),
 				&embedded_hal::spi::MODE_0,
 			),
 			delay,
@@ -565,6 +567,7 @@ impl Hardware {
 			last_cs: 0,
 			keyboard: pc_keyboard::Keyboard::new(pc_keyboard::HandleControl::Ignore),
 			event_queue: heapless::Deque::new(),
+			bmc_buffer: [0u8; 64],
 		}
 	}
 
@@ -647,7 +650,7 @@ impl Hardware {
 	/// SPI bus object), then de-activates the CS pin.
 	fn with_bus_cs<F>(&mut self, cs: u8, func: F)
 	where
-		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>),
+		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>, &mut [u8]),
 	{
 		// Only CS0..CS7 is valid
 		let cs = cs & 0b111;
@@ -665,7 +668,7 @@ impl Hardware {
 		cortex_m::asm::delay(Self::CS_BUS_SETUP_CPU_CLOCKS);
 
 		// Call function
-		func(&mut self.spi_bus);
+		func(&mut self.spi_bus, &mut self.bmc_buffer);
 
 		// Hold the CS pin a bit longer
 		cortex_m::asm::delay(Self::CS_BUS_HOLD_CPU_CLOCKS);
@@ -685,6 +688,11 @@ impl Hardware {
 		self.pins.noutput_en.set_high().unwrap();
 	}
 
+	/// Configure the MCP23S17 correctly.
+	///
+	/// We have GPIOA as outputs (for the debug LEDs, HDD LED and 3-bit
+	/// chip-select number). We have GPIOB as pulled-up inputs (for the eight
+	/// interrupts).
 	fn init_io_chip(&mut self) {
 		// Undrive CS lines from decoder/buffer
 		self.release_cs_lines();
@@ -705,122 +713,116 @@ impl Hardware {
 		self.io_chip_write(Self::MCP23S17_GPPUB, 0xFF);
 	}
 
+	/// Read from a BMC register.
+	///
+	/// It will perform a couple of retries, and then panic if the BMC did not respond correctly. It
+	/// sets the Chip Select line and controls the IO chip automatically.
+	///
+	/// The number of bytes you want is set by the length of the `buffer` argument.
+	///
+	fn bmc_read_register(&mut self, register: u8, buffer: &mut [u8]) -> Result<(), ()> {
+		if buffer.len() > self.bmc_buffer.len() {
+			defmt::error!("Asked for too much data ({})", buffer.len());
+			return Err(());
+		}
+		if buffer.len() > usize::from(u8::MAX) {
+			defmt::error!("Asked for too much data ({})", buffer.len());
+			return Err(());
+		}
+		let req =
+			neotron_bmc_protocol::Request::new_read(USE_ALT.get(), register, buffer.len() as u8);
+		let req_bytes = req.as_bytes();
+		for _retries in 0..4 {
+			// Clear the input buffer
+			for byte in self.bmc_buffer.iter_mut() {
+				*byte = 0xFF;
+			}
+			defmt::debug!("req: {=[u8; 4]:02x}", req_bytes);
+			self.with_bus_cs(0, |spi, buffer| {
+				// Send the request
+				spi.write(&req_bytes).unwrap();
+				cortex_m::asm::delay(Self::BMC_REQUEST_RESPONSE_DELAY_CLOCKS);
+				// Get the response
+				spi.transfer(buffer).unwrap();
+			});
+			// Trim the padding off the front
+			let mut response_buffer = &self.bmc_buffer[..];
+			let mut latency = 0;
+			while response_buffer.len() > 0
+				&& ((response_buffer[0] == 0x00) || (response_buffer[0] == 0xFF))
+			{
+				response_buffer = &response_buffer[1..];
+				latency += 1;
+			}
+			defmt::debug!("res: {=[u8]:02x} ({})", response_buffer, latency);
+			let expected_response_len = buffer.len() + 2;
+			// 8 bytes of data requested, plus one bytes of response code and one byte of CRC
+			if response_buffer.len() >= expected_response_len {
+				match neotron_bmc_protocol::Response::from_bytes(
+					&response_buffer[0..expected_response_len],
+				) {
+					Ok(res) => {
+						if res.result == neotron_bmc_protocol::ResponseResult::Ok
+							&& res.data.len() == buffer.len()
+						{
+							buffer.copy_from_slice(res.data);
+							return Ok(());
+						} else {
+							defmt::warn!(
+								"Error reading {} bytes from {}: Error from BMC {:?} {=[u8]:x}",
+								buffer.len(),
+								register,
+								res.result,
+								res.data
+							);
+							// No point retrying - we heardly them perfectly
+							return Err(());
+						}
+					}
+					Err(e) => {
+						defmt::warn!(
+							"Error reading {} bytes from {}: Decoding Error {:?} {=[u8]:x}",
+							buffer.len(),
+							register,
+							e,
+							response_buffer
+						);
+					}
+				}
+			} else {
+				defmt::warn!("Short packet {=[u8]:x}", response_buffer);
+			}
+			// Wait a bit before we try again
+			cortex_m::asm::delay(Self::SPI_RETRY_CPU_CLOCKS);
+		}
+		panic!("Failed to talk to BMC after several retries.");
+	}
+
 	/// Read the BMC firmware version string.
 	///
 	/// You get 32 bytes of probably UTF-8 data.
 	fn bmc_read_firmware_version(&mut self) -> Result<[u8; 32], ()> {
-		let req = neotron_bmc_protocol::Request::new_read(false, 0x01, 32);
-		let mut buffer = [0xFF; 64];
-		buffer[0..=3].copy_from_slice(&req.as_bytes());
-		self.with_bus_cs(0, |spi| {
-			spi.transfer(&mut buffer).unwrap();
-		});
-		defmt::info!("buffer: {=[u8]:x}", buffer);
-		let mut result = &buffer[..];
-		let mut latency = 0;
-		while !result.is_empty() && ((result[0] == 0xFF) || (result[0] == 0x00)) {
-			latency += 1;
-			result = &result[1..];
-		}
-		defmt::info!("latency: {}", latency);
-		// 32 bytes of data requested, plus one bytes of response code and one byte of CRC
-		if result.len() >= 34 {
-			match neotron_bmc_protocol::Response::from_bytes(&result[0..34]) {
-				Ok(res) => {
-					if res.result == neotron_bmc_protocol::ResponseResult::Ok
-						&& res.data.len() == 32
-					{
-						defmt::info!("Got BMC version {=[u8]:a}", res.data);
-						let mut string_bytes = [0u8; 32];
-						string_bytes.copy_from_slice(res.data);
-						return Ok(string_bytes);
-					} else {
-						defmt::warn!(
-							"Error getting BMC version: Error from BMC {:?} {=[u8]:x}",
-							res.result,
-							res.data
-						);
-					}
-				}
-				Err(e) => {
-					defmt::warn!(
-						"Error getting BMC version: Decoding Error {:?} {=[u8]:x}",
-						e,
-						result
-					);
-				}
-			}
-		}
-
-		Err(())
+		let mut firmware_version = [0u8; 32];
+		self.bmc_read_register(0x01, &mut firmware_version)?;
+		Ok(firmware_version)
 	}
 
 	/// Read the BMC PS/2 keyboard FIFO.
 	///
 	/// We ask for 8 bytes of data. We get `1` byte of 'length', then `N` bytes of valid data, and `32 - (N + 1)` bytes of padding.
 	fn bmc_read_ps2_keyboard_fifo(&mut self, out_buffer: &mut [u8; 8]) -> Result<usize, ()> {
-		static COUNTER: AtomicU8 = AtomicU8::new(0);
-		let req = neotron_bmc_protocol::Request::new_read(USE_ALT.get(), 0x40, 8);
-		for _retry in 0..4 {
-			let mut buffer = [0xFF; 32];
-			buffer[0..=3].copy_from_slice(&req.as_bytes());
-			buffer[4] = COUNTER.load(Ordering::Relaxed);
-			COUNTER.store(buffer[4].wrapping_add(1), Ordering::Relaxed);
-			defmt::trace!("out: {=[u8]:02x}", buffer);
-			self.with_bus_cs(0, |spi| {
-				spi.transfer(&mut buffer).unwrap();
-			});
-			defmt::trace!("in : {=[u8]:02x}", buffer);
-			// Skip the first four bytes at least (that's our command, and also
-			// the BMC FIFO length which might have crud in it). Then trip any padding.
-			let mut result = &buffer[4..];
-			let mut latency = 0;
-			while !result.is_empty() && (result[0] == 0xFF || result[0] == 0x00) {
-				latency += 1;
-				result = &result[1..];
-			}
-			defmt::trace!("latency: {}", latency);
-			// 8 bytes of data requested, plus one bytes of response code and one byte of CRC
-			if result.len() >= 10 {
-				match neotron_bmc_protocol::Response::from_bytes(&result[0..10]) {
-					Ok(res) => {
-						if res.result == neotron_bmc_protocol::ResponseResult::Ok
-							&& res.data.len() == 8
-						{
-							if res.data[0] == 0 {
-								defmt::trace!("Got no PS/2 bytes");
-							} else {
-								defmt::debug!("Got PS/2 bytes {=[u8]:x}", res.data);
-							}
-							for (dest, src) in out_buffer.iter_mut().zip(res.data.iter().skip(1)) {
-								*dest = *src;
-							}
-							return Ok(res.data[0] as usize);
-						} else {
-							defmt::warn!(
-								"Error getting keyboard bytes: Error from BMC {:?} {=[u8]:x}",
-								res.result,
-								res.data
-							);
-						}
-					}
-					Err(e) => {
-						defmt::warn!(
-							"Error getting BMC keyboard bytes: Decoding Error {:?} {=[u8]:x}",
-							e,
-							result
-						);
-					}
-				}
-			} else {
-				defmt::warn!("Short packet!?");
-			}
-
-			// Wait a bit before we try again
-			cortex_m::asm::delay(Self::SPI_RETRY_CPU_CLOCKS);
+		let mut fifo_data = [0u8; 9];
+		self.bmc_read_register(0x40, &mut fifo_data)?;
+		let bytes_in_fifo = fifo_data[0];
+		if bytes_in_fifo == 0 {
+			defmt::trace!("Got no PS/2 bytes");
+		} else {
+			defmt::debug!("Got PS/2 bytes {=[u8]:x}", &fifo_data[..]);
 		}
-		// Ran out of retries
-		panic!("KB retry timeout");
+		for (dest, src) in out_buffer.iter_mut().zip(fifo_data.iter().skip(1)) {
+			*dest = *src;
+		}
+		return Ok(bytes_in_fifo as usize);
 	}
 }
 
@@ -1147,7 +1149,7 @@ pub extern "C" fn hid_get_event() -> common::Result<common::Option<common::hid::
 						Ok(None) => {
 							// Need more data
 						}
-						Err(e) => {
+						Err(_e) => {
 							panic!("Keyboard decode error!");
 						}
 					}
@@ -1378,14 +1380,14 @@ extern "C" fn video_get_palette(index: u8) -> common::Option<common::video::RGBC
 }
 
 /// Update the RGB palette
-extern "C" fn video_set_palette(index: u8, rgb: common::video::RGBColour) {
+extern "C" fn video_set_palette(_index: u8, _rgb: common::video::RGBColour) {
 	// TODO set the palette when we actually have one
 }
 
 /// Update all the RGB palette
 unsafe extern "C" fn video_set_whole_palette(
-	palette: *const common::video::RGBColour,
-	length: usize,
+	_palette: *const common::video::RGBColour,
+	_length: usize,
 ) {
 	// TODO set the palette when we actually have one
 }
@@ -1561,7 +1563,7 @@ pub extern "C" fn block_verify(
 	common::Result::Err(common::Error::Unimplemented)
 }
 
-extern "C" fn block_dev_eject(dev_id: u8) -> common::Result<()> {
+extern "C" fn block_dev_eject(_dev_id: u8) -> common::Result<()> {
 	common::Result::Ok(())
 }
 
