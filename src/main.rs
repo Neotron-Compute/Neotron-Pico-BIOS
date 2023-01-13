@@ -370,10 +370,12 @@ impl Hardware {
 	/// MCP23S17 CS pin disable time (between transactions). At least 50ns, we give 100ns.
 	const CS_IO_DISABLE_CPU_CLOCKS: u32 = 100 / Self::NS_PER_CLOCK_CYCLE;
 
-	/// Give the device 2us (2 clocks @ 1 MHz) to get ready.
-	const CS_BUS_SETUP_CPU_CLOCKS: u32 = 2000 / Self::NS_PER_CLOCK_CYCLE;
+	/// Give the device 10us to get ready.
+	///
+	/// This seems to reduce the error rate on the BMC link to an acceptable level.
+	const CS_BUS_SETUP_CPU_CLOCKS: u32 = 10_000 / Self::NS_PER_CLOCK_CYCLE;
 
-	/// Give the device 2us (2 clocks @ 1 MHz) before we take away CS.
+	/// Give the device 2000ns before we take away CS.
 	const CS_BUS_HOLD_CPU_CLOCKS: u32 = 2000 / Self::NS_PER_CLOCK_CYCLE;
 
 	/// Give the device 10us when we do a retry.
