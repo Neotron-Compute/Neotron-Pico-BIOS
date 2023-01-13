@@ -101,8 +101,8 @@ struct Hardware {
 	spi_bus: hal::Spi<hal::spi::Enabled, pac::SPI0, 8>,
 	/// Something to perform small delays with. Uses SysTICK.
 	delay: cortex_m::delay::Delay,
-	/// Current 5-bit value shown on the debug LEDs
-	debug_leds: u8,
+	/// Current 5-bit value shown on the LEDs (including the HDD in bit 0).
+	led_state: u8,
 	/// The last CS pin we selected
 	last_cs: u8,
 	/// Our keyboard decoder
@@ -114,6 +114,8 @@ struct Hardware {
 	/// Our last interrupt read from the IO chip. It's inverted, so a bit set
 	/// means an interrupt is pending on that slot.
 	interrupts_pending: u8,
+	/// The number of IRQs we've had
+	irq_count: u32,
 }
 
 /// Flips between true and false so we always send a unique read request
@@ -613,12 +615,13 @@ impl Hardware {
 					&embedded_hal::spi::MODE_0,
 				),
 				delay,
-				debug_leds: 0,
+				led_state: 0,
 				last_cs: 0,
 				keyboard: pc_keyboard::Keyboard::new(pc_keyboard::HandleControl::Ignore),
 				event_queue: heapless::Deque::new(),
 				bmc_buffer: [0u8; 64],
 				interrupts_pending: 0,
+				irq_count: 0,
 			},
 			hal_pins.gpio20.into_pull_up_input(),
 		)
@@ -697,8 +700,8 @@ impl Hardware {
 	fn set_debug_leds(&mut self, leds: u8) {
 		// LEDs are active-low.
 		let leds = (leds ^ 0xFF) & 0xF;
-		self.debug_leds = leds << 1 | (self.debug_leds & 1);
-		self.io_chip_write(0x12, self.debug_leds << 3 | self.last_cs);
+		self.led_state = leds << 1 | (self.led_state & 1);
+		self.io_chip_write(0x12, self.led_state << 3 | self.last_cs);
 	}
 
 	/// Set the HDD LED on the PCB.
@@ -706,8 +709,8 @@ impl Hardware {
 	/// These are connected to the bit 4 of GPIOA on the MCP23S17.
 	fn set_hdd_led(&mut self, enabled: bool) {
 		// LEDs are active-low.
-		self.debug_leds = (self.debug_leds & 0x1e) | if enabled { 0 } else { 1 };
-		self.io_chip_write(0x12, self.debug_leds << 3 | self.last_cs);
+		self.led_state = (self.led_state & 0x1e) | if enabled { 0 } else { 1 };
+		self.io_chip_write(0x12, self.led_state << 3 | self.last_cs);
 	}
 
 	/// Perform some SPI transaction with a specific bus chip-select pin active.
@@ -723,7 +726,7 @@ impl Hardware {
 
 		if cs != self.last_cs {
 			// Set CS Outputs into decoder/buffer
-			self.io_chip_write(0x12, self.debug_leds << 3 | cs);
+			self.io_chip_write(0x12, self.led_state << 3 | cs);
 			self.last_cs = cs;
 		}
 
@@ -806,6 +809,9 @@ impl Hardware {
 			// The IO chip reports 0 for pending, 1 for not pending.
 			self.interrupts_pending = self.io_read_interrupts() ^ 0xFF;
 			defmt::info!("Interrupts: 0b{:08b}", self.interrupts_pending);
+			// Change the debug LEDs so we can see the interrupts
+			self.irq_count = self.irq_count.wrapping_add(1);
+			self.set_debug_leds((self.irq_count & 0x0F) as u8);
 		}
 	}
 
