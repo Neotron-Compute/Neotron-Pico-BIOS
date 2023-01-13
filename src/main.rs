@@ -1554,7 +1554,7 @@ extern "C" fn block_dev_eject(dev_id: u8) -> common::Result<()> {
 /// Sleep the CPU until the next interrupt.
 extern "C" fn power_idle() {
 	// cortex_m::asm::wfe();
-	// cortex_m::asm::delay(20_000_000);
+	cortex_m::asm::delay(1_000_000);
 }
 
 /// TODO: Get the monotonic run-time of the system from SysTick.
