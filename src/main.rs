@@ -424,8 +424,8 @@ impl Hardware {
 	/// Give the device 10us when we do a retry.
 	const SPI_RETRY_CPU_CLOCKS: u32 = 10_000 / Self::NS_PER_CLOCK_CYCLE;
 
-	/// Give the BMC 4us to calculate its response
-	const BMC_REQUEST_RESPONSE_DELAY_CLOCKS: u32 = 4_000 / Self::NS_PER_CLOCK_CYCLE;
+	/// Give the BMC 6us to calculate its response
+	const BMC_REQUEST_RESPONSE_DELAY_CLOCKS: u32 = 6_000 / Self::NS_PER_CLOCK_CYCLE;
 
 	/// Data Direction Register A on the MCP23S17
 	const MCP23S17_DDRA: u8 = 0x00;
@@ -607,11 +607,11 @@ impl Hardware {
 				// CLK falling edge, and we sample the CIPO pin on the CLK rising
 				// edge.
 
-				// Set SPI up for 2 MHz clock, 8 data bits.
+				// Set SPI up for 4 MHz clock, 8 data bits.
 				spi_bus: hal::Spi::new(spi).init(
 					resets,
 					clocks.peripheral_clock.freq(),
-					2_000_000.Hz(),
+					4_000_000.Hz(),
 					&embedded_hal::spi::MODE_0,
 				),
 				delay,
