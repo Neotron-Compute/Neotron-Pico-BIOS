@@ -11,13 +11,13 @@ version = "0.4.0"
 # Useful Cortex-M specific functions (e.g. SysTick)
 cortex-m = "0.7"
 # The Raspberry Pi Pico HAL
-rp-pico = "0.5"
+rp-pico = { version = "0.6", default-features = false, features = [ "rt", "critical-section-impl", "rom-func-cache" ] }
 # Cortex-M run-time (or start-up) code
 cortex-m-rt = "0.7"
 # The BIOS to OS API
 neotron-common-bios = "0.7.0"
 # For the RP2040 bootloader
-rp2040-boot2 = "0.2"
+rp2040-boot2 = "0.3.0"
 # For hardware abstraction traits
 embedded-hal ="0.2"
 # Gives us formatted PC-side logging
@@ -53,3 +53,6 @@ codegen-units = 1
 debug = true
 # better optimizations
 lto = true
+
+[patch.crates-io]
+rp2040-boot2 = { version = "0.3.0", git = "https://github.com/rp-rs/rp2040-boot2" }
