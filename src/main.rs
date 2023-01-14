@@ -33,6 +33,14 @@
 #![no_std]
 #![no_main]
 
+// The boot2 feature of rp-pico is temporarily disabled, so the version
+// of rp2040-boot2 can be overridden. Therefore, BOOT2_FIRMWARE needs to be
+// defined here.
+#[link_section = ".boot2"]
+#[no_mangle]
+#[used]
+pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
+
 // -----------------------------------------------------------------------------
 // Sub-modules
 // -----------------------------------------------------------------------------
@@ -309,6 +317,10 @@ fn main() -> ! {
 		.unwrap();
 
 	info!("Clocks OK");
+
+	info!("SCKDV: {}", unsafe {
+		(*rp_pico::pac::XIP_SSI::ptr()).baudr.read().bits()
+	});
 
 	// sio is the *Single-cycle Input/Output* peripheral. It has all our GPIO
 	// pins, as well as some mailboxes and other useful things for inter-core
