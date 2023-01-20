@@ -426,8 +426,8 @@ impl Hardware {
 	/// Give the device 2000ns before we take away CS.
 	const CS_BUS_HOLD_CPU_CLOCKS: u32 = 2000 / Self::NS_PER_CLOCK_CYCLE;
 
-	/// Give the device 10ms to sort itself out when we do a retry.
-	const SPI_RETRY_CPU_CLOCKS: u32 = 10_000_000 / Self::NS_PER_CLOCK_CYCLE;
+	/// Give the device 100ms to sort itself out when we do a retry.
+	const BMC_RETRY_CPU_CLOCKS: u32 = 100_000_000 / Self::NS_PER_CLOCK_CYCLE;
 
 	/// Give the BMC 6us to calculate its response
 	const BMC_REQUEST_RESPONSE_DELAY_CLOCKS: u32 = 6_000 / Self::NS_PER_CLOCK_CYCLE;
@@ -616,7 +616,7 @@ impl Hardware {
 				spi_bus: hal::Spi::new(spi).init(
 					resets,
 					clocks.peripheral_clock.freq(),
-					2_000_000.Hz(),
+					4_000_000.Hz(),
 					&embedded_hal::spi::MODE_0,
 				),
 				delay,
@@ -833,9 +833,9 @@ impl Hardware {
 	/// The number of bytes you want is set by the length of the `buffer` argument.
 	///
 	fn bmc_read_register(&mut self, register: u8, buffer: &mut [u8]) -> Result<(), ()> {
-		const MAX_LATENCY: usize = 12;
+		const MAX_LATENCY: usize = 128;
 
-		if (buffer.len() + MAX_LATENCY) > self.bmc_buffer.len() {
+		if buffer.len() > self.bmc_buffer.len() {
 			defmt::error!("Asked for too much data ({})", buffer.len());
 			return Err(());
 		}
@@ -851,64 +851,62 @@ impl Hardware {
 			for byte in self.bmc_buffer.iter_mut() {
 				*byte = 0xFF;
 			}
-			// Allow for up to eight bytes of padding (i.e. latency).
-			let response_len = buffer.len() + MAX_LATENCY;
+			let expected_response_len = buffer.len() + 2;
 			defmt::debug!("req: {=[u8; 4]:02x}", req_bytes);
-			self.with_bus_cs(0, |spi, buffer| {
+			let mut latency = 0;
+			self.with_bus_cs(0, |spi, borrowed_buffer| {
 				// Send the request
 				spi.write(&req_bytes).unwrap();
-				cortex_m::asm::delay(Self::BMC_REQUEST_RESPONSE_DELAY_CLOCKS);
-				// Get the response
-				spi.transfer(&mut buffer[..response_len]).unwrap();
-			});
-			// Trim the padding off the front
-			let mut response_buffer = &self.bmc_buffer[..response_len];
-			let mut latency = 0;
-			while response_buffer.len() > 0
-				&& neotron_bmc_protocol::ResponseResult::try_from(response_buffer[0]).is_err()
-			{
-				response_buffer = &response_buffer[1..];
-				latency += 1;
-			}
-			defmt::debug!("res: {=[u8]:02x} ({})", response_buffer, latency);
-			let expected_response_len = buffer.len() + 2;
-			// 8 bytes of data requested, plus one bytes of response code and one byte of CRC
-			if response_buffer.len() >= expected_response_len {
-				let response_portion = &response_buffer[0..expected_response_len];
-				match neotron_bmc_protocol::Response::from_bytes(response_portion) {
-					Ok(res) => {
-						if res.result == neotron_bmc_protocol::ResponseResult::Ok
-							&& res.data.len() == buffer.len()
-						{
-							buffer.copy_from_slice(res.data);
-							return Ok(());
-						} else {
-							defmt::warn!(
-								"Error reading {} bytes from {}: Error from BMC {:?} {=[u8]:x}",
-								buffer.len(),
-								register,
-								res.result,
-								response_portion
-							);
-							// No point retrying - we heardly them perfectly
-							return Err(());
-						}
-					}
-					Err(e) => {
-						defmt::warn!(
-							"Error reading {} bytes from {}: Decoding Error {:?} {=[u8]:x}",
-							buffer.len(),
-							register,
-							e,
-							response_portion
-						);
+				for retry in 0..MAX_LATENCY {
+					cortex_m::asm::delay(Self::BMC_REQUEST_RESPONSE_DELAY_CLOCKS);
+					spi.transfer(&mut borrowed_buffer[0..=0]).unwrap();
+					if neotron_bmc_protocol::ResponseResult::try_from(borrowed_buffer[0]).is_ok() {
+						latency = retry;
+						break;
 					}
 				}
-			} else {
-				defmt::warn!("Short packet {=[u8]:x}", response_buffer);
+				// Get the rest of the response now we know it's queued up.
+				spi.transfer(&mut borrowed_buffer[1..expected_response_len])
+					.unwrap();
+			});
+			defmt::debug!(
+				"res: {=[u8]:02x} ({})",
+				self.bmc_buffer[0..expected_response_len],
+				latency
+			);
+			// 8 bytes of data requested, plus one bytes of response code and one byte of CRC
+			let response_portion = &self.bmc_buffer[0..expected_response_len];
+			match neotron_bmc_protocol::Response::from_bytes(response_portion) {
+				Ok(res) => {
+					if res.result == neotron_bmc_protocol::ResponseResult::Ok
+						&& res.data.len() == buffer.len()
+					{
+						buffer.copy_from_slice(res.data);
+						return Ok(());
+					} else {
+						defmt::warn!(
+							"Error reading {} bytes from {}: Error from BMC {:?} {=[u8]:x}",
+							buffer.len(),
+							register,
+							res.result,
+							response_portion
+						);
+						// No point retrying - we heardly them perfectly
+						return Err(());
+					}
+				}
+				Err(e) => {
+					defmt::warn!(
+						"Error reading {} bytes from {}: Decoding Error {:?} {=[u8]:x}",
+						buffer.len(),
+						register,
+						e,
+						response_portion
+					);
+				}
 			}
 			// Wait a bit before we try again
-			cortex_m::asm::delay(Self::SPI_RETRY_CPU_CLOCKS);
+			cortex_m::asm::delay(Self::BMC_RETRY_CPU_CLOCKS);
 		}
 		panic!("Failed to talk to BMC after several retries.");
 	}
