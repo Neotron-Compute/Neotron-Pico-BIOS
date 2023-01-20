@@ -392,6 +392,11 @@ fn main() -> ! {
 		pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
 	}
 
+	// Empty the keyboard FIFO
+	while let common::Result::Ok(common::Option::Some(_x)) = hid_get_event() {
+		// Spin
+	}
+
 	// Say hello over VGA
 	sign_on();
 
@@ -421,8 +426,8 @@ impl Hardware {
 	/// Give the device 2000ns before we take away CS.
 	const CS_BUS_HOLD_CPU_CLOCKS: u32 = 2000 / Self::NS_PER_CLOCK_CYCLE;
 
-	/// Give the device 10us when we do a retry.
-	const SPI_RETRY_CPU_CLOCKS: u32 = 10_000 / Self::NS_PER_CLOCK_CYCLE;
+	/// Give the device 10ms to sort itself out when we do a retry.
+	const SPI_RETRY_CPU_CLOCKS: u32 = 10_000_000 / Self::NS_PER_CLOCK_CYCLE;
 
 	/// Give the BMC 6us to calculate its response
 	const BMC_REQUEST_RESPONSE_DELAY_CLOCKS: u32 = 6_000 / Self::NS_PER_CLOCK_CYCLE;
@@ -828,7 +833,7 @@ impl Hardware {
 	/// The number of bytes you want is set by the length of the `buffer` argument.
 	///
 	fn bmc_read_register(&mut self, register: u8, buffer: &mut [u8]) -> Result<(), ()> {
-		const MAX_LATENCY: usize = 8;
+		const MAX_LATENCY: usize = 12;
 
 		if (buffer.len() + MAX_LATENCY) > self.bmc_buffer.len() {
 			defmt::error!("Asked for too much data ({})", buffer.len());
@@ -1274,7 +1279,8 @@ pub extern "C" fn hid_get_event() -> common::Result<common::Option<common::hid::
 								// Need more data
 							}
 							Err(_e) => {
-								panic!("Keyboard decode error!");
+								defmt::warn!("Keyboard decode error!");
+								hw.keyboard.clear();
 							}
 						}
 					}
