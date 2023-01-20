@@ -1,29 +1,25 @@
-name: Build
-
 on: [push, pull_request]
+name: Build (and Release)
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
+    name: Build (and Release)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v3
         with:
           submodules: true
           fetch-depth: 0
 
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-          target: thumbv6m-none-eabi
+      - name: Add targets
+        run: |
+          rustup target add thumbv6m-none-eabi
 
-      - name: Build Code
+      - name: Build neotron-pico-bios
         run: |
           cargo build --release --verbose
 
