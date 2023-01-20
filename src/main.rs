@@ -611,7 +611,7 @@ impl Hardware {
 				spi_bus: hal::Spi::new(spi).init(
 					resets,
 					clocks.peripheral_clock.freq(),
-					4_000_000.Hz(),
+					2_000_000.Hz(),
 					&embedded_hal::spi::MODE_0,
 				),
 				delay,
