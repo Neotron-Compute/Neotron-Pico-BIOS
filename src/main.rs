@@ -33,6 +33,14 @@
 #![no_std]
 #![no_main]
 
+// The boot2 feature of rp-pico is temporarily disabled, so the version
+// of rp2040-boot2 can be overridden. Therefore, BOOT2_FIRMWARE needs to be
+// defined here.
+#[link_section = ".boot2"]
+#[no_mangle]
+#[used]
+pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
+
 // -----------------------------------------------------------------------------
 // Sub-modules
 // -----------------------------------------------------------------------------
@@ -45,8 +53,10 @@ pub mod vga;
 
 // Standard Library Stuff
 use core::{
+	cell::RefCell,
+	convert::TryFrom,
 	fmt::Write,
-	sync::atomic::{AtomicBool, AtomicU8, Ordering},
+	sync::atomic::{AtomicBool, Ordering},
 };
 
 // Third Party Stuff
@@ -55,8 +65,8 @@ use critical_section::Mutex;
 use defmt::info;
 use defmt_rtt as _;
 use embedded_hal::{
-	blocking::spi::Transfer as _SpiTransfer, blocking::spi::Write as _SpiWrite,
-	digital::v2::OutputPin,
+	blocking::spi::{Transfer as _SpiTransfer, Write as _SpiWrite},
+	digital::v2::{InputPin, OutputPin},
 };
 use fugit::RateExtU32;
 use panic_probe as _;
@@ -80,6 +90,9 @@ use neotron_common_bios as common;
 // Types
 // -----------------------------------------------------------------------------
 
+/// The type of our IRQ input pin from the MCP23S17.
+type IrqPin = Pin<bank0::Gpio20, Input<PullUp>>;
+
 /// All the hardware we use on the Pico
 struct Hardware {
 	/// All the pins we use on the Raspberry Pi Pico
@@ -88,14 +101,21 @@ struct Hardware {
 	spi_bus: hal::Spi<hal::spi::Enabled, pac::SPI0, 8>,
 	/// Something to perform small delays with. Uses SysTICK.
 	delay: cortex_m::delay::Delay,
-	/// Current 5-bit value shown on the debug LEDs
-	debug_leds: u8,
+	/// Current 5-bit value shown on the LEDs (including the HDD in bit 0).
+	led_state: u8,
 	/// The last CS pin we selected
 	last_cs: u8,
 	/// Our keyboard decoder
 	keyboard: pc_keyboard::Keyboard<pc_keyboard::layouts::Uk105Key, pc_keyboard::ScancodeSet2>,
 	/// Our queue of HID events
 	event_queue: heapless::Deque<neotron_common_bios::hid::HidEvent, 16>,
+	/// A place to send/receive bytes to/from the BMC
+	bmc_buffer: [u8; 64],
+	/// Our last interrupt read from the IO chip. It's inverted, so a bit set
+	/// means an interrupt is pending on that slot.
+	interrupts_pending: u8,
+	/// The number of IRQs we've had
+	irq_count: u32,
 }
 
 /// Flips between true and false so we always send a unique read request
@@ -107,9 +127,8 @@ impl UseAlt {
 	}
 
 	fn get(&self) -> bool {
-		let use_alt = self.0.load(core::sync::atomic::Ordering::Relaxed);
-		self.0
-			.store(!use_alt, core::sync::atomic::Ordering::Relaxed);
+		let use_alt = self.0.load(Ordering::Relaxed);
+		self.0.store(!use_alt, Ordering::Relaxed);
 		use_alt
 	}
 }
@@ -141,7 +160,6 @@ struct Pins {
 	nspi_cs_io: Pin<bank0::Gpio17, Output<PushPull>>,
 	spi_clk: Pin<bank0::Gpio18, Function<hal::gpio::Spi>>,
 	spi_copi: Pin<bank0::Gpio19, Function<hal::gpio::Spi>>,
-	nirq_io: Pin<bank0::Gpio20, Input<PullUp>>,
 	noutput_en: Pin<bank0::Gpio21, Output<PushPull>>,
 	i2s_adc_data: Pin<bank0::Gpio22, Function<pac::PIO1>>,
 	i2s_dac_data: Pin<bank0::Gpio26, Function<pac::PIO1>>,
@@ -176,6 +194,13 @@ static HARDWARE: Mutex<core::cell::RefCell<Option<Hardware>>> =
 #[used]
 pub static OS_IMAGE: [u8; include_bytes!("thumbv6m-none-eabi-flash1002-libneotron_os.bin").len()] =
 	*include_bytes!("thumbv6m-none-eabi-flash1002-libneotron_os.bin");
+
+// Tracks if we have had an IO interrupt.
+//
+// Set by the GPIO interrupt routine to reflect the level state of the IRQ input
+// from the IO chip. This this value is `true` if any of `IRQ0` through `IRQ7`
+// is currently active (low).
+static INTERRUPT_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// The table of API calls we provide the OS
 static API_CALLS: common::Api = common::Api {
@@ -310,6 +335,10 @@ fn main() -> ! {
 
 	info!("Clocks OK");
 
+	info!("SCKDV: {}", unsafe {
+		(*rp_pico::pac::XIP_SSI::ptr()).baudr.read().bits()
+	});
+
 	// sio is the *Single-cycle Input/Output* peripheral. It has all our GPIO
 	// pins, as well as some mailboxes and other useful things for inter-core
 	// communications.
@@ -319,7 +348,7 @@ fn main() -> ! {
 	let delay = cortex_m::delay::Delay::new(cp.SYST, clocks.system_clock.freq().to_Hz());
 
 	// Configure and grab all the RP2040 pins the Pico exposes, along with the non-VGA peripherals.
-	let mut hw = Hardware::build(
+	let (mut hw, nirq_io) = Hardware::build(
 		pp.IO_BANK0,
 		pp.PADS_BANK0,
 		sio.gpio_bank0,
@@ -330,6 +359,9 @@ fn main() -> ! {
 	);
 	hw.init_io_chip();
 	hw.set_hdd_led(false);
+
+	nirq_io.set_interrupt_enabled(hal::gpio::Interrupt::EdgeLow, true);
+	nirq_io.set_interrupt_enabled(hal::gpio::Interrupt::EdgeHigh, true);
 
 	info!("Pins OK");
 
@@ -344,10 +376,26 @@ fn main() -> ! {
 
 	info!("VGA OK");
 
+	// Did we start with an interrupt pending?
+	INTERRUPT_PENDING.store(nirq_io.is_low().unwrap(), Ordering::Relaxed);
+
 	critical_section::with(|cs| {
-		let mut hw_cell = HARDWARE.borrow_ref_mut(cs);
-		hw_cell.replace(hw);
+		HARDWARE.borrow(cs).replace(Some(hw));
+		IRQ_PIN.borrow(cs).replace(Some(nirq_io))
 	});
+
+	// Unmask the IO_BANK0 IRQ so that the NVIC interrupt controller
+	// will jump to the interrupt function when the interrupt occurs.
+	// We do this last so that the interrupt can't go off while
+	// it is in the middle of being configured
+	unsafe {
+		pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
+	}
+
+	// Empty the keyboard FIFO
+	while let common::Result::Ok(common::Option::Some(_x)) = hid_get_event() {
+		// Spin
+	}
 
 	// Say hello over VGA
 	sign_on();
@@ -370,24 +418,44 @@ impl Hardware {
 	/// MCP23S17 CS pin disable time (between transactions). At least 50ns, we give 100ns.
 	const CS_IO_DISABLE_CPU_CLOCKS: u32 = 100 / Self::NS_PER_CLOCK_CYCLE;
 
-	/// Give the device 2us (2 clocks @ 1 MHz) to get ready.
-	const CS_BUS_SETUP_CPU_CLOCKS: u32 = 2000 / Self::NS_PER_CLOCK_CYCLE;
+	/// Give the device 10us to get ready.
+	///
+	/// This seems to reduce the error rate on the BMC link to an acceptable level.
+	const CS_BUS_SETUP_CPU_CLOCKS: u32 = 10_000 / Self::NS_PER_CLOCK_CYCLE;
 
-	/// Give the device 2us (2 clocks @ 1 MHz) before we take away CS.
+	/// Give the device 2000ns before we take away CS.
 	const CS_BUS_HOLD_CPU_CLOCKS: u32 = 2000 / Self::NS_PER_CLOCK_CYCLE;
 
-	/// Give the device 10us when we do a retry.
-	const SPI_RETRY_CPU_CLOCKS: u32 = 10_000 / Self::NS_PER_CLOCK_CYCLE;
+	/// Give the device 100ms to sort itself out when we do a retry.
+	const BMC_RETRY_CPU_CLOCKS: u32 = 100_000_000 / Self::NS_PER_CLOCK_CYCLE;
+
+	/// Give the BMC 6us to calculate its response
+	const BMC_REQUEST_RESPONSE_DELAY_CLOCKS: u32 = 6_000 / Self::NS_PER_CLOCK_CYCLE;
 
 	/// Data Direction Register A on the MCP23S17
 	const MCP23S17_DDRA: u8 = 0x00;
 
-	/// GPIO Data Register A on the MCP23S17
-	const MCP23S17_GPIOA: u8 = 0x12;
+	/// Interrupt-on-Change Control Register B on the MCP23S17
+	const MCP23S17_GPINTENB: u8 = 0x05;
+
+	/// Interrupt Control Register B on the MCP23S17
+	const MCP23S17_DEFVALB: u8 = 0x07;
+
+	/// Interrupt Control Register B on the MCP23S17
+	const MCP23S17_INTCONB: u8 = 0x09;
 
 	/// GPIO Pull-Up Register B on the MCP23S17
 	const MCP23S17_GPPUB: u8 = 0x0D;
 
+	/// GPIO Data Register A on the MCP23S17
+	const MCP23S17_GPIOA: u8 = 0x12;
+
+	/// GPIO Data Register B on the MCP23S17
+	const MCP23S17_GPIOB: u8 = 0x13;
+
+	/// Build all our hardware drivers.
+	///
+	/// Puts the pins into the right modes, builds the SPI driver, etc.
 	fn build(
 		bank: pac::IO_BANK0,
 		pads: pac::PADS_BANK0,
@@ -396,162 +464,172 @@ impl Hardware {
 		spi: pac::SPI0,
 		clocks: ClocksManager,
 		delay: cortex_m::delay::Delay,
-	) -> Hardware {
+	) -> (Hardware, IrqPin) {
 		let hal_pins = rp_pico::Pins::new(bank, pads, sio, resets);
 
-		Hardware {
-			pins: Pins {
-				// Disable power save mode to force SMPS into low-efficiency, low-noise mode.
-				npower_save: {
-					let mut pin = hal_pins.b_power_save.into_push_pull_output();
-					pin.set_high().unwrap();
-					pin
+		(
+			Hardware {
+				pins: Pins {
+					// Disable power save mode to force SMPS into low-efficiency, low-noise mode.
+					npower_save: {
+						let mut pin = hal_pins.b_power_save.into_push_pull_output();
+						pin.set_high().unwrap();
+						pin
+					},
+					// Give H-Sync, V-Sync and 12 RGB colour pins to PIO0 to output video
+					h_sync: {
+						let mut pin = hal_pins.gpio0.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					v_sync: {
+						let mut pin = hal_pins.gpio1.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					red0: {
+						let mut pin = hal_pins.gpio2.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					red1: {
+						let mut pin = hal_pins.gpio3.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					red2: {
+						let mut pin = hal_pins.gpio4.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					red3: {
+						let mut pin = hal_pins.gpio5.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					green0: {
+						let mut pin = hal_pins.gpio6.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					green1: {
+						let mut pin = hal_pins.gpio7.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					green2: {
+						let mut pin = hal_pins.gpio8.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					green3: {
+						let mut pin = hal_pins.gpio9.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					blue0: {
+						let mut pin = hal_pins.gpio10.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					blue1: {
+						let mut pin = hal_pins.gpio11.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					blue2: {
+						let mut pin = hal_pins.gpio12.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					blue3: {
+						let mut pin = hal_pins.gpio13.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					i2c_sda: {
+						let mut pin = hal_pins.gpio14.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					i2c_scl: {
+						let mut pin = hal_pins.gpio15.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					spi_cipo: {
+						let mut pin = hal_pins.gpio16.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					nspi_cs_io: {
+						let mut pin = hal_pins.gpio17.into_push_pull_output();
+						pin.set_high().unwrap();
+						pin
+					},
+					spi_clk: {
+						let mut pin = hal_pins.gpio18.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					spi_copi: {
+						let mut pin = hal_pins.gpio19.into_mode();
+						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+						pin
+					},
+					noutput_en: {
+						let mut pin = hal_pins.gpio21.into_push_pull_output();
+						pin.set_high().unwrap();
+						pin
+					},
+					i2s_adc_data: hal_pins.gpio22.into_mode(),
+					i2s_dac_data: hal_pins.gpio26.into_mode(),
+					i2s_bit_clock: hal_pins.gpio27.into_mode(),
+					i2s_lr_clock: hal_pins.gpio28.into_mode(),
+					pico_led: hal_pins.led.into_mode(),
 				},
-				// Give H-Sync, V-Sync and 12 RGB colour pins to PIO0 to output video
-				h_sync: {
-					let mut pin = hal_pins.gpio0.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				v_sync: {
-					let mut pin = hal_pins.gpio1.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				red0: {
-					let mut pin = hal_pins.gpio2.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				red1: {
-					let mut pin = hal_pins.gpio3.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				red2: {
-					let mut pin = hal_pins.gpio4.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				red3: {
-					let mut pin = hal_pins.gpio5.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				green0: {
-					let mut pin = hal_pins.gpio6.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				green1: {
-					let mut pin = hal_pins.gpio7.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				green2: {
-					let mut pin = hal_pins.gpio8.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				green3: {
-					let mut pin = hal_pins.gpio9.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				blue0: {
-					let mut pin = hal_pins.gpio10.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				blue1: {
-					let mut pin = hal_pins.gpio11.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				blue2: {
-					let mut pin = hal_pins.gpio12.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				blue3: {
-					let mut pin = hal_pins.gpio13.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				i2c_sda: {
-					let mut pin = hal_pins.gpio14.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				i2c_scl: {
-					let mut pin = hal_pins.gpio15.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				spi_cipo: {
-					let mut pin = hal_pins.gpio16.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				nspi_cs_io: {
-					let mut pin = hal_pins.gpio17.into_push_pull_output();
-					pin.set_high().unwrap();
-					pin
-				},
-				spi_clk: {
-					let mut pin = hal_pins.gpio18.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				spi_copi: {
-					let mut pin = hal_pins.gpio19.into_mode();
-					pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-					pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-					pin
-				},
-				nirq_io: hal_pins.gpio20.into_pull_up_input(),
-				noutput_en: {
-					let mut pin = hal_pins.gpio21.into_push_pull_output();
-					pin.set_high().unwrap();
-					pin
-				},
-				i2s_adc_data: hal_pins.gpio22.into_mode(),
-				i2s_dac_data: hal_pins.gpio26.into_mode(),
-				i2s_bit_clock: hal_pins.gpio27.into_mode(),
-				i2s_lr_clock: hal_pins.gpio28.into_mode(),
-				pico_led: hal_pins.led.into_mode(),
+
+				// We are in SPI MODE 0. This means we change the COPI pin on the
+				// CLK falling edge, and we sample the CIPO pin on the CLK rising
+				// edge.
+
+				// Set SPI up for 4 MHz clock, 8 data bits.
+				spi_bus: hal::Spi::new(spi).init(
+					resets,
+					clocks.peripheral_clock.freq(),
+					4_000_000.Hz(),
+					&embedded_hal::spi::MODE_0,
+				),
+				delay,
+				led_state: 0,
+				last_cs: 0,
+				keyboard: pc_keyboard::Keyboard::new(pc_keyboard::HandleControl::Ignore),
+				event_queue: heapless::Deque::new(),
+				bmc_buffer: [0u8; 64],
+				interrupts_pending: 0,
+				irq_count: 0,
 			},
-			// Set SPI up for 2 MHz clock, 8 data bits.
-			spi_bus: hal::Spi::new(spi).init(
-				resets,
-				clocks.peripheral_clock.freq(),
-				2_000_000.Hz(),
-				&embedded_hal::spi::MODE_0,
-			),
-			delay,
-			debug_leds: 0,
-			last_cs: 0,
-			keyboard: pc_keyboard::Keyboard::new(pc_keyboard::HandleControl::Ignore),
-			event_queue: heapless::Deque::new(),
-		}
+			hal_pins.gpio20.into_pull_up_input(),
+		)
 	}
 
 	/// Perform some SPI operation with the I/O chip selected.
@@ -587,6 +665,19 @@ impl Hardware {
 		self.with_io_cs(|spi| {
 			spi.write(&[0x40, register, data]).unwrap();
 		});
+
+		// Inter-packet delay
+		cortex_m::asm::delay(Self::CS_IO_DISABLE_CPU_CLOCKS);
+
+		let read_back = self.io_chip_read(register);
+		if read_back != data {
+			defmt::panic!(
+				"Wrote 0x{:02x} to IO chip register {}, got 0x{:02x}",
+				data,
+				register,
+				read_back
+			);
+		}
 	}
 
 	/// Read from a register on the MCP23S17 I/O chip.
@@ -614,8 +705,8 @@ impl Hardware {
 	fn set_debug_leds(&mut self, leds: u8) {
 		// LEDs are active-low.
 		let leds = (leds ^ 0xFF) & 0xF;
-		self.debug_leds = leds << 1 | (self.debug_leds & 1);
-		self.io_chip_write(0x12, self.debug_leds << 3 | self.last_cs);
+		self.led_state = leds << 1 | (self.led_state & 1);
+		self.io_chip_write(0x12, self.led_state << 3 | self.last_cs);
 	}
 
 	/// Set the HDD LED on the PCB.
@@ -623,8 +714,8 @@ impl Hardware {
 	/// These are connected to the bit 4 of GPIOA on the MCP23S17.
 	fn set_hdd_led(&mut self, enabled: bool) {
 		// LEDs are active-low.
-		self.debug_leds = (self.debug_leds & 0x1e) | if enabled { 0 } else { 1 };
-		self.io_chip_write(0x12, self.debug_leds << 3 | self.last_cs);
+		self.led_state = (self.led_state & 0x1e) | if enabled { 0 } else { 1 };
+		self.io_chip_write(0x12, self.led_state << 3 | self.last_cs);
 	}
 
 	/// Perform some SPI transaction with a specific bus chip-select pin active.
@@ -633,14 +724,14 @@ impl Hardware {
 	/// SPI bus object), then de-activates the CS pin.
 	fn with_bus_cs<F>(&mut self, cs: u8, func: F)
 	where
-		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>),
+		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>, &mut [u8]),
 	{
 		// Only CS0..CS7 is valid
 		let cs = cs & 0b111;
 
 		if cs != self.last_cs {
 			// Set CS Outputs into decoder/buffer
-			self.io_chip_write(0x12, self.debug_leds << 3 | cs);
+			self.io_chip_write(0x12, self.led_state << 3 | cs);
 			self.last_cs = cs;
 		}
 
@@ -651,7 +742,7 @@ impl Hardware {
 		cortex_m::asm::delay(Self::CS_BUS_SETUP_CPU_CLOCKS);
 
 		// Call function
-		func(&mut self.spi_bus);
+		func(&mut self.spi_bus, &mut self.bmc_buffer);
 
 		// Hold the CS pin a bit longer
 		cortex_m::asm::delay(Self::CS_BUS_HOLD_CPU_CLOCKS);
@@ -671,6 +762,11 @@ impl Hardware {
 		self.pins.noutput_en.set_high().unwrap();
 	}
 
+	/// Configure the MCP23S17 correctly.
+	///
+	/// We have GPIOA as outputs (for the debug LEDs, HDD LED and 3-bit
+	/// chip-select number). We have GPIOB as pulled-up inputs (for the eight
+	/// interrupts).
 	fn init_io_chip(&mut self) {
 		// Undrive CS lines from decoder/buffer
 		self.release_cs_lines();
@@ -689,124 +785,170 @@ impl Hardware {
 
 		// Set GPPUB to = 0xFF => GPIOB is pulled-up
 		self.io_chip_write(Self::MCP23S17_GPPUB, 0xFF);
+
+		// Set up interrupts. We want the line to go low if anything on GPIOB is
+		// low.
+
+		// The INTCON register controls how the associated pin value is compared
+		// for the interrupt-on-change feature. All the bits are set, so the
+		// corresponding I/O pin is compared against the associated bit in the
+		// DEFVAL register.
+		self.io_chip_write(Self::MCP23S17_INTCONB, 0xFF);
+
+		// All the bits are set, so the corresponding pins are enabled for
+		// interrupt-on-change. The DEFVAL and INTCON registers must also be
+		// configured if any pins are enabled for interrupt-on-change.
+		self.io_chip_write(Self::MCP23S17_GPINTENB, 0xFF);
+
+		// The default comparison value is configured in the DEFVAL register. If
+		// enabled (via GPINTEN and INTCON) to compare against the DEFVAL
+		// register, an opposite value on the associated pin will cause an
+		// interrupt to occur.
+		self.io_chip_write(Self::MCP23S17_DEFVALB, 0xFF);
+	}
+
+	/// If the interrupt flag was set by the IRQ handler, read the interrupt
+	/// bits from the MCP23S17.
+	fn io_poll_interrupts(&mut self) {
+		if INTERRUPT_PENDING.load(Ordering::Relaxed) {
+			// The IO chip reports 0 for pending, 1 for not pending.
+			self.interrupts_pending = self.io_read_interrupts() ^ 0xFF;
+			defmt::info!("Interrupts: 0b{:08b}", self.interrupts_pending);
+			// Change the debug LEDs so we can see the interrupts
+			self.irq_count = self.irq_count.wrapping_add(1);
+			self.set_debug_leds((self.irq_count & 0x0F) as u8);
+		}
+	}
+
+	/// Returns the contents of the GPIOB register, i.e. eight bits, where if bit N is low, IRQN is active.
+	fn io_read_interrupts(&mut self) -> u8 {
+		self.io_chip_read(Self::MCP23S17_GPIOB)
+	}
+
+	/// Read from a BMC register.
+	///
+	/// It will perform a couple of retries, and then panic if the BMC did not respond correctly. It
+	/// sets the Chip Select line and controls the IO chip automatically.
+	///
+	/// The number of bytes you want is set by the length of the `buffer` argument.
+	///
+	fn bmc_read_register(&mut self, register: u8, buffer: &mut [u8]) -> Result<(), ()> {
+		const MAX_LATENCY: usize = 128;
+
+		if buffer.len() > self.bmc_buffer.len() {
+			defmt::error!("Asked for too much data ({})", buffer.len());
+			return Err(());
+		}
+		if buffer.len() > usize::from(u8::MAX) {
+			defmt::error!("Asked for too much data ({})", buffer.len());
+			return Err(());
+		}
+		let req =
+			neotron_bmc_protocol::Request::new_read(USE_ALT.get(), register, buffer.len() as u8);
+		let req_bytes = req.as_bytes();
+		for _retries in 0..4 {
+			// Clear the input buffer
+			for byte in self.bmc_buffer.iter_mut() {
+				*byte = 0xFF;
+			}
+			let expected_response_len = buffer.len() + 2;
+			defmt::debug!("req: {=[u8; 4]:02x}", req_bytes);
+			let mut latency = 0;
+			self.with_bus_cs(0, |spi, borrowed_buffer| {
+				// Send the request
+				spi.write(&req_bytes).unwrap();
+				for retry in 0..MAX_LATENCY {
+					cortex_m::asm::delay(Self::BMC_REQUEST_RESPONSE_DELAY_CLOCKS);
+					spi.transfer(&mut borrowed_buffer[0..=0]).unwrap();
+					if neotron_bmc_protocol::ResponseResult::try_from(borrowed_buffer[0]).is_ok() {
+						latency = retry;
+						break;
+					}
+				}
+				// Get the rest of the response now we know it's queued up.
+				spi.transfer(&mut borrowed_buffer[1..expected_response_len])
+					.unwrap();
+			});
+			defmt::debug!(
+				"res: {=[u8]:02x} ({})",
+				self.bmc_buffer[0..expected_response_len],
+				latency
+			);
+			// 8 bytes of data requested, plus one bytes of response code and one byte of CRC
+			let response_portion = &self.bmc_buffer[0..expected_response_len];
+			match neotron_bmc_protocol::Response::from_bytes(response_portion) {
+				Ok(res) => {
+					if res.result == neotron_bmc_protocol::ResponseResult::Ok
+						&& res.data.len() == buffer.len()
+					{
+						buffer.copy_from_slice(res.data);
+						return Ok(());
+					} else {
+						defmt::warn!(
+							"Error reading {} bytes from {}: Error from BMC {:?} {=[u8]:x}",
+							buffer.len(),
+							register,
+							res.result,
+							response_portion
+						);
+						// No point retrying - we heardly them perfectly
+						return Err(());
+					}
+				}
+				Err(e) => {
+					defmt::warn!(
+						"Error reading {} bytes from {}: Decoding Error {:?} {=[u8]:x}",
+						buffer.len(),
+						register,
+						e,
+						response_portion
+					);
+				}
+			}
+			// Wait a bit before we try again
+			cortex_m::asm::delay(Self::BMC_RETRY_CPU_CLOCKS);
+		}
+		panic!("Failed to talk to BMC after several retries.");
 	}
 
 	/// Read the BMC firmware version string.
 	///
 	/// You get 32 bytes of probably UTF-8 data.
 	fn bmc_read_firmware_version(&mut self) -> Result<[u8; 32], ()> {
-		let req = neotron_bmc_protocol::Request::new_read(false, 0x01, 32);
-		let mut buffer = [0xFF; 64];
-		buffer[0..=3].copy_from_slice(&req.as_bytes());
-		self.with_bus_cs(0, |spi| {
-			spi.transfer(&mut buffer).unwrap();
-		});
-		defmt::info!("buffer: {=[u8]:x}", buffer);
-		let mut result = &buffer[..];
-		let mut latency = 0;
-		while !result.is_empty() && ((result[0] == 0xFF) || (result[0] == 0x00)) {
-			latency += 1;
-			result = &result[1..];
-		}
-		defmt::info!("latency: {}", latency);
-		// 32 bytes of data requested, plus one bytes of response code and one byte of CRC
-		if result.len() >= 34 {
-			match neotron_bmc_protocol::Response::from_bytes(&result[0..34]) {
-				Ok(res) => {
-					if res.result == neotron_bmc_protocol::ResponseResult::Ok
-						&& res.data.len() == 32
-					{
-						defmt::info!("Got BMC version {=[u8]:a}", res.data);
-						let mut string_bytes = [0u8; 32];
-						string_bytes.copy_from_slice(res.data);
-						return Ok(string_bytes);
-					} else {
-						defmt::warn!(
-							"Error getting BMC version: Error from BMC {:?} {=[u8]:x}",
-							res.result,
-							res.data
-						);
-					}
-				}
-				Err(e) => {
-					defmt::warn!(
-						"Error getting BMC version: Decoding Error {:?} {=[u8]:x}",
-						e,
-						result
-					);
-				}
-			}
-		}
+		let mut firmware_version = [0u8; 32];
+		self.bmc_read_register(0x01, &mut firmware_version)?;
+		Ok(firmware_version)
+	}
 
-		Err(())
+	/// Is there an interrupt pending on the given slot?
+	fn is_irq_pending_on_slot(&self, slot: u8) -> bool {
+		assert!(slot < 8);
+		(self.interrupts_pending & (1 << slot)) != 0
 	}
 
 	/// Read the BMC PS/2 keyboard FIFO.
 	///
 	/// We ask for 8 bytes of data. We get `1` byte of 'length', then `N` bytes of valid data, and `32 - (N + 1)` bytes of padding.
 	fn bmc_read_ps2_keyboard_fifo(&mut self, out_buffer: &mut [u8; 8]) -> Result<usize, ()> {
-		static COUNTER: AtomicU8 = AtomicU8::new(0);
-		let req = neotron_bmc_protocol::Request::new_read(USE_ALT.get(), 0x40, 8);
-		for _retry in 0..4 {
-			let mut buffer = [0xFF; 32];
-			buffer[0..=3].copy_from_slice(&req.as_bytes());
-			buffer[4] = COUNTER.load(Ordering::Relaxed);
-			COUNTER.store(buffer[4].wrapping_add(1), Ordering::Relaxed);
-			defmt::trace!("out: {=[u8]:02x}", buffer);
-			self.with_bus_cs(0, |spi| {
-				spi.transfer(&mut buffer).unwrap();
-			});
-			defmt::trace!("in : {=[u8]:02x}", buffer);
-			// Skip the first four bytes at least (that's our command, and also
-			// the BMC FIFO length which might have crud in it). Then trip any padding.
-			let mut result = &buffer[4..];
-			let mut latency = 0;
-			while !result.is_empty() && (result[0] == 0xFF || result[0] == 0x00) {
-				latency += 1;
-				result = &result[1..];
-			}
-			defmt::trace!("latency: {}", latency);
-			// 8 bytes of data requested, plus one bytes of response code and one byte of CRC
-			if result.len() >= 10 {
-				match neotron_bmc_protocol::Response::from_bytes(&result[0..10]) {
-					Ok(res) => {
-						if res.result == neotron_bmc_protocol::ResponseResult::Ok
-							&& res.data.len() == 8
-						{
-							if res.data[0] == 0 {
-								defmt::trace!("Got no PS/2 bytes");
-							} else {
-								defmt::debug!("Got PS/2 bytes {=[u8]:x}", res.data);
-							}
-							for (dest, src) in out_buffer.iter_mut().zip(res.data.iter().skip(1)) {
-								*dest = *src;
-							}
-							return Ok(res.data[0] as usize);
-						} else {
-							defmt::warn!(
-								"Error getting keyboard bytes: Error from BMC {:?} {=[u8]:x}",
-								res.result,
-								res.data
-							);
-						}
-					}
-					Err(e) => {
-						defmt::warn!(
-							"Error getting BMC keyboard bytes: Decoding Error {:?} {=[u8]:x}",
-							e,
-							result
-						);
-					}
-				}
-			} else {
-				defmt::warn!("Short packet!?");
-			}
-
-			// Wait a bit before we try again
-			cortex_m::asm::delay(Self::SPI_RETRY_CPU_CLOCKS);
+		// Now is a good time to poll for interrupts.
+		self.io_poll_interrupts();
+		if !self.is_irq_pending_on_slot(0) {
+			// No point asking, the interrupt isn't set.
+			return Ok(0);
 		}
-		// Ran out of retries
-		panic!("KB retry timeout");
+
+		let mut fifo_data = [0u8; 9];
+		self.bmc_read_register(0x40, &mut fifo_data)?;
+		let bytes_in_fifo = fifo_data[0];
+		if bytes_in_fifo == 0 {
+			defmt::trace!("Got no PS/2 bytes");
+		} else {
+			defmt::debug!("Got PS/2 bytes {=[u8]:x}", &fifo_data[..]);
+		}
+		for (dest, src) in out_buffer.iter_mut().zip(fifo_data.iter().skip(1)) {
+			*dest = *src;
+		}
+		return Ok(bytes_in_fifo as usize);
 	}
 }
 
@@ -1121,29 +1263,33 @@ pub extern "C" fn hid_get_event() -> common::Result<common::Option<common::hid::
 			return common::Result::Ok(common::Option::Some(ev));
 		}
 
-		match hw.bmc_read_ps2_keyboard_fifo(&mut buffer) {
-			Ok(n) if n > 0 => {
-				let slice = if n >= 8 { &buffer } else { &buffer[0..n] };
-				defmt::info!("{} bytes in KB FIFO, got: {=[u8]:x}", n, &slice);
-				for b in slice.iter() {
-					match hw.keyboard.add_byte(*b) {
-						Ok(Some(key_event)) => {
-							convert_hid_event(key_event, &mut hw.event_queue);
-						}
-						Ok(None) => {
-							// Need more data
-						}
-						Err(e) => {
-							panic!("Keyboard decode error!");
+		loop {
+			match hw.bmc_read_ps2_keyboard_fifo(&mut buffer) {
+				Ok(n) if n > 0 => {
+					let slice = if n >= 8 { &buffer } else { &buffer[0..n] };
+					defmt::info!("{} bytes in KB FIFO, got: {=[u8]:x}", n, &slice);
+					for b in slice.iter() {
+						match hw.keyboard.add_byte(*b) {
+							Ok(Some(key_event)) => {
+								convert_hid_event(key_event, &mut hw.event_queue);
+							}
+							Ok(None) => {
+								// Need more data
+							}
+							Err(_e) => {
+								defmt::warn!("Keyboard decode error!");
+								hw.keyboard.clear();
+							}
 						}
 					}
 				}
-			}
-			Ok(_) => {
-				// Say nothing - FIFO is empty
-			}
-			Err(e) => {
-				defmt::warn!("Read KB error: {:?}", e);
+				Ok(_) => {
+					// Stop reading, FIFO is empty.
+					break;
+				}
+				Err(e) => {
+					defmt::warn!("Read KB error: {:?}", e);
+				}
 			}
 		}
 
@@ -1364,14 +1510,14 @@ extern "C" fn video_get_palette(index: u8) -> common::Option<common::video::RGBC
 }
 
 /// Update the RGB palette
-extern "C" fn video_set_palette(index: u8, rgb: common::video::RGBColour) {
+extern "C" fn video_set_palette(_index: u8, _rgb: common::video::RGBColour) {
 	// TODO set the palette when we actually have one
 }
 
 /// Update all the RGB palette
 unsafe extern "C" fn video_set_whole_palette(
-	palette: *const common::video::RGBColour,
-	length: usize,
+	_palette: *const common::video::RGBColour,
+	_length: usize,
 ) {
 	// TODO set the palette when we actually have one
 }
@@ -1547,14 +1693,15 @@ pub extern "C" fn block_verify(
 	common::Result::Err(common::Error::Unimplemented)
 }
 
-extern "C" fn block_dev_eject(dev_id: u8) -> common::Result<()> {
+extern "C" fn block_dev_eject(_dev_id: u8) -> common::Result<()> {
 	common::Result::Ok(())
 }
 
 /// Sleep the CPU until the next interrupt.
 extern "C" fn power_idle() {
-	// cortex_m::asm::wfe();
-	// cortex_m::asm::delay(20_000_000);
+	if !INTERRUPT_PENDING.load(Ordering::Relaxed) {
+		cortex_m::asm::wfe();
+	}
 }
 
 /// TODO: Get the monotonic run-time of the system from SysTick.
@@ -1574,6 +1721,33 @@ fn DMA_IRQ_0() {
 	unsafe {
 		vga::irq();
 	}
+}
+
+static IRQ_PIN: Mutex<RefCell<Option<IrqPin>>> = Mutex::new(RefCell::new(None));
+
+/// Called when we get a SIO interrupt on the main bank of GPIO pins.
+///
+/// This should only be when the MCP23S17 has driven our IRQ pin low.
+#[interrupt]
+fn IO_IRQ_BANK0() {
+	// The `#[interrupt]` attribute covertly converts this to `&'static mut
+	// Option<IrqPin>`
+	static mut LOCAL_IRQ_PIN: Option<IrqPin> = None;
+
+	// This is one-time lazy initialisation. We steal the variables given to us
+	// via `IRQ_PIN`.
+	if LOCAL_IRQ_PIN.is_none() {
+		critical_section::with(|cs| {
+			*LOCAL_IRQ_PIN = IRQ_PIN.borrow(cs).take();
+		});
+	}
+	if let Some(pin) = LOCAL_IRQ_PIN {
+		let is_low = pin.is_low().unwrap();
+		INTERRUPT_PENDING.store(is_low, Ordering::Relaxed);
+		pin.clear_interrupt(hal::gpio::Interrupt::EdgeLow);
+		pin.clear_interrupt(hal::gpio::Interrupt::EdgeHigh);
+	}
+	cortex_m::asm::sev();
 }
 
 // -----------------------------------------------------------------------------
