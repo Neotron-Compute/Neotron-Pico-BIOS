@@ -826,33 +826,38 @@ impl Hardware {
 		self.io_chip_read(Self::MCP23S17_GPIOB)
 	}
 
-	/// Read from a BMC register.
+	/// Query a BMC register (read or write).
 	///
 	/// It will perform a couple of retries, and then panic if the BMC did not respond correctly. It
 	/// sets the Chip Select line and controls the IO chip automatically.
 	///
-	/// The number of bytes you want is set by the length of the `buffer` argument.
+	/// The `buffer` argument may contain a mutable buffer for received data.
 	///
-	fn bmc_read_register(&mut self, register: u8, buffer: &mut [u8]) -> Result<(), ()> {
+	fn bmc_query_register(
+		&mut self,
+		req: neotron_bmc_protocol::Request,
+		buffer: Option<&mut [u8]>,
+	) -> Result<(), ()> {
 		const MAX_LATENCY: usize = 128;
 
-		if buffer.len() > self.bmc_buffer.len() {
-			defmt::error!("Asked for too much data ({})", buffer.len());
-			return Err(());
+		if let Some(buffer) = buffer.as_ref() {
+			if buffer.len() > self.bmc_buffer.len() {
+				defmt::error!("Asked for too much data ({})", buffer.len());
+				return Err(());
+			}
+			if buffer.len() > usize::from(u8::MAX) {
+				defmt::error!("Asked for too much data ({})", buffer.len());
+				return Err(());
+			}
 		}
-		if buffer.len() > usize::from(u8::MAX) {
-			defmt::error!("Asked for too much data ({})", buffer.len());
-			return Err(());
-		}
-		let req =
-			neotron_bmc_protocol::Request::new_read(USE_ALT.get(), register, buffer.len() as u8);
+
 		let req_bytes = req.as_bytes();
 		for _retries in 0..4 {
 			// Clear the input buffer
 			for byte in self.bmc_buffer.iter_mut() {
 				*byte = 0xFF;
 			}
-			let expected_response_len = buffer.len() + 2;
+			let expected_response_len = buffer.as_ref().map(|b| b.len()).unwrap_or(0) + 2;
 			defmt::debug!("req: {=[u8; 4]:02x}", req_bytes);
 			let mut latency = 0;
 			self.with_bus_cs(0, |spi, borrowed_buffer| {
@@ -879,16 +884,25 @@ impl Hardware {
 			let response_portion = &self.bmc_buffer[0..expected_response_len];
 			match neotron_bmc_protocol::Response::from_bytes(response_portion) {
 				Ok(res) => {
-					if res.result == neotron_bmc_protocol::ResponseResult::Ok
-						&& res.data.len() == buffer.len()
-					{
-						buffer.copy_from_slice(res.data);
+					if res.result == neotron_bmc_protocol::ResponseResult::Ok {
+						if let Some(buffer) = buffer {
+							if res.data.len() == buffer.len() {
+								buffer.copy_from_slice(res.data);
+							} else {
+								defmt::warn!(
+									"Mismatch between received and expected data: expected {}, got {} bytes - {=[u8]:X}",
+									buffer.len(),
+									res.data.len(),
+									res.data
+								);
+								return Err(());
+							}
+						}
 						return Ok(());
 					} else {
 						defmt::warn!(
-							"Error reading {} bytes from {}: Error from BMC {:?} {=[u8]:x}",
-							buffer.len(),
-							register,
+							"Error executing {:?}: Error from BMC {:?} {=[u8]:x}",
+							req,
 							res.result,
 							response_portion
 						);
@@ -898,9 +912,8 @@ impl Hardware {
 				}
 				Err(e) => {
 					defmt::warn!(
-						"Error reading {} bytes from {}: Decoding Error {:?} {=[u8]:x}",
-						buffer.len(),
-						register,
+						"Error executing {:?}: Decoding Error {:?} {=[u8]:x}",
+						req,
 						e,
 						response_portion
 					);
@@ -926,48 +939,15 @@ impl Hardware {
 			(70, Command::SpeakerDuration, 7),
 		];
 
-		'outer: for (delay, reg, val) in seq {
+		for (delay, reg, val) in seq {
 			if *delay > 0 {
 				self.delay.delay_ms(*delay as u32);
 			}
-			for _attempt in 0..4 {
-				let mut buffer = [0xFF; 32];
-
-				let req =
-					neotron_bmc_protocol::Request::new_short_write(false, (*reg).into(), *val);
-				buffer[0..=3].copy_from_slice(&req.as_bytes());
-				self.with_bus_cs(0, |spi| {
-					spi.transfer(&mut buffer).unwrap();
-				});
-
-				defmt::info!("buffer: {=[u8]:x}", buffer);
-				let mut result = &buffer[..];
-				let mut latency = 0;
-				while !result.is_empty() && ((result[0] == 0xFF) || (result[0] == 0x00)) {
-					latency += 1;
-					result = &result[1..];
-				}
-				defmt::info!("latency: {} res: {=[u8]:x}", latency, result);
-
-				if result.len() >= 2 {
-					let response = neotron_bmc_protocol::Response::from_bytes(&result[0..2]);
-					if let Ok(neotron_bmc_protocol::Response {
-						result: neotron_bmc_protocol::ResponseResult::Ok,
-						..
-					}) = response
-					{
-						// Response was OK
-						continue 'outer;
-					}
-				} else {
-					return Err(());
-				}
-				// Wait a bit before we try again
-				cortex_m::asm::delay(Self::SPI_RETRY_CPU_CLOCKS);
-			}
-			panic!("Speaker retry timeout");
+			self.bmc_query_register(
+				neotron_bmc_protocol::Request::new_short_write(false, (*reg).into(), *val),
+				None,
+			)?;
 		}
-
 		Ok(())
 	}
 
@@ -976,7 +956,14 @@ impl Hardware {
 	/// You get 32 bytes of probably UTF-8 data.
 	fn bmc_read_firmware_version(&mut self) -> Result<[u8; 32], ()> {
 		let mut firmware_version = [0u8; 32];
-		self.bmc_read_register(0x01, &mut firmware_version)?;
+		self.bmc_query_register(
+			neotron_bmc_protocol::Request::new_read(
+				USE_ALT.get(),
+				Command::FirmwareVersion.into(),
+				firmware_version.len() as u8,
+			),
+			Some(&mut firmware_version),
+		)?;
 		Ok(firmware_version)
 	}
 
@@ -998,7 +985,14 @@ impl Hardware {
 		}
 
 		let mut fifo_data = [0u8; 9];
-		self.bmc_read_register(0x40, &mut fifo_data)?;
+		self.bmc_query_register(
+			neotron_bmc_protocol::Request::new_read(
+				USE_ALT.get(),
+				Command::Ps2KbBuffer.into(),
+				fifo_data.len() as u8,
+			),
+			Some(&mut fifo_data),
+		)?;
 		let bytes_in_fifo = fifo_data[0];
 		if bytes_in_fifo == 0 {
 			defmt::trace!("Got no PS/2 bytes");
