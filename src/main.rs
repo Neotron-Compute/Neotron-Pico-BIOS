@@ -715,7 +715,7 @@ impl Hardware {
 	/// These are connected to the bit 4 of GPIOA on the MCP23S17.
 	fn set_hdd_led(&mut self, enabled: bool) {
 		// LEDs are active-low.
-		self.led_state = (self.led_state & 0x1e) | if enabled { 0 } else { 1 };
+		self.led_state = (self.led_state & 0x1e) | u8::from(!enabled);
 		self.io_chip_write(0x12, self.led_state << 3 | self.last_cs);
 	}
 
@@ -1002,7 +1002,7 @@ impl Hardware {
 		for (dest, src) in out_buffer.iter_mut().zip(fifo_data.iter().skip(1)) {
 			*dest = *src;
 		}
-		return Ok(bytes_in_fifo as usize);
+		Ok(bytes_in_fifo as usize)
 	}
 }
 
