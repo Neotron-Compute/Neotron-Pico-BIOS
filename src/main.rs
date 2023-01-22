@@ -826,14 +826,15 @@ impl Hardware {
 		self.io_chip_read(Self::MCP23S17_GPIOB)
 	}
 
-	/// Query a BMC register (read or write).
+	/// Send a request to the BMC (a register read or a register write) and get
+	/// the response.
 	///
-	/// It will perform a couple of retries, and then panic if the BMC did not respond correctly. It
-	/// sets the Chip Select line and controls the IO chip automatically.
+	/// It will perform a couple of retries, and then panic if the BMC did not
+	/// respond correctly. It sets the Chip Select line and controls the IO chip
+	/// automatically.
 	///
 	/// The `buffer` argument may contain a mutable buffer for received data.
-	///
-	fn bmc_query_register(
+	fn bmc_do_request(
 		&mut self,
 		req: neotron_bmc_protocol::Request,
 		buffer: Option<&mut [u8]>,
@@ -943,8 +944,8 @@ impl Hardware {
 			if *delay > 0 {
 				self.delay.delay_ms(*delay as u32);
 			}
-			self.bmc_query_register(
-				neotron_bmc_protocol::Request::new_short_write(false, (*reg).into(), *val),
+			self.bmc_do_request(
+				neotron_bmc_protocol::Request::new_short_write(USE_ALT.get(), (*reg).into(), *val),
 				None,
 			)?;
 		}
@@ -956,7 +957,7 @@ impl Hardware {
 	/// You get 32 bytes of probably UTF-8 data.
 	fn bmc_read_firmware_version(&mut self) -> Result<[u8; 32], ()> {
 		let mut firmware_version = [0u8; 32];
-		self.bmc_query_register(
+		self.bmc_do_request(
 			neotron_bmc_protocol::Request::new_read(
 				USE_ALT.get(),
 				Command::FirmwareVersion.into(),
@@ -985,7 +986,7 @@ impl Hardware {
 		}
 
 		let mut fifo_data = [0u8; 9];
-		self.bmc_query_register(
+		self.bmc_do_request(
 			neotron_bmc_protocol::Request::new_read(
 				USE_ALT.get(),
 				Command::Ps2KbBuffer.into(),
