@@ -693,6 +693,7 @@ pub fn get_num_scan_lines() -> u16 {
 /// # Safety
 ///
 /// Only run this function on Core 1.
+#[link_section = ".data"]
 unsafe extern "C" fn core1_main() -> u32 {
 	CORE1_START_FLAG.store(true, Ordering::Relaxed);
 
@@ -721,6 +722,7 @@ unsafe extern "C" fn core1_main() -> u32 {
 /// # Safety
 ///
 /// Only call this from the DMA IRQ handler.
+#[link_section = ".data"]
 pub unsafe fn irq() {
 	let dma: &mut super::pac::DMA = match DMA_PERIPH.as_mut() {
 		Some(dma) => dma,
@@ -813,6 +815,7 @@ impl RenderEngine {
 		}
 	}
 
+	#[link_section = ".data"]
 	pub fn poll(&mut self) {
 		if DMA_READY.load(Ordering::Relaxed) {
 			DMA_READY.store(false, Ordering::Relaxed);

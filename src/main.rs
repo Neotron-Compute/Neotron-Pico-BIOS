@@ -1776,6 +1776,7 @@ extern "C" fn time_ticks_per_second() -> common::Ticks {
 /// Called when DMA raises IRQ0; i.e. when a DMA transfer to the pixel FIFO or
 /// the timing FIFO has completed.
 #[interrupt]
+#[link_section = ".data"]
 fn DMA_IRQ_0() {
 	unsafe {
 		vga::irq();
