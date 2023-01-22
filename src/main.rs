@@ -1031,7 +1031,9 @@ fn sign_on() {
 		let mut lock = HARDWARE.borrow_ref_mut(cs);
 		let hw = lock.as_mut().unwrap();
 		let ver = hw.bmc_read_firmware_version();
-		hw.play_startup_tune().unwrap();
+		if let Err(e) = hw.play_startup_tune() {
+			writeln!(&tc, "BMC error: {e:?}").unwrap();
+		}
 		ver
 	});
 
