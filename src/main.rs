@@ -83,6 +83,7 @@ use rp_pico::{
 
 // Other Neotron Crates
 use common::MemoryRegion;
+use neotron_bmc_commands::Command;
 use neotron_bmc_protocol::Receivable;
 use neotron_common_bios as common;
 
@@ -714,7 +715,7 @@ impl Hardware {
 	/// These are connected to the bit 4 of GPIOA on the MCP23S17.
 	fn set_hdd_led(&mut self, enabled: bool) {
 		// LEDs are active-low.
-		self.led_state = (self.led_state & 0x1e) | if enabled { 0 } else { 1 };
+		self.led_state = (self.led_state & 0x1e) | u8::from(!enabled);
 		self.io_chip_write(0x12, self.led_state << 3 | self.last_cs);
 	}
 
@@ -825,33 +826,39 @@ impl Hardware {
 		self.io_chip_read(Self::MCP23S17_GPIOB)
 	}
 
-	/// Read from a BMC register.
+	/// Send a request to the BMC (a register read or a register write) and get
+	/// the response.
 	///
-	/// It will perform a couple of retries, and then panic if the BMC did not respond correctly. It
-	/// sets the Chip Select line and controls the IO chip automatically.
+	/// It will perform a couple of retries, and then panic if the BMC did not
+	/// respond correctly. It sets the Chip Select line and controls the IO chip
+	/// automatically.
 	///
-	/// The number of bytes you want is set by the length of the `buffer` argument.
-	///
-	fn bmc_read_register(&mut self, register: u8, buffer: &mut [u8]) -> Result<(), ()> {
+	/// The `buffer` argument may contain a mutable buffer for received data.
+	fn bmc_do_request(
+		&mut self,
+		req: neotron_bmc_protocol::Request,
+		buffer: Option<&mut [u8]>,
+	) -> Result<(), ()> {
 		const MAX_LATENCY: usize = 128;
 
-		if buffer.len() > self.bmc_buffer.len() {
-			defmt::error!("Asked for too much data ({})", buffer.len());
-			return Err(());
+		if let Some(buffer) = buffer.as_ref() {
+			if buffer.len() > self.bmc_buffer.len() {
+				defmt::error!("Asked for too much data ({})", buffer.len());
+				return Err(());
+			}
+			if buffer.len() > usize::from(u8::MAX) {
+				defmt::error!("Asked for too much data ({})", buffer.len());
+				return Err(());
+			}
 		}
-		if buffer.len() > usize::from(u8::MAX) {
-			defmt::error!("Asked for too much data ({})", buffer.len());
-			return Err(());
-		}
-		let req =
-			neotron_bmc_protocol::Request::new_read(USE_ALT.get(), register, buffer.len() as u8);
+
 		let req_bytes = req.as_bytes();
 		for _retries in 0..4 {
 			// Clear the input buffer
 			for byte in self.bmc_buffer.iter_mut() {
 				*byte = 0xFF;
 			}
-			let expected_response_len = buffer.len() + 2;
+			let expected_response_len = buffer.as_ref().map(|b| b.len()).unwrap_or(0) + 2;
 			defmt::debug!("req: {=[u8; 4]:02x}", req_bytes);
 			let mut latency = 0;
 			self.with_bus_cs(0, |spi, borrowed_buffer| {
@@ -878,16 +885,25 @@ impl Hardware {
 			let response_portion = &self.bmc_buffer[0..expected_response_len];
 			match neotron_bmc_protocol::Response::from_bytes(response_portion) {
 				Ok(res) => {
-					if res.result == neotron_bmc_protocol::ResponseResult::Ok
-						&& res.data.len() == buffer.len()
-					{
-						buffer.copy_from_slice(res.data);
+					if res.result == neotron_bmc_protocol::ResponseResult::Ok {
+						if let Some(buffer) = buffer {
+							if res.data.len() == buffer.len() {
+								buffer.copy_from_slice(res.data);
+							} else {
+								defmt::warn!(
+									"Mismatch between received and expected data: expected {}, got {} bytes - {=[u8]:X}",
+									buffer.len(),
+									res.data.len(),
+									res.data
+								);
+								return Err(());
+							}
+						}
 						return Ok(());
 					} else {
 						defmt::warn!(
-							"Error reading {} bytes from {}: Error from BMC {:?} {=[u8]:x}",
-							buffer.len(),
-							register,
+							"Error executing {:?}: Error from BMC {:?} {=[u8]:x}",
+							req,
 							res.result,
 							response_portion
 						);
@@ -897,9 +913,8 @@ impl Hardware {
 				}
 				Err(e) => {
 					defmt::warn!(
-						"Error reading {} bytes from {}: Decoding Error {:?} {=[u8]:x}",
-						buffer.len(),
-						register,
+						"Error executing {:?}: Decoding Error {:?} {=[u8]:x}",
+						req,
 						e,
 						response_portion
 					);
@@ -911,12 +926,45 @@ impl Hardware {
 		panic!("Failed to talk to BMC after several retries.");
 	}
 
+	/// Make the BMC produce a sequence of beeps using the Speaker
+	fn play_startup_tune(&mut self) -> Result<(), ()> {
+		// (delay (ms), command, data)
+		let seq: &[(u16, Command, u8)] = &[
+			(0, Command::SpeakerPeriodLow, 137),
+			(0, Command::SpeakerPeriodHigh, 0),
+			(0, Command::SpeakerDutyCycle, 127),
+			(0, Command::SpeakerDuration, 7),
+			(0, Command::SpeakerPeriodLow, 116),
+			(70, Command::SpeakerDuration, 7),
+			(0, Command::SpeakerPeriodLow, 97),
+			(70, Command::SpeakerDuration, 7),
+		];
+
+		for (delay, reg, val) in seq {
+			if *delay > 0 {
+				self.delay.delay_ms(*delay as u32);
+			}
+			self.bmc_do_request(
+				neotron_bmc_protocol::Request::new_short_write(USE_ALT.get(), (*reg).into(), *val),
+				None,
+			)?;
+		}
+		Ok(())
+	}
+
 	/// Read the BMC firmware version string.
 	///
 	/// You get 32 bytes of probably UTF-8 data.
 	fn bmc_read_firmware_version(&mut self) -> Result<[u8; 32], ()> {
 		let mut firmware_version = [0u8; 32];
-		self.bmc_read_register(0x01, &mut firmware_version)?;
+		self.bmc_do_request(
+			neotron_bmc_protocol::Request::new_read(
+				USE_ALT.get(),
+				Command::FirmwareVersion.into(),
+				firmware_version.len() as u8,
+			),
+			Some(&mut firmware_version),
+		)?;
 		Ok(firmware_version)
 	}
 
@@ -938,7 +986,14 @@ impl Hardware {
 		}
 
 		let mut fifo_data = [0u8; 9];
-		self.bmc_read_register(0x40, &mut fifo_data)?;
+		self.bmc_do_request(
+			neotron_bmc_protocol::Request::new_read(
+				USE_ALT.get(),
+				Command::Ps2KbBuffer.into(),
+				fifo_data.len() as u8,
+			),
+			Some(&mut fifo_data),
+		)?;
 		let bytes_in_fifo = fifo_data[0];
 		if bytes_in_fifo == 0 {
 			defmt::trace!("Got no PS/2 bytes");
@@ -948,15 +1003,15 @@ impl Hardware {
 		for (dest, src) in out_buffer.iter_mut().zip(fifo_data.iter().skip(1)) {
 			*dest = *src;
 		}
-		return Ok(bytes_in_fifo as usize);
+		Ok(bytes_in_fifo as usize)
 	}
 }
 
 fn sign_on() {
 	static LICENCE_TEXT: &str = "\
-        Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2022\n\
-        \n\
-        This program is free software under GPL v3 (or later)\n";
+		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2022\n\
+		\n\
+		This program is free software under GPL v3 (or later)\n";
 
 	// Create a new temporary console for some boot-up messages
 	let tc = vga::TextConsole::new();
@@ -975,13 +1030,17 @@ fn sign_on() {
 	let bmc_ver = critical_section::with(|cs| {
 		let mut lock = HARDWARE.borrow_ref_mut(cs);
 		let hw = lock.as_mut().unwrap();
-		hw.bmc_read_firmware_version()
+		let ver = hw.bmc_read_firmware_version();
+		if let Err(e) = hw.play_startup_tune() {
+			writeln!(&tc, "BMC error: {e:?}").unwrap();
+		}
+		ver
 	});
 
 	match bmc_ver {
 		Ok(string_bytes) => match core::str::from_utf8(&string_bytes) {
 			Ok(s) => {
-				writeln!(&tc, "BMC Version: {}", s).unwrap();
+				writeln!(&tc, "BMC Version: {s}").unwrap();
 			}
 			Err(_e) => {
 				writeln!(&tc, "BMC Version: Unknown").unwrap();

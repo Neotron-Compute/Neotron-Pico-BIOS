@@ -32,8 +32,10 @@ pio = "0.2.1"
 pio-proc = "0.2"
 # Hardware locks for sharing data with interrupts
 critical-section = "1.0"
+# Commands for talking to a Neotron BMC. The tag is for the repo as a whole, of which the commands crate is a small part.
+neotron-bmc-commands = { version = "0.1.0", git = "https://github.com/neotron-compute/neotron-bmc", tag="v0.5.2" }
 # Protocol for talking to a Neotron BMC. The tag is for the repo as a whole, of which the protocol crate is a small part.
-neotron-bmc-protocol = { version = "0.1.0", git = "https://github.com/neotron-compute/neotron-bmc", tag="v0.4.0" }
+neotron-bmc-protocol = { version = "0.1.0", git = "https://github.com/neotron-compute/neotron-bmc", tag="v0.5.2", features = ["defmt"] }
 # Time and frequency related functions
 fugit = "0.3"
 # PS/2 scancode decoding
