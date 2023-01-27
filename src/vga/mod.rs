@@ -707,10 +707,33 @@ unsafe extern "C" fn core1_main() -> u32 {
 
 	let mut video = RenderEngine::new();
 
+	// The LED pin was called `_pico_led` over in the `Hardware::build`
+	// function that ran on Core 1. Rather than try and move the pin over to
+	// this core, we just unsafely poke the GPIO registers to set/clear the
+	// relevant pin.
+	let gpio_out_set = 0xd000_0014 as *mut u32;
+	let gpio_out_clr = 0xd000_0018 as *mut u32;
+
 	loop {
+		// Wait for a free DMA buffer
+		while !DMA_READY.load(Ordering::Relaxed) {
+			cortex_m::asm::wfe();
+		}
+		DMA_READY.store(false, Ordering::Relaxed);
+
+		unsafe {
+			// Turn on LED
+			gpio_out_set.write(1 << 25);
+		}
+
 		// This function currently consumes about 70% CPU (or rather, 90% CPU
 		// on each of visible lines, and 0% CPU on the other lines)
-		video.poll();
+		video.draw_next_line();
+
+		unsafe {
+			// Turn off LED
+			gpio_out_clr.write(1 << 25);
+		}
 	}
 }
 
@@ -816,25 +839,7 @@ impl RenderEngine {
 	}
 
 	#[link_section = ".data"]
-	pub fn poll(&mut self) {
-		// The LED pin was called `_pico_led` over in the `Hardware::build`
-		// function that ran on Core 1. Rather than try and move the pin over to
-		// this core, we just unsafely poke the GPIO registers to set/clear the
-		// relevant pin.
-		let gpio_out_set = 0xd000_0014 as *mut u32;
-		let gpio_out_clr = 0xd000_0018 as *mut u32;
-
-		// Wait for a free DMA buffer
-		while !DMA_READY.load(Ordering::Relaxed) {
-			cortex_m::asm::wfe();
-		}
-		DMA_READY.store(false, Ordering::Relaxed);
-
-		unsafe {
-			// Turn on LED
-			gpio_out_set.write(1 << 25);
-		}
-
+	pub fn draw_next_line(&mut self) {
 		let current_line_num = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
 		if current_line_num == 0 {
 			trace!("Frame {}", self.frame_count);
@@ -917,11 +922,6 @@ impl RenderEngine {
 				px_idx += 4;
 			}
 		} // if text_row < num_rows
-
-		unsafe {
-			// Turn off LED
-			gpio_out_clr.write(1 << 25);
-		}
 	}
 }
 
