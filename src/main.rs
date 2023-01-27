@@ -1186,10 +1186,7 @@ pub extern "C" fn configuration_set(_buffer: common::ApiByteSlice) -> common::Re
 
 /// Does this Neotron BIOS support this video mode?
 pub extern "C" fn video_is_valid_mode(mode: common::video::Mode) -> bool {
-	mode == common::video::Mode::new(
-		common::video::Timing::T640x480,
-		common::video::Format::Text8x16,
-	)
+	vga::test_video_mode(mode)
 }
 
 /// Switch to a new video mode.

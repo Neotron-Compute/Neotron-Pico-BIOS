@@ -40,7 +40,7 @@ mod font8;
 // Imports
 // -----------------------------------------------------------------------------
 
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, AtomicU8, Ordering};
 use defmt::{debug, trace};
 use rp_pico::hal::pio::PIOExt;
 
@@ -59,6 +59,12 @@ struct RenderEngine {
 	///
 	/// You can adjust this table to convert text to different colours.
 	lookup: [RGBPair; 4],
+	/// The current video mode
+	current_video_mode: crate::common::video::Mode,
+	/// How many rows of text are we showing right now
+	num_text_rows: usize,
+	/// How many columns of text are we showing right now
+	num_text_cols: usize,
 }
 
 /// A font
@@ -182,27 +188,41 @@ pub const MAX_TEXT_COLS: usize = MAX_NUM_PIXELS_PER_LINE / 8;
 /// The highest number of rows in any text mode.
 pub const MAX_TEXT_ROWS: usize = MAX_NUM_LINES / 8;
 
-/// Current number of visible columns.
-///
-/// Must be `<= MAX_TEXT_COLS`
-pub static NUM_TEXT_COLS: AtomicUsize = AtomicUsize::new(80);
-
-/// Current number of visible rows.
-///
-/// Must be `<= MAX_TEXT_ROWS`
-pub static NUM_TEXT_ROWS: AtomicUsize = AtomicUsize::new(25);
-
 /// Used to signal when Core 1 has started
 static CORE1_START_FLAG: AtomicBool = AtomicBool::new(false);
 
 /// Stores our timing data which we DMA into the timing PIO State Machine
 static mut TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x400();
 
-/// Stores which mode we are in
-static mut VIDEO_MODE: crate::common::video::Mode = crate::common::video::Mode::new(
-	crate::common::video::Timing::T640x480,
+/// Stores our current video mode, or the mode we change into on the next frame.
+static VIDEO_MODE: AtomicModeWrapper = AtomicModeWrapper::new(crate::common::video::Mode::new(
+	crate::common::video::Timing::T640x400,
 	crate::common::video::Format::Text8x16,
-);
+));
+
+struct AtomicModeWrapper {
+	value: AtomicU8,
+}
+
+impl AtomicModeWrapper {
+	const fn new(mode: crate::common::video::Mode) -> AtomicModeWrapper {
+		AtomicModeWrapper {
+			value: AtomicU8::new(mode.as_u8()),
+		}
+	}
+
+	/// Set the new video mode.
+	fn set_mode(&self, mode: crate::common::video::Mode) {
+		self.value.store(mode.as_u8(), Ordering::SeqCst);
+	}
+
+	/// Get the current video mode.
+	fn get_mode(&self) -> crate::common::video::Mode {
+		let value = self.value.load(Ordering::SeqCst);
+		// Safety: the 'set_mode' function ensure this is always valid.
+		unsafe { crate::common::video::Mode::from_u8(value) }
+	}
+}
 
 /// Tracks which scan-line we are currently on (for timing purposes => it goes 0..`TIMING_BUFFER.back_porch_ends_at`)
 static CURRENT_TIMING_LINE: AtomicU16 = AtomicU16::new(0);
@@ -244,7 +264,7 @@ static mut PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer {
 
 /// This is our text buffer.
 ///
-/// This is arranged as `NUM_TEXT_ROWS` rows of `NUM_TEXT_COLS` columns. Each
+/// This is arranged as `MAX_TEXT_ROWS` rows of `MAX_TEXT_COLS` columns. Each
 /// item is an index into `font16::FONT_DATA` plus an 8-bit attribute.
 ///
 /// Written to by Core 0, and read from by `RenderEngine` running on Core 1.
@@ -626,13 +646,22 @@ fn multicore_launch_core1_with_stack(
 
 /// Gets the current video mode
 pub fn get_video_mode() -> crate::common::video::Mode {
-	unsafe { VIDEO_MODE }
+	VIDEO_MODE.get_mode()
 }
 
 /// Sets the current video mode
 pub fn set_video_mode(mode: crate::common::video::Mode) -> bool {
-	cortex_m::interrupt::disable();
-	let mode_ok = match (
+	if test_video_mode(mode) {
+		VIDEO_MODE.set_mode(mode);
+		true
+	} else {
+		false
+	}
+}
+
+/// Sets the current video mode
+pub fn test_video_mode(mode: crate::common::video::Mode) -> bool {
+	match (
 		mode.timing(),
 		mode.format(),
 		mode.is_horiz_2x(),
@@ -644,10 +673,6 @@ pub fn set_video_mode(mode: crate::common::video::Mode) -> bool {
 			false,
 			false,
 		) => {
-			unsafe {
-				VIDEO_MODE = mode;
-				TIMING_BUFFER = TimingBuffer::make_640x480();
-			}
 			true
 		}
 		(
@@ -656,22 +681,10 @@ pub fn set_video_mode(mode: crate::common::video::Mode) -> bool {
 			false,
 			false,
 		) => {
-			unsafe {
-				VIDEO_MODE = mode;
-				TIMING_BUFFER = TimingBuffer::make_640x400();
-			}
 			true
 		}
 		_ => false,
-	};
-	if mode_ok {
-		NUM_TEXT_COLS.store(mode.text_width().unwrap_or(0) as usize, Ordering::SeqCst);
-		NUM_TEXT_ROWS.store(mode.text_height().unwrap_or(0) as usize, Ordering::SeqCst);
 	}
-	unsafe {
-		cortex_m::interrupt::enable();
-	}
-	mode_ok
 }
 
 /// Get the current scan line.
@@ -697,14 +710,6 @@ pub fn get_num_scan_lines() -> u16 {
 unsafe extern "C" fn core1_main() -> u32 {
 	CORE1_START_FLAG.store(true, Ordering::Relaxed);
 
-	// Enable the interrupts (DMA_PERIPH has to be set first by Core 0)
-	cortex_m::interrupt::enable();
-	// We are on Core 1, so these interrupts will run on Core 1
-	crate::pac::NVIC::unpend(crate::pac::Interrupt::DMA_IRQ_0);
-	crate::pac::NVIC::unmask(crate::pac::Interrupt::DMA_IRQ_0);
-
-	debug!("IRQs enabled");
-
 	let mut video = RenderEngine::new();
 
 	// The LED pin was called `_pico_led` over in the `Hardware::build`
@@ -714,25 +719,35 @@ unsafe extern "C" fn core1_main() -> u32 {
 	let gpio_out_set = 0xd000_0014 as *mut u32;
 	let gpio_out_clr = 0xd000_0018 as *mut u32;
 
+	// Enable the interrupts (DMA_PERIPH has to be set first by Core 0)
+	cortex_m::interrupt::enable();
+	// We are on Core 1, so these interrupts will run on Core 1
+	crate::pac::NVIC::unpend(crate::pac::Interrupt::DMA_IRQ_0);
+	crate::pac::NVIC::unmask(crate::pac::Interrupt::DMA_IRQ_0);
+	
 	loop {
-		// Wait for a free DMA buffer
-		while !DMA_READY.load(Ordering::Relaxed) {
-			cortex_m::asm::wfe();
-		}
-		DMA_READY.store(false, Ordering::Relaxed);
+		video.frame_start();
 
-		unsafe {
-			// Turn on LED
-			gpio_out_set.write(1 << 25);
-		}
-
-		// This function currently consumes about 70% CPU (or rather, 90% CPU
-		// on each of visible lines, and 0% CPU on the other lines)
-		video.draw_next_line();
-
-		unsafe {
-			// Turn off LED
-			gpio_out_clr.write(1 << 25);
+		for line in 0..video.num_lines() {
+			// Wait for a free DMA buffer
+			while !DMA_READY.load(Ordering::Relaxed) {
+				cortex_m::asm::wfe();
+			}
+			DMA_READY.store(false, Ordering::Relaxed);
+	
+			unsafe {
+				// Turn on LED
+				gpio_out_set.write(1 << 25);
+			}
+	
+			// This function currently consumes about 70% CPU (or rather, 90% CPU
+			// on each of visible lines, and 0% CPU on the other lines)
+			video.draw_next_line(line);
+	
+			unsafe {
+				// Turn off LED
+				gpio_out_clr.write(1 << 25);
+			}
 		}
 	}
 }
@@ -835,17 +850,48 @@ impl RenderEngine {
 				RGBPair::from_pixels(colours::YELLOW, colours::BLUE),
 				RGBPair::from_pixels(colours::YELLOW, colours::YELLOW),
 			],
+			// Should match the default value of TIMING_BUFFER and VIDEO_MODE
+			current_video_mode: crate::common::video::Mode::new(
+				crate::common::video::Timing::T640x400,
+				crate::common::video::Format::Text8x16,
+			),
+			// Should match the mode above
+			num_text_cols: 80,
+			num_text_rows: 25,
 		}
 	}
 
-	#[link_section = ".data"]
-	pub fn draw_next_line(&mut self) {
-		let current_line_num = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
-		if current_line_num == 0 {
-			trace!("Frame {}", self.frame_count);
-			self.frame_count += 1;
-		}
+	/// Do the start-of-frame setup
+	fn frame_start(&mut self) {
+		trace!("Frame {}", self.frame_count);
+		self.frame_count += 1;
 
+		// Update video mode only on first line of video
+		if VIDEO_MODE.get_mode() != self.current_video_mode {
+			self.current_video_mode = VIDEO_MODE.get_mode();
+			match self.current_video_mode.timing() {
+				crate::common::video::Timing::T640x400 => unsafe {
+					TIMING_BUFFER = TimingBuffer::make_640x400();
+				},
+				crate::common::video::Timing::T640x480 => unsafe {
+					TIMING_BUFFER = TimingBuffer::make_640x480();
+				},
+				crate::common::video::Timing::T800x600 => {
+					panic!("Can't do 800x600");
+				}
+			}
+			self.num_text_cols = self.current_video_mode.text_width().unwrap_or(0) as usize; 
+			self.num_text_rows = self.current_video_mode.text_height().unwrap_or(0) as usize; 
+		}
+	}
+
+	/// Get the number of visible lines on screen
+	fn num_lines(&self) -> u16 {
+		self.current_video_mode.vertical_lines()
+	}
+
+	#[link_section = ".data"]
+	pub fn draw_next_line(&mut self, current_line_num: u16) {
 		// new line - pick a buffer to draw into (not the one that is currently rendering!)
 		let scan_line_buffer = unsafe {
 			if (current_line_num & 1) == 0 {
@@ -855,7 +901,7 @@ impl RenderEngine {
 			}
 		};
 
-		let font = match unsafe { VIDEO_MODE.format() } {
+		let font = match self.current_video_mode.format() {
 			crate::common::video::Format::Text8x16 => &font16::FONT,
 			crate::common::video::Format::Text8x8 => &font8::FONT,
 			_ => {
@@ -863,14 +909,11 @@ impl RenderEngine {
 			}
 		};
 
-		let num_rows = NUM_TEXT_ROWS.load(Ordering::Relaxed);
-		let num_cols = NUM_TEXT_COLS.load(Ordering::Relaxed);
-
 		// Convert our position in scan-lines to a text row, and a line within each glyph on that row
 		let text_row = current_line_num as usize / font.height;
 		let font_row = current_line_num as usize % font.height;
 
-		if text_row < num_rows {
+		if text_row < self.num_text_rows {
 			// Note (unsafe): We could stash the char array inside `self`
 			// but at some point we are going to need one CPU rendering
 			// the text, and the other CPU running code and writing to
@@ -879,7 +922,7 @@ impl RenderEngine {
 			// state. At least our platform is fixed, so we can simply
 			// test if it works, for some given version of the Rust compiler.
 			let row_slice =
-				unsafe { &GLYPH_ATTR_ARRAY[(text_row * num_cols)..((text_row + 1) * num_cols)] };
+				unsafe { &GLYPH_ATTR_ARRAY[(text_row * self.num_text_cols)..((text_row + 1) * self.num_text_cols)] };
 			// Every font look-up we are about to do for this row will
 			// involve offsetting by the row within each glyph. As this
 			// is the same for every glyph on this row, we calculate a
@@ -976,10 +1019,13 @@ impl TextConsole {
 	///
 	/// If a value is out of bounds, the cursor is not moved in that axis.
 	pub fn move_to(&self, row: u16, col: u16) {
-		if (row as usize) < NUM_TEXT_ROWS.load(Ordering::Relaxed) {
+		let mode = VIDEO_MODE.get_mode();
+		let num_rows = mode.text_height().unwrap_or(0);
+		let num_cols = mode.text_width().unwrap_or(0);
+		if row < num_rows {
 			self.current_row.store(row, Ordering::Relaxed);
 		}
-		if (col as usize) < NUM_TEXT_COLS.load(Ordering::Relaxed) {
+		if col < num_cols {
 			self.current_col.store(col, Ordering::Relaxed);
 		}
 	}
@@ -1131,8 +1177,9 @@ impl TextConsole {
 	///
 	/// The character is relative to the current font.
 	fn write_at(&self, glyph: Glyph, buffer: *mut GlyphAttr, row: &mut u16, col: &mut u16) {
-		let num_rows = NUM_TEXT_ROWS.load(Ordering::Relaxed);
-		let num_cols = NUM_TEXT_COLS.load(Ordering::Relaxed);
+		let mode = VIDEO_MODE.get_mode();
+		let num_rows = mode.text_height().unwrap_or(0) as usize;
+		let num_cols = mode.text_width().unwrap_or(0) as usize;
 
 		if glyph.0 == b'\r' {
 			*col = 0;
