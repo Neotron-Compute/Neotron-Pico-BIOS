@@ -32,10 +32,7 @@
 //! SUCH DAMAGE.
 
 /// An 8x16 font
-pub static FONT: super::Font = super::Font {
-	height: 8,
-	data: &DATA,
-};
+pub static FONT: super::Font = super::Font { data: &DATA };
 
 /// Our font data - arranged as 256 glyphs of 1 byte/row x 8 row/glyph.
 #[link_section = ".data"]

@@ -42,7 +42,7 @@ mod font8;
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, AtomicU8, Ordering};
 use defmt::{debug, trace};
-use rp_pico::hal::pio::PIOExt;
+use rp_pico::{hal::pio::PIOExt, pac::interrupt};
 
 // -----------------------------------------------------------------------------
 // Types
@@ -69,7 +69,6 @@ struct RenderEngine {
 
 /// A font
 pub struct Font<'a> {
-	height: usize,
 	data: &'a [u8],
 }
 
@@ -162,6 +161,11 @@ pub struct Attr(u8);
 #[derive(Copy, Clone, PartialEq, Eq, Default)]
 pub struct GlyphAttr(u16);
 
+/// Holds a video mode, but as an atomic value suitable for use in a `static`.
+struct AtomicModeWrapper {
+	value: AtomicU8,
+}
+
 // -----------------------------------------------------------------------------
 // Static and Const Data
 // -----------------------------------------------------------------------------
@@ -195,46 +199,26 @@ static CORE1_START_FLAG: AtomicBool = AtomicBool::new(false);
 static mut TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x400();
 
 /// Stores our current video mode, or the mode we change into on the next frame.
+///
+/// We boot in 80x50 mode.
 static VIDEO_MODE: AtomicModeWrapper = AtomicModeWrapper::new(crate::common::video::Mode::new(
 	crate::common::video::Timing::T640x400,
 	crate::common::video::Format::Text8x16,
 ));
 
-struct AtomicModeWrapper {
-	value: AtomicU8,
-}
-
-impl AtomicModeWrapper {
-	const fn new(mode: crate::common::video::Mode) -> AtomicModeWrapper {
-		AtomicModeWrapper {
-			value: AtomicU8::new(mode.as_u8()),
-		}
-	}
-
-	/// Set the new video mode.
-	fn set_mode(&self, mode: crate::common::video::Mode) {
-		self.value.store(mode.as_u8(), Ordering::SeqCst);
-	}
-
-	/// Get the current video mode.
-	fn get_mode(&self) -> crate::common::video::Mode {
-		let value = self.value.load(Ordering::SeqCst);
-		// Safety: the 'set_mode' function ensure this is always valid.
-		unsafe { crate::common::video::Mode::from_u8(value) }
-	}
-}
-
 /// Tracks which scan-line we are currently on (for timing purposes => it goes 0..`TIMING_BUFFER.back_porch_ends_at`)
+///
+/// Set by the PIO IRQ.
 static CURRENT_TIMING_LINE: AtomicU16 = AtomicU16::new(0);
 
-/// Tracks which scan-line we are currently on (for pixel purposes => it goes 0..NUM_LINES)
+/// Tracks which scan-line we are currently on (for pixel purposes => it goes
+/// 1..NUM_LINES-1, and is 0 during the vertical blanking interval).
+///
+/// Set by the PIO IRQ.
 static CURRENT_DISPLAY_LINE: AtomicU16 = AtomicU16::new(0);
 
 /// Set to `true` when DMA of previous line is complete and next line is scheduled.
 static DMA_READY: AtomicBool = AtomicBool::new(false);
-
-/// Somewhere to stash the DMA controller object, so the IRQ can find it
-static mut DMA_PERIPH: Option<super::pac::DMA> = None;
 
 /// DMA channel for the timing FIFO
 const TIMING_DMA_CHAN: usize = 0;
@@ -306,6 +290,522 @@ pub mod colours {
 	pub const LIGHT_GRAY: super::RGBColour = super::RGBColour::from_24bit(0xA0, 0xA0, 0xA0);
 	pub const WHITE: super::RGBColour = super::RGBColour::from_24bit(0xF0, 0xF0, 0xF0);
 }
+
+/// Holds the 256-entry palette for indexed colour modes.
+static mut VIDEO_PALETTE: [RGBColour; 256] = [
+	// Index 000: 0x000 (Black)
+	RGBColour::from_12bit(0x0, 0x0, 0x0),
+	// Index 001: 0x800 (Dark Red)
+	RGBColour::from_12bit(0x8, 0x0, 0x0),
+	// Index 002: 0x080 (Dark Green)
+	RGBColour::from_12bit(0x0, 0x8, 0x0),
+	// Index 003: 0x880 (Orange)
+	RGBColour::from_12bit(0x8, 0x8, 0x0),
+	// Index 004: 0x008 (Blue)
+	RGBColour::from_12bit(0x0, 0x0, 0x8),
+	// Index 005: 0x808 (Dark Magenta)
+	RGBColour::from_12bit(0x8, 0x0, 0x8),
+	// Index 006: 0x088 (Dark Cyan)
+	RGBColour::from_12bit(0x0, 0x8, 0x8),
+	// Index 007: 0xcc0 (Yellow)
+	RGBColour::from_12bit(0xc, 0xc, 0x0),
+	// Index 008: 0x888 (Grey)
+	RGBColour::from_12bit(0x8, 0x8, 0x8),
+	// Index 009: 0xf00 (Bright Red)
+	RGBColour::from_12bit(0xf, 0x0, 0x0),
+	// Index 010: 0x0f0 (Bright Green)
+	RGBColour::from_12bit(0x0, 0xf, 0x0),
+	// Index 011: 0xff0 (Bright Yellow)
+	RGBColour::from_12bit(0xf, 0xf, 0x0),
+	// Index 012: 0x00f (Bright Blue)
+	RGBColour::from_12bit(0x0, 0x0, 0xf),
+	// Index 013: 0xf0f (Bright Magenta)
+	RGBColour::from_12bit(0xf, 0x0, 0xf),
+	// Index 014: 0x0ff (Bright Cyan)
+	RGBColour::from_12bit(0x0, 0xf, 0xf),
+	// Index 015: 0xfff (White)
+	RGBColour::from_12bit(0xf, 0xf, 0xf),
+	// Index 016: 0x003
+	RGBColour::from_12bit(0x0, 0x0, 0x3),
+	// Index 017: 0x006
+	RGBColour::from_12bit(0x0, 0x0, 0x6),
+	// Index 018: 0x00c
+	RGBColour::from_12bit(0x0, 0x0, 0xc),
+	// Index 019: 0x020
+	RGBColour::from_12bit(0x0, 0x2, 0x0),
+	// Index 020: 0x023
+	RGBColour::from_12bit(0x0, 0x2, 0x3),
+	// Index 021: 0x026
+	RGBColour::from_12bit(0x0, 0x2, 0x6),
+	// Index 022: 0x028
+	RGBColour::from_12bit(0x0, 0x2, 0x8),
+	// Index 023: 0x02c
+	RGBColour::from_12bit(0x0, 0x2, 0xc),
+	// Index 024: 0x02f
+	RGBColour::from_12bit(0x0, 0x2, 0xf),
+	// Index 025: 0x040
+	RGBColour::from_12bit(0x0, 0x4, 0x0),
+	// Index 026: 0x043
+	RGBColour::from_12bit(0x0, 0x4, 0x3),
+	// Index 027: 0x046
+	RGBColour::from_12bit(0x0, 0x4, 0x6),
+	// Index 028: 0x048
+	RGBColour::from_12bit(0x0, 0x4, 0x8),
+	// Index 029: 0x04c
+	RGBColour::from_12bit(0x0, 0x4, 0xc),
+	// Index 030: 0x04f
+	RGBColour::from_12bit(0x0, 0x4, 0xf),
+	// Index 031: 0x083
+	RGBColour::from_12bit(0x0, 0x8, 0x3),
+	// Index 032: 0x086
+	RGBColour::from_12bit(0x0, 0x8, 0x6),
+	// Index 033: 0x08c
+	RGBColour::from_12bit(0x0, 0x8, 0xc),
+	// Index 034: 0x08f
+	RGBColour::from_12bit(0x0, 0x8, 0xf),
+	// Index 035: 0x0a0
+	RGBColour::from_12bit(0x0, 0xa, 0x0),
+	// Index 036: 0x0a3
+	RGBColour::from_12bit(0x0, 0xa, 0x3),
+	// Index 037: 0x0a6
+	RGBColour::from_12bit(0x0, 0xa, 0x6),
+	// Index 038: 0x0a8
+	RGBColour::from_12bit(0x0, 0xa, 0x8),
+	// Index 039: 0x0ac
+	RGBColour::from_12bit(0x0, 0xa, 0xc),
+	// Index 040: 0x0af
+	RGBColour::from_12bit(0x0, 0xa, 0xf),
+	// Index 041: 0x0e0
+	RGBColour::from_12bit(0x0, 0xe, 0x0),
+	// Index 042: 0x0e3
+	RGBColour::from_12bit(0x0, 0xe, 0x3),
+	// Index 043: 0x0e6
+	RGBColour::from_12bit(0x0, 0xe, 0x6),
+	// Index 044: 0x0e8
+	RGBColour::from_12bit(0x0, 0xe, 0x8),
+	// Index 045: 0x0ec
+	RGBColour::from_12bit(0x0, 0xe, 0xc),
+	// Index 046: 0x0ef
+	RGBColour::from_12bit(0x0, 0xe, 0xf),
+	// Index 047: 0x0f3
+	RGBColour::from_12bit(0x0, 0xf, 0x3),
+	// Index 048: 0x0f6
+	RGBColour::from_12bit(0x0, 0xf, 0x6),
+	// Index 049: 0x0f8
+	RGBColour::from_12bit(0x0, 0xf, 0x8),
+	// Index 050: 0x0fc
+	RGBColour::from_12bit(0x0, 0xf, 0xc),
+	// Index 051: 0x300
+	RGBColour::from_12bit(0x3, 0x0, 0x0),
+	// Index 052: 0x303
+	RGBColour::from_12bit(0x3, 0x0, 0x3),
+	// Index 053: 0x306
+	RGBColour::from_12bit(0x3, 0x0, 0x6),
+	// Index 054: 0x308
+	RGBColour::from_12bit(0x3, 0x0, 0x8),
+	// Index 055: 0x30c
+	RGBColour::from_12bit(0x3, 0x0, 0xc),
+	// Index 056: 0x30f
+	RGBColour::from_12bit(0x3, 0x0, 0xf),
+	// Index 057: 0x320
+	RGBColour::from_12bit(0x3, 0x2, 0x0),
+	// Index 058: 0x323
+	RGBColour::from_12bit(0x3, 0x2, 0x3),
+	// Index 059: 0x326
+	RGBColour::from_12bit(0x3, 0x2, 0x6),
+	// Index 060: 0x328
+	RGBColour::from_12bit(0x3, 0x2, 0x8),
+	// Index 061: 0x32c
+	RGBColour::from_12bit(0x3, 0x2, 0xc),
+	// Index 062: 0x32f
+	RGBColour::from_12bit(0x3, 0x2, 0xf),
+	// Index 063: 0x340
+	RGBColour::from_12bit(0x3, 0x4, 0x0),
+	// Index 064: 0x343
+	RGBColour::from_12bit(0x3, 0x4, 0x3),
+	// Index 065: 0x346
+	RGBColour::from_12bit(0x3, 0x4, 0x6),
+	// Index 066: 0x348
+	RGBColour::from_12bit(0x3, 0x4, 0x8),
+	// Index 067: 0x34c
+	RGBColour::from_12bit(0x3, 0x4, 0xc),
+	// Index 068: 0x34f
+	RGBColour::from_12bit(0x3, 0x4, 0xf),
+	// Index 069: 0x380
+	RGBColour::from_12bit(0x3, 0x8, 0x0),
+	// Index 070: 0x383
+	RGBColour::from_12bit(0x3, 0x8, 0x3),
+	// Index 071: 0x386
+	RGBColour::from_12bit(0x3, 0x8, 0x6),
+	// Index 072: 0x388
+	RGBColour::from_12bit(0x3, 0x8, 0x8),
+	// Index 073: 0x38c
+	RGBColour::from_12bit(0x3, 0x8, 0xc),
+	// Index 074: 0x38f
+	RGBColour::from_12bit(0x3, 0x8, 0xf),
+	// Index 075: 0x3a0
+	RGBColour::from_12bit(0x3, 0xa, 0x0),
+	// Index 076: 0x3a3
+	RGBColour::from_12bit(0x3, 0xa, 0x3),
+	// Index 077: 0x3a6
+	RGBColour::from_12bit(0x3, 0xa, 0x6),
+	// Index 078: 0x3a8
+	RGBColour::from_12bit(0x3, 0xa, 0x8),
+	// Index 079: 0x3ac
+	RGBColour::from_12bit(0x3, 0xa, 0xc),
+	// Index 080: 0x3af
+	RGBColour::from_12bit(0x3, 0xa, 0xf),
+	// Index 081: 0x3e0
+	RGBColour::from_12bit(0x3, 0xe, 0x0),
+	// Index 082: 0x3e3
+	RGBColour::from_12bit(0x3, 0xe, 0x3),
+	// Index 083: 0x3e6
+	RGBColour::from_12bit(0x3, 0xe, 0x6),
+	// Index 084: 0x3e8
+	RGBColour::from_12bit(0x3, 0xe, 0x8),
+	// Index 085: 0x3ec
+	RGBColour::from_12bit(0x3, 0xe, 0xc),
+	// Index 086: 0x3ef
+	RGBColour::from_12bit(0x3, 0xe, 0xf),
+	// Index 087: 0x3f0
+	RGBColour::from_12bit(0x3, 0xf, 0x0),
+	// Index 088: 0x3f3
+	RGBColour::from_12bit(0x3, 0xf, 0x3),
+	// Index 089: 0x3f6
+	RGBColour::from_12bit(0x3, 0xf, 0x6),
+	// Index 090: 0x3f8
+	RGBColour::from_12bit(0x3, 0xf, 0x8),
+	// Index 091: 0x3fc
+	RGBColour::from_12bit(0x3, 0xf, 0xc),
+	// Index 092: 0x3ff
+	RGBColour::from_12bit(0x3, 0xf, 0xf),
+	// Index 093: 0x600
+	RGBColour::from_12bit(0x6, 0x0, 0x0),
+	// Index 094: 0x603
+	RGBColour::from_12bit(0x6, 0x0, 0x3),
+	// Index 095: 0x606
+	RGBColour::from_12bit(0x6, 0x0, 0x6),
+	// Index 096: 0x608
+	RGBColour::from_12bit(0x6, 0x0, 0x8),
+	// Index 097: 0x60c
+	RGBColour::from_12bit(0x6, 0x0, 0xc),
+	// Index 098: 0x60f
+	RGBColour::from_12bit(0x6, 0x0, 0xf),
+	// Index 099: 0x620
+	RGBColour::from_12bit(0x6, 0x2, 0x0),
+	// Index 100: 0x623
+	RGBColour::from_12bit(0x6, 0x2, 0x3),
+	// Index 101: 0x626
+	RGBColour::from_12bit(0x6, 0x2, 0x6),
+	// Index 102: 0x628
+	RGBColour::from_12bit(0x6, 0x2, 0x8),
+	// Index 103: 0x62c
+	RGBColour::from_12bit(0x6, 0x2, 0xc),
+	// Index 104: 0x62f
+	RGBColour::from_12bit(0x6, 0x2, 0xf),
+	// Index 105: 0x640
+	RGBColour::from_12bit(0x6, 0x4, 0x0),
+	// Index 106: 0x643
+	RGBColour::from_12bit(0x6, 0x4, 0x3),
+	// Index 107: 0x646
+	RGBColour::from_12bit(0x6, 0x4, 0x6),
+	// Index 108: 0x648
+	RGBColour::from_12bit(0x6, 0x4, 0x8),
+	// Index 109: 0x64c
+	RGBColour::from_12bit(0x6, 0x4, 0xc),
+	// Index 110: 0x64f
+	RGBColour::from_12bit(0x6, 0x4, 0xf),
+	// Index 111: 0x680
+	RGBColour::from_12bit(0x6, 0x8, 0x0),
+	// Index 112: 0x683
+	RGBColour::from_12bit(0x6, 0x8, 0x3),
+	// Index 113: 0x686
+	RGBColour::from_12bit(0x6, 0x8, 0x6),
+	// Index 114: 0x688
+	RGBColour::from_12bit(0x6, 0x8, 0x8),
+	// Index 115: 0x68c
+	RGBColour::from_12bit(0x6, 0x8, 0xc),
+	// Index 116: 0x68f
+	RGBColour::from_12bit(0x6, 0x8, 0xf),
+	// Index 117: 0x6a0
+	RGBColour::from_12bit(0x6, 0xa, 0x0),
+	// Index 118: 0x6a3
+	RGBColour::from_12bit(0x6, 0xa, 0x3),
+	// Index 119: 0x6a6
+	RGBColour::from_12bit(0x6, 0xa, 0x6),
+	// Index 120: 0x6a8
+	RGBColour::from_12bit(0x6, 0xa, 0x8),
+	// Index 121: 0x6ac
+	RGBColour::from_12bit(0x6, 0xa, 0xc),
+	// Index 122: 0x6af
+	RGBColour::from_12bit(0x6, 0xa, 0xf),
+	// Index 123: 0x6e0
+	RGBColour::from_12bit(0x6, 0xe, 0x0),
+	// Index 124: 0x6e3
+	RGBColour::from_12bit(0x6, 0xe, 0x3),
+	// Index 125: 0x6e6
+	RGBColour::from_12bit(0x6, 0xe, 0x6),
+	// Index 126: 0x6e8
+	RGBColour::from_12bit(0x6, 0xe, 0x8),
+	// Index 127: 0x6ec
+	RGBColour::from_12bit(0x6, 0xe, 0xc),
+	// Index 128: 0x6ef
+	RGBColour::from_12bit(0x6, 0xe, 0xf),
+	// Index 129: 0x6f0
+	RGBColour::from_12bit(0x6, 0xf, 0x0),
+	// Index 130: 0x6f3
+	RGBColour::from_12bit(0x6, 0xf, 0x3),
+	// Index 131: 0x6f6
+	RGBColour::from_12bit(0x6, 0xf, 0x6),
+	// Index 132: 0x6f8
+	RGBColour::from_12bit(0x6, 0xf, 0x8),
+	// Index 133: 0x6fc
+	RGBColour::from_12bit(0x6, 0xf, 0xc),
+	// Index 134: 0x6ff
+	RGBColour::from_12bit(0x6, 0xf, 0xf),
+	// Index 135: 0x803
+	RGBColour::from_12bit(0x8, 0x0, 0x3),
+	// Index 136: 0x806
+	RGBColour::from_12bit(0x8, 0x0, 0x6),
+	// Index 137: 0x80c
+	RGBColour::from_12bit(0x8, 0x0, 0xc),
+	// Index 138: 0x80f
+	RGBColour::from_12bit(0x8, 0x0, 0xf),
+	// Index 139: 0x820
+	RGBColour::from_12bit(0x8, 0x2, 0x0),
+	// Index 140: 0x823
+	RGBColour::from_12bit(0x8, 0x2, 0x3),
+	// Index 141: 0x826
+	RGBColour::from_12bit(0x8, 0x2, 0x6),
+	// Index 142: 0x828
+	RGBColour::from_12bit(0x8, 0x2, 0x8),
+	// Index 143: 0x82c
+	RGBColour::from_12bit(0x8, 0x2, 0xc),
+	// Index 144: 0x82f
+	RGBColour::from_12bit(0x8, 0x2, 0xf),
+	// Index 145: 0x840
+	RGBColour::from_12bit(0x8, 0x4, 0x0),
+	// Index 146: 0x843
+	RGBColour::from_12bit(0x8, 0x4, 0x3),
+	// Index 147: 0x846
+	RGBColour::from_12bit(0x8, 0x4, 0x6),
+	// Index 148: 0x848
+	RGBColour::from_12bit(0x8, 0x4, 0x8),
+	// Index 149: 0x84c
+	RGBColour::from_12bit(0x8, 0x4, 0xc),
+	// Index 150: 0x84f
+	RGBColour::from_12bit(0x8, 0x4, 0xf),
+	// Index 151: 0x883
+	RGBColour::from_12bit(0x8, 0x8, 0x3),
+	// Index 152: 0x886
+	RGBColour::from_12bit(0x8, 0x8, 0x6),
+	// Index 153: 0x88c
+	RGBColour::from_12bit(0x8, 0x8, 0xc),
+	// Index 154: 0x88f
+	RGBColour::from_12bit(0x8, 0x8, 0xf),
+	// Index 155: 0x8a0
+	RGBColour::from_12bit(0x8, 0xa, 0x0),
+	// Index 156: 0x8a3
+	RGBColour::from_12bit(0x8, 0xa, 0x3),
+	// Index 157: 0x8a6
+	RGBColour::from_12bit(0x8, 0xa, 0x6),
+	// Index 158: 0x8a8
+	RGBColour::from_12bit(0x8, 0xa, 0x8),
+	// Index 159: 0x8ac
+	RGBColour::from_12bit(0x8, 0xa, 0xc),
+	// Index 160: 0x8af
+	RGBColour::from_12bit(0x8, 0xa, 0xf),
+	// Index 161: 0x8e0
+	RGBColour::from_12bit(0x8, 0xe, 0x0),
+	// Index 162: 0x8e3
+	RGBColour::from_12bit(0x8, 0xe, 0x3),
+	// Index 163: 0x8e6
+	RGBColour::from_12bit(0x8, 0xe, 0x6),
+	// Index 164: 0x8e8
+	RGBColour::from_12bit(0x8, 0xe, 0x8),
+	// Index 165: 0x8ec
+	RGBColour::from_12bit(0x8, 0xe, 0xc),
+	// Index 166: 0x8ef
+	RGBColour::from_12bit(0x8, 0xe, 0xf),
+	// Index 167: 0x8f0
+	RGBColour::from_12bit(0x8, 0xf, 0x0),
+	// Index 168: 0x8f3
+	RGBColour::from_12bit(0x8, 0xf, 0x3),
+	// Index 169: 0x8f6
+	RGBColour::from_12bit(0x8, 0xf, 0x6),
+	// Index 170: 0x8f8
+	RGBColour::from_12bit(0x8, 0xf, 0x8),
+	// Index 171: 0x8fc
+	RGBColour::from_12bit(0x8, 0xf, 0xc),
+	// Index 172: 0x8ff
+	RGBColour::from_12bit(0x8, 0xf, 0xf),
+	// Index 173: 0xc00
+	RGBColour::from_12bit(0xc, 0x0, 0x0),
+	// Index 174: 0xc03
+	RGBColour::from_12bit(0xc, 0x0, 0x3),
+	// Index 175: 0xc06
+	RGBColour::from_12bit(0xc, 0x0, 0x6),
+	// Index 176: 0xc08
+	RGBColour::from_12bit(0xc, 0x0, 0x8),
+	// Index 177: 0xc0c
+	RGBColour::from_12bit(0xc, 0x0, 0xc),
+	// Index 178: 0xc0f
+	RGBColour::from_12bit(0xc, 0x0, 0xf),
+	// Index 179: 0xc20
+	RGBColour::from_12bit(0xc, 0x2, 0x0),
+	// Index 180: 0xc23
+	RGBColour::from_12bit(0xc, 0x2, 0x3),
+	// Index 181: 0xc26
+	RGBColour::from_12bit(0xc, 0x2, 0x6),
+	// Index 182: 0xc28
+	RGBColour::from_12bit(0xc, 0x2, 0x8),
+	// Index 183: 0xc2c
+	RGBColour::from_12bit(0xc, 0x2, 0xc),
+	// Index 184: 0xc2f
+	RGBColour::from_12bit(0xc, 0x2, 0xf),
+	// Index 185: 0xc40
+	RGBColour::from_12bit(0xc, 0x4, 0x0),
+	// Index 186: 0xc43
+	RGBColour::from_12bit(0xc, 0x4, 0x3),
+	// Index 187: 0xc46
+	RGBColour::from_12bit(0xc, 0x4, 0x6),
+	// Index 188: 0xc48
+	RGBColour::from_12bit(0xc, 0x4, 0x8),
+	// Index 189: 0xc4c
+	RGBColour::from_12bit(0xc, 0x4, 0xc),
+	// Index 190: 0xc4f
+	RGBColour::from_12bit(0xc, 0x4, 0xf),
+	// Index 191: 0xc80
+	RGBColour::from_12bit(0xc, 0x8, 0x0),
+	// Index 192: 0xc83
+	RGBColour::from_12bit(0xc, 0x8, 0x3),
+	// Index 193: 0xc86
+	RGBColour::from_12bit(0xc, 0x8, 0x6),
+	// Index 194: 0xc88
+	RGBColour::from_12bit(0xc, 0x8, 0x8),
+	// Index 195: 0xc8c
+	RGBColour::from_12bit(0xc, 0x8, 0xc),
+	// Index 196: 0xc8f
+	RGBColour::from_12bit(0xc, 0x8, 0xf),
+	// Index 197: 0xca0
+	RGBColour::from_12bit(0xc, 0xa, 0x0),
+	// Index 198: 0xca3
+	RGBColour::from_12bit(0xc, 0xa, 0x3),
+	// Index 199: 0xca6
+	RGBColour::from_12bit(0xc, 0xa, 0x6),
+	// Index 200: 0xca8
+	RGBColour::from_12bit(0xc, 0xa, 0x8),
+	// Index 201: 0xcac
+	RGBColour::from_12bit(0xc, 0xa, 0xc),
+	// Index 202: 0xcaf
+	RGBColour::from_12bit(0xc, 0xa, 0xf),
+	// Index 203: 0xce0
+	RGBColour::from_12bit(0xc, 0xe, 0x0),
+	// Index 204: 0xce3
+	RGBColour::from_12bit(0xc, 0xe, 0x3),
+	// Index 205: 0xce6
+	RGBColour::from_12bit(0xc, 0xe, 0x6),
+	// Index 206: 0xce8
+	RGBColour::from_12bit(0xc, 0xe, 0x8),
+	// Index 207: 0xcec
+	RGBColour::from_12bit(0xc, 0xe, 0xc),
+	// Index 208: 0xcef
+	RGBColour::from_12bit(0xc, 0xe, 0xf),
+	// Index 209: 0xcf0
+	RGBColour::from_12bit(0xc, 0xf, 0x0),
+	// Index 210: 0xcf3
+	RGBColour::from_12bit(0xc, 0xf, 0x3),
+	// Index 211: 0xcf6
+	RGBColour::from_12bit(0xc, 0xf, 0x6),
+	// Index 212: 0xcf8
+	RGBColour::from_12bit(0xc, 0xf, 0x8),
+	// Index 213: 0xcfc
+	RGBColour::from_12bit(0xc, 0xf, 0xc),
+	// Index 214: 0xcff
+	RGBColour::from_12bit(0xc, 0xf, 0xf),
+	// Index 215: 0xf03
+	RGBColour::from_12bit(0xf, 0x0, 0x3),
+	// Index 216: 0xf06
+	RGBColour::from_12bit(0xf, 0x0, 0x6),
+	// Index 217: 0xf08
+	RGBColour::from_12bit(0xf, 0x0, 0x8),
+	// Index 218: 0xf0c
+	RGBColour::from_12bit(0xf, 0x0, 0xc),
+	// Index 219: 0xf20
+	RGBColour::from_12bit(0xf, 0x2, 0x0),
+	// Index 220: 0xf23
+	RGBColour::from_12bit(0xf, 0x2, 0x3),
+	// Index 221: 0xf26
+	RGBColour::from_12bit(0xf, 0x2, 0x6),
+	// Index 222: 0xf28
+	RGBColour::from_12bit(0xf, 0x2, 0x8),
+	// Index 223: 0xf2c
+	RGBColour::from_12bit(0xf, 0x2, 0xc),
+	// Index 224: 0xf2f
+	RGBColour::from_12bit(0xf, 0x2, 0xf),
+	// Index 225: 0xf40
+	RGBColour::from_12bit(0xf, 0x4, 0x0),
+	// Index 226: 0xf43
+	RGBColour::from_12bit(0xf, 0x4, 0x3),
+	// Index 227: 0xf46
+	RGBColour::from_12bit(0xf, 0x4, 0x6),
+	// Index 228: 0xf48
+	RGBColour::from_12bit(0xf, 0x4, 0x8),
+	// Index 229: 0xf4c
+	RGBColour::from_12bit(0xf, 0x4, 0xc),
+	// Index 230: 0xf4f
+	RGBColour::from_12bit(0xf, 0x4, 0xf),
+	// Index 231: 0xf80
+	RGBColour::from_12bit(0xf, 0x8, 0x0),
+	// Index 232: 0xf83
+	RGBColour::from_12bit(0xf, 0x8, 0x3),
+	// Index 233: 0xf86
+	RGBColour::from_12bit(0xf, 0x8, 0x6),
+	// Index 234: 0xf88
+	RGBColour::from_12bit(0xf, 0x8, 0x8),
+	// Index 235: 0xf8c
+	RGBColour::from_12bit(0xf, 0x8, 0xc),
+	// Index 236: 0xf8f
+	RGBColour::from_12bit(0xf, 0x8, 0xf),
+	// Index 237: 0xfa0
+	RGBColour::from_12bit(0xf, 0xa, 0x0),
+	// Index 238: 0xfa3
+	RGBColour::from_12bit(0xf, 0xa, 0x3),
+	// Index 239: 0xfa6
+	RGBColour::from_12bit(0xf, 0xa, 0x6),
+	// Index 240: 0xfa8
+	RGBColour::from_12bit(0xf, 0xa, 0x8),
+	// Index 241: 0xfac
+	RGBColour::from_12bit(0xf, 0xa, 0xc),
+	// Index 242: 0xfaf
+	RGBColour::from_12bit(0xf, 0xa, 0xf),
+	// Index 243: 0xfe0
+	RGBColour::from_12bit(0xf, 0xe, 0x0),
+	// Index 244: 0xfe3
+	RGBColour::from_12bit(0xf, 0xe, 0x3),
+	// Index 245: 0xfe6
+	RGBColour::from_12bit(0xf, 0xe, 0x6),
+	// Index 246: 0xfe8
+	RGBColour::from_12bit(0xf, 0xe, 0x8),
+	// Index 247: 0xfec
+	RGBColour::from_12bit(0xf, 0xe, 0xc),
+	// Index 248: 0xfef
+	RGBColour::from_12bit(0xf, 0xe, 0xf),
+	// Index 249: 0xff3
+	RGBColour::from_12bit(0xf, 0xf, 0x3),
+	// Index 250: 0xff6
+	RGBColour::from_12bit(0xf, 0xf, 0x6),
+	// Index 251: 0xff8
+	RGBColour::from_12bit(0xf, 0xf, 0x8),
+	// Index 252: 0xffc
+	RGBColour::from_12bit(0xf, 0xf, 0xc),
+	// Index 253: 0xbbb
+	RGBColour::from_12bit(0xb, 0xb, 0xb),
+	// Index 254: 0x333
+	RGBColour::from_12bit(0x3, 0x3, 0x3),
+	// Index 255: 0x777
+	RGBColour::from_12bit(0x7, 0x7, 0x7),
+];
 
 // -----------------------------------------------------------------------------
 // Functions
@@ -503,11 +1003,9 @@ pub fn init(
 
 	debug!("DMA enabled");
 
-	unsafe {
-		// Hand off the DMA peripheral to the interrupt
-		DMA_PERIPH = Some(dma);
-		// We don't enable the interrupts here - we enable them on core 1
-	}
+	// We now drop the dma object because the VGA IRQ will later unsafely
+	// conjure it out of thin air.
+	drop(dma);
 
 	debug!("DMA set-up complete");
 
@@ -672,24 +1170,20 @@ pub fn test_video_mode(mode: crate::common::video::Mode) -> bool {
 			crate::common::video::Format::Text8x16 | crate::common::video::Format::Text8x8,
 			false,
 			false,
-		) => {
-			true
-		}
+		) => true,
 		(
 			crate::common::video::Timing::T640x400,
 			crate::common::video::Format::Text8x16 | crate::common::video::Format::Text8x8,
 			false,
 			false,
-		) => {
-			true
-		}
+		) => true,
 		_ => false,
 	}
 }
 
 /// Get the current scan line.
 pub fn get_scan_line() -> u16 {
-	CURRENT_DISPLAY_LINE.load(Ordering::Relaxed)
+	CURRENT_TIMING_LINE.load(Ordering::Relaxed)
 }
 
 /// Get how many visible lines there currently are
@@ -719,31 +1213,32 @@ unsafe extern "C" fn core1_main() -> u32 {
 	let gpio_out_set = 0xd000_0014 as *mut u32;
 	let gpio_out_clr = 0xd000_0018 as *mut u32;
 
-	// Enable the interrupts (DMA_PERIPH has to be set first by Core 0)
+	// Enable the interrupts (DMA has to first be set by Core 0)
 	cortex_m::interrupt::enable();
 	// We are on Core 1, so these interrupts will run on Core 1
 	crate::pac::NVIC::unpend(crate::pac::Interrupt::DMA_IRQ_0);
 	crate::pac::NVIC::unmask(crate::pac::Interrupt::DMA_IRQ_0);
-	
-	loop {
-		video.frame_start();
 
-		for line in 0..video.num_lines() {
-			// Wait for a free DMA buffer
-			while !DMA_READY.load(Ordering::Relaxed) {
-				cortex_m::asm::wfe();
-			}
-			DMA_READY.store(false, Ordering::Relaxed);
-	
+	loop {
+		// Wait for a free DMA buffer
+		while !DMA_READY.load(Ordering::Relaxed) {
+			cortex_m::asm::wfe();
+		}
+		DMA_READY.store(false, Ordering::Relaxed);
+		let this_line = CURRENT_DISPLAY_LINE.load(Ordering::SeqCst);
+
+		if this_line == 0 {
+			video.frame_start();
+		} else {
 			unsafe {
 				// Turn on LED
 				gpio_out_set.write(1 << 25);
 			}
-	
+
 			// This function currently consumes about 70% CPU (or rather, 90% CPU
 			// on each of visible lines, and 0% CPU on the other lines)
-			video.draw_next_line(line);
-	
+			video.draw_next_line(this_line);
+
 			unsafe {
 				// Turn off LED
 				gpio_out_clr.write(1 << 25);
@@ -761,13 +1256,10 @@ unsafe extern "C" fn core1_main() -> u32 {
 ///
 /// Only call this from the DMA IRQ handler.
 #[link_section = ".data"]
-pub unsafe fn irq() {
-	let dma: &mut super::pac::DMA = match DMA_PERIPH.as_mut() {
-		Some(dma) => dma,
-		None => {
-			return;
-		}
-	};
+#[interrupt]
+unsafe fn DMA_IRQ_0() {
+	let dma = unsafe { &*crate::pac::DMA::ptr() };
+
 	let status = dma.ints0.read().bits();
 
 	// Check if this is a DMA interrupt for the sync DMA channel
@@ -800,7 +1292,9 @@ pub unsafe fn irq() {
 			// Sync pulse
 			&TIMING_BUFFER.vblank_sync_buffer
 		} else {
-			// VGA back porch following VGA sync pulse
+			// VGA back porch following VGA sync pulse.
+			// Resync pixels with timing here.
+			CURRENT_DISPLAY_LINE.store(0, Ordering::Relaxed);
 			&TIMING_BUFFER.vblank_porch_buffer
 		};
 		dma.ch[TIMING_DMA_CHAN]
@@ -823,12 +1317,12 @@ pub unsafe fn irq() {
 		// write the new read address. The DMA had stopped because the
 		// previous line was transferred completely.
 		if (next_display_line & 1) == 1 {
-			// Odd visible line is next
+			// Play the odd line
 			dma.ch[PIXEL_DMA_CHAN]
 				.ch_al3_read_addr_trig
 				.write(|w| w.bits(PIXEL_DATA_BUFFER_ODD.as_ptr()))
 		} else {
-			// Even visible line is next
+			// Play the even line
 			dma.ch[PIXEL_DMA_CHAN]
 				.ch_al3_read_addr_trig
 				.write(|w| w.bits(PIXEL_DATA_BUFFER_EVEN.as_ptr()))
@@ -852,7 +1346,7 @@ impl RenderEngine {
 			],
 			// Should match the default value of TIMING_BUFFER and VIDEO_MODE
 			current_video_mode: crate::common::video::Mode::new(
-				crate::common::video::Timing::T640x400,
+				crate::common::video::Timing::T640x480,
 				crate::common::video::Format::Text8x16,
 			),
 			// Should match the mode above
@@ -880,19 +1374,19 @@ impl RenderEngine {
 					panic!("Can't do 800x600");
 				}
 			}
-			self.num_text_cols = self.current_video_mode.text_width().unwrap_or(0) as usize; 
-			self.num_text_rows = self.current_video_mode.text_height().unwrap_or(0) as usize; 
+			self.num_text_cols = self.current_video_mode.text_width().unwrap_or(0) as usize;
+			self.num_text_rows = self.current_video_mode.text_height().unwrap_or(0) as usize;
 		}
 	}
 
-	/// Get the number of visible lines on screen
-	fn num_lines(&self) -> u16 {
-		self.current_video_mode.vertical_lines()
-	}
-
+	/// Draw a line of pixels into the relevant pixel buffer (either
+	/// [`PIXEL_DATA_BUFFER_ODD`] or [`PIXEL_DATA_BUFFER_EVEN`]).
+	///
+	/// The `current_line_num` goes from `1..=NUM_LINES`.
 	#[link_section = ".data"]
 	pub fn draw_next_line(&mut self, current_line_num: u16) {
-		// new line - pick a buffer to draw into (not the one that is currently rendering!)
+		// new line - pick a buffer to draw into (not the one that is currently
+		// rendering)! This is the opposite of the logic in the IRQ.
 		let scan_line_buffer = unsafe {
 			if (current_line_num & 1) == 0 {
 				&mut PIXEL_DATA_BUFFER_ODD
@@ -901,17 +1395,33 @@ impl RenderEngine {
 			}
 		};
 
-		let font = match self.current_video_mode.format() {
-			crate::common::video::Format::Text8x16 => &font16::FONT,
-			crate::common::video::Format::Text8x8 => &font8::FONT,
+		match self.current_video_mode.format() {
+			crate::common::video::Format::Text8x16 => {
+				self.draw_next_line_text16(scan_line_buffer, current_line_num)
+			}
+			crate::common::video::Format::Text8x8 => {
+				self.draw_next_line_text8(scan_line_buffer, current_line_num)
+			}
 			_ => {
-				return;
+				// Draw nothing
 			}
 		};
+	}
 
+	/// Draw a line of pixels into the relevant pixel buffer (either
+	/// [`PIXEL_DATA_BUFFER_ODD`] or [`PIXEL_DATA_BUFFER_EVEN`]) using the 8x16
+	/// font.
+	///
+	/// The `current_line_num` goes from `1..=NUM_LINES`.
+	#[link_section = ".data"]
+	pub fn draw_next_line_text16(
+		&mut self,
+		scan_line_buffer: &mut LineBuffer,
+		current_line_num: u16,
+	) {
 		// Convert our position in scan-lines to a text row, and a line within each glyph on that row
-		let text_row = current_line_num as usize / font.height;
-		let font_row = current_line_num as usize % font.height;
+		let text_row = (current_line_num - 1) as usize / 16;
+		let font_row = (current_line_num - 1) as usize % 16;
 
 		if text_row < self.num_text_rows {
 			// Note (unsafe): We could stash the char array inside `self`
@@ -921,14 +1431,16 @@ impl RenderEngine {
 			// unfortunately real-time video is all about shared mutable
 			// state. At least our platform is fixed, so we can simply
 			// test if it works, for some given version of the Rust compiler.
-			let row_slice =
-				unsafe { &GLYPH_ATTR_ARRAY[(text_row * self.num_text_cols)..((text_row + 1) * self.num_text_cols)] };
+			let row_slice = unsafe {
+				&GLYPH_ATTR_ARRAY
+					[(text_row * self.num_text_cols)..((text_row + 1) * self.num_text_cols)]
+			};
 			// Every font look-up we are about to do for this row will
 			// involve offsetting by the row within each glyph. As this
 			// is the same for every glyph on this row, we calculate a
 			// new pointer once, in advance, and save ourselves an
 			// addition each time around the loop.
-			let font_ptr = unsafe { font.data.as_ptr().add(font_row) };
+			let font_ptr = unsafe { font16::FONT.data.as_ptr().add(font_row) };
 
 			// Get a pointer into our scan-line buffer
 			let scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
@@ -936,7 +1448,7 @@ impl RenderEngine {
 
 			// Convert from characters to coloured pixels, using the font as a look-up table.
 			for glyphattr in row_slice.iter() {
-				let index = (glyphattr.glyph().0 as isize) * font.height as isize;
+				let index = (glyphattr.glyph().0 as isize) * 16;
 				// Note (unsafe): We use pointer arithmetic here because we
 				// can't afford a bounds-check on an array. This is safe
 				// because the font is `256 * width` bytes long and we can't
@@ -964,7 +1476,78 @@ impl RenderEngine {
 				}
 				px_idx += 4;
 			}
-		} // if text_row < num_rows
+		}
+	}
+
+	/// Draw a line of pixels into the relevant pixel buffer (either
+	/// [`PIXEL_DATA_BUFFER_ODD`] or [`PIXEL_DATA_BUFFER_EVEN`]) using the 8x8
+	/// font.
+	///
+	/// The `current_line_num` goes from `1..=NUM_LINES`.
+	#[link_section = ".data"]
+	pub fn draw_next_line_text8(
+		&mut self,
+		scan_line_buffer: &mut LineBuffer,
+		current_line_num: u16,
+	) {
+		// Convert our position in scan-lines to a text row, and a line within each glyph on that row.
+		let text_row = (current_line_num - 1) as usize / 8;
+		let font_row = (current_line_num - 1) as usize % 8;
+
+		if text_row < self.num_text_rows {
+			// Note (unsafe): We could stash the char array inside `self`
+			// but at some point we are going to need one CPU rendering
+			// the text, and the other CPU running code and writing to
+			// the buffer. This might be Undefined Behaviour, but
+			// unfortunately real-time video is all about shared mutable
+			// state. At least our platform is fixed, so we can simply
+			// test if it works, for some given version of the Rust compiler.
+			let row_slice = unsafe {
+				&GLYPH_ATTR_ARRAY
+					[(text_row * self.num_text_cols)..((text_row + 1) * self.num_text_cols)]
+			};
+			// Every font look-up we are about to do for this row will
+			// involve offsetting by the row within each glyph. As this
+			// is the same for every glyph on this row, we calculate a
+			// new pointer once, in advance, and save ourselves an
+			// addition each time around the loop.
+			let font_ptr = unsafe { font8::FONT.data.as_ptr().add(font_row) };
+
+			// Get a pointer into our scan-line buffer
+			let scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
+			let mut px_idx = 0;
+
+			// Convert from characters to coloured pixels, using the font as a look-up table.
+			for glyphattr in row_slice.iter() {
+				let index = (glyphattr.glyph().0 as isize) * 8;
+				// Note (unsafe): We use pointer arithmetic here because we
+				// can't afford a bounds-check on an array. This is safe
+				// because the font is `256 * width` bytes long and we can't
+				// index more than `255 * width` bytes into it.
+				let mono_pixels = unsafe { *font_ptr.offset(index) } as usize;
+				// Convert from eight mono pixels in one byte to four RGB
+				// pairs. Hopefully the `& 3` elides the panic calls.
+				unsafe {
+					core::ptr::write_volatile(
+						scan_line_buffer_ptr.offset(px_idx),
+						self.lookup[(mono_pixels >> 6) & 3],
+					);
+					core::ptr::write_volatile(
+						scan_line_buffer_ptr.offset(px_idx + 1),
+						self.lookup[(mono_pixels >> 4) & 3],
+					);
+					core::ptr::write_volatile(
+						scan_line_buffer_ptr.offset(px_idx + 2),
+						self.lookup[(mono_pixels >> 2) & 3],
+					);
+					core::ptr::write_volatile(
+						scan_line_buffer_ptr.offset(px_idx + 3),
+						self.lookup[mono_pixels & 3],
+					);
+				}
+				px_idx += 4;
+			}
+		}
 	}
 }
 
@@ -1446,6 +2029,17 @@ impl RGBColour {
 		RGBColour((blue4 << 8) | (green4 << 4) | red4)
 	}
 
+	/// Make an [`RGBColour`] from a 12-bit RGB triplet.
+	///
+	/// Only the bottom 4 bits of each colour channel are retained, as RGB colour
+	/// is a 12-bit value.
+	pub const fn from_12bit(red: u8, green: u8, blue: u8) -> RGBColour {
+		let red4: u16 = (red & 0x00F) as u16;
+		let green4: u16 = (green & 0x00F) as u16;
+		let blue4: u16 = (blue & 0x00F) as u16;
+		RGBColour((blue4 << 8) | (green4 << 4) | red4)
+	}
+
 	/// Get the red component as an 8-bit value
 	pub const fn red8(self) -> u8 {
 		let red4 = self.0 & 0x0F;
@@ -1497,6 +2091,27 @@ impl GlyphAttr {
 	/// Get the attribute component of this pair.
 	pub const fn attr(self) -> Attr {
 		Attr((self.0 >> 8) as u8)
+	}
+}
+
+impl AtomicModeWrapper {
+	/// Construct a new [`AtomicModeWrapper`] with the given value.
+	const fn new(mode: crate::common::video::Mode) -> AtomicModeWrapper {
+		AtomicModeWrapper {
+			value: AtomicU8::new(mode.as_u8()),
+		}
+	}
+
+	/// Set a new video mode.
+	fn set_mode(&self, mode: crate::common::video::Mode) {
+		self.value.store(mode.as_u8(), Ordering::SeqCst);
+	}
+
+	/// Get the current video mode.
+	fn get_mode(&self) -> crate::common::video::Mode {
+		let value = self.value.load(Ordering::SeqCst);
+		// Safety: the 'set_mode' function ensure this is always valid.
+		unsafe { crate::common::video::Mode::from_u8(value) }
 	}
 }
 

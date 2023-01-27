@@ -1643,16 +1643,6 @@ extern "C" fn time_ticks_per_second() -> common::Ticks {
 	common::Ticks(1000)
 }
 
-/// Called when DMA raises IRQ0; i.e. when a DMA transfer to the pixel FIFO or
-/// the timing FIFO has completed.
-#[interrupt]
-#[link_section = ".data"]
-fn DMA_IRQ_0() {
-	unsafe {
-		vga::irq();
-	}
-}
-
 static IRQ_PIN: Mutex<RefCell<Option<IrqPin>>> = Mutex::new(RefCell::new(None));
 
 /// Called when we get a SIO interrupt on the main bank of GPIO pins.
