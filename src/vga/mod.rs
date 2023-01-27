@@ -709,7 +709,7 @@ unsafe extern "C" fn core1_main() -> u32 {
 
 	loop {
 		// This function currently consumes about 70% CPU (or rather, 90% CPU
-		// on each of 400 lines, and 0% CPU on the other 50 lines)
+		// on each of visible lines, and 0% CPU on the other lines)
 		video.poll();
 	}
 }
@@ -817,91 +817,110 @@ impl RenderEngine {
 
 	#[link_section = ".data"]
 	pub fn poll(&mut self) {
-		if DMA_READY.load(Ordering::Relaxed) {
-			DMA_READY.store(false, Ordering::Relaxed);
-			let current_line_num = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
-			if current_line_num == 0 {
-				trace!("Frame {}", self.frame_count);
-				self.frame_count += 1;
+		// The LED pin was called `_pico_led` over in the `Hardware::build`
+		// function that ran on Core 1. Rather than try and move the pin over to
+		// this core, we just unsafely poke the GPIO registers to set/clear the
+		// relevant pin.
+		let gpio_out_set = 0xd000_0014 as *mut u32;
+		let gpio_out_clr = 0xd000_0018 as *mut u32;
+
+		// Wait for a free DMA buffer
+		while !DMA_READY.load(Ordering::Relaxed) {
+			cortex_m::asm::wfe();
+		}
+		DMA_READY.store(false, Ordering::Relaxed);
+
+		unsafe {
+			// Turn on LED
+			gpio_out_set.write(1 << 25);
+		}
+
+		let current_line_num = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
+		if current_line_num == 0 {
+			trace!("Frame {}", self.frame_count);
+			self.frame_count += 1;
+		}
+
+		// new line - pick a buffer to draw into (not the one that is currently rendering!)
+		let scan_line_buffer = unsafe {
+			if (current_line_num & 1) == 0 {
+				&mut PIXEL_DATA_BUFFER_ODD
+			} else {
+				&mut PIXEL_DATA_BUFFER_EVEN
 			}
+		};
 
-			// new line - pick a buffer to draw into (not the one that is currently rendering!)
-			let scan_line_buffer = unsafe {
-				if (current_line_num & 1) == 0 {
-					&mut PIXEL_DATA_BUFFER_ODD
-				} else {
-					&mut PIXEL_DATA_BUFFER_EVEN
-				}
-			};
-
-			let font = match unsafe { VIDEO_MODE.format() } {
-				crate::common::video::Format::Text8x16 => &font16::FONT,
-				crate::common::video::Format::Text8x8 => &font8::FONT,
-				_ => {
-					return;
-				}
-			};
-
-			let num_rows = NUM_TEXT_ROWS.load(Ordering::Relaxed);
-			let num_cols = NUM_TEXT_COLS.load(Ordering::Relaxed);
-
-			// Convert our position in scan-lines to a text row, and a line within each glyph on that row
-			let text_row = current_line_num as usize / font.height;
-			let font_row = current_line_num as usize % font.height;
-
-			if text_row < num_rows {
-				// Note (unsafe): We could stash the char array inside `self`
-				// but at some point we are going to need one CPU rendering
-				// the text, and the other CPU running code and writing to
-				// the buffer. This might be Undefined Behaviour, but
-				// unfortunately real-time video is all about shared mutable
-				// state. At least our platform is fixed, so we can simply
-				// test if it works, for some given version of the Rust compiler.
-				let row_slice = unsafe {
-					&GLYPH_ATTR_ARRAY[(text_row * num_cols)..((text_row + 1) * num_cols)]
-				};
-				// Every font look-up we are about to do for this row will
-				// involve offsetting by the row within each glyph. As this
-				// is the same for every glyph on this row, we calculate a
-				// new pointer once, in advance, and save ourselves an
-				// addition each time around the loop.
-				let font_ptr = unsafe { font.data.as_ptr().add(font_row) };
-
-				// Get a pointer into our scan-line buffer
-				let scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
-				let mut px_idx = 0;
-
-				// Convert from characters to coloured pixels, using the font as a look-up table.
-				for glyphattr in row_slice.iter() {
-					let index = (glyphattr.glyph().0 as isize) * font.height as isize;
-					// Note (unsafe): We use pointer arithmetic here because we
-					// can't afford a bounds-check on an array. This is safe
-					// because the font is `256 * width` bytes long and we can't
-					// index more than `255 * width` bytes into it.
-					let mono_pixels = unsafe { *font_ptr.offset(index) } as usize;
-					// Convert from eight mono pixels in one byte to four RGB
-					// pairs. Hopefully the `& 3` elides the panic calls.
-					unsafe {
-						core::ptr::write_volatile(
-							scan_line_buffer_ptr.offset(px_idx),
-							self.lookup[(mono_pixels >> 6) & 3],
-						);
-						core::ptr::write_volatile(
-							scan_line_buffer_ptr.offset(px_idx + 1),
-							self.lookup[(mono_pixels >> 4) & 3],
-						);
-						core::ptr::write_volatile(
-							scan_line_buffer_ptr.offset(px_idx + 2),
-							self.lookup[(mono_pixels >> 2) & 3],
-						);
-						core::ptr::write_volatile(
-							scan_line_buffer_ptr.offset(px_idx + 3),
-							self.lookup[mono_pixels & 3],
-						);
-					}
-					px_idx += 4;
-				}
+		let font = match unsafe { VIDEO_MODE.format() } {
+			crate::common::video::Format::Text8x16 => &font16::FONT,
+			crate::common::video::Format::Text8x8 => &font8::FONT,
+			_ => {
+				return;
 			}
+		};
+
+		let num_rows = NUM_TEXT_ROWS.load(Ordering::Relaxed);
+		let num_cols = NUM_TEXT_COLS.load(Ordering::Relaxed);
+
+		// Convert our position in scan-lines to a text row, and a line within each glyph on that row
+		let text_row = current_line_num as usize / font.height;
+		let font_row = current_line_num as usize % font.height;
+
+		if text_row < num_rows {
+			// Note (unsafe): We could stash the char array inside `self`
+			// but at some point we are going to need one CPU rendering
+			// the text, and the other CPU running code and writing to
+			// the buffer. This might be Undefined Behaviour, but
+			// unfortunately real-time video is all about shared mutable
+			// state. At least our platform is fixed, so we can simply
+			// test if it works, for some given version of the Rust compiler.
+			let row_slice =
+				unsafe { &GLYPH_ATTR_ARRAY[(text_row * num_cols)..((text_row + 1) * num_cols)] };
+			// Every font look-up we are about to do for this row will
+			// involve offsetting by the row within each glyph. As this
+			// is the same for every glyph on this row, we calculate a
+			// new pointer once, in advance, and save ourselves an
+			// addition each time around the loop.
+			let font_ptr = unsafe { font.data.as_ptr().add(font_row) };
+
+			// Get a pointer into our scan-line buffer
+			let scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
+			let mut px_idx = 0;
+
+			// Convert from characters to coloured pixels, using the font as a look-up table.
+			for glyphattr in row_slice.iter() {
+				let index = (glyphattr.glyph().0 as isize) * font.height as isize;
+				// Note (unsafe): We use pointer arithmetic here because we
+				// can't afford a bounds-check on an array. This is safe
+				// because the font is `256 * width` bytes long and we can't
+				// index more than `255 * width` bytes into it.
+				let mono_pixels = unsafe { *font_ptr.offset(index) } as usize;
+				// Convert from eight mono pixels in one byte to four RGB
+				// pairs. Hopefully the `& 3` elides the panic calls.
+				unsafe {
+					core::ptr::write_volatile(
+						scan_line_buffer_ptr.offset(px_idx),
+						self.lookup[(mono_pixels >> 6) & 3],
+					);
+					core::ptr::write_volatile(
+						scan_line_buffer_ptr.offset(px_idx + 1),
+						self.lookup[(mono_pixels >> 4) & 3],
+					);
+					core::ptr::write_volatile(
+						scan_line_buffer_ptr.offset(px_idx + 2),
+						self.lookup[(mono_pixels >> 2) & 3],
+					);
+					core::ptr::write_volatile(
+						scan_line_buffer_ptr.offset(px_idx + 3),
+						self.lookup[mono_pixels & 3],
+					);
+				}
+				px_idx += 4;
+			}
+		} // if text_row < num_rows
+
+		unsafe {
+			// Turn off LED
+			gpio_out_clr.write(1 << 25);
 		}
 	}
 }

@@ -167,7 +167,6 @@ struct Pins {
 	i2s_dac_data: Pin<bank0::Gpio26, Function<pac::PIO1>>,
 	i2s_bit_clock: Pin<bank0::Gpio27, Function<pac::PIO1>>,
 	i2s_lr_clock: Pin<bank0::Gpio28, Function<pac::PIO1>>,
-	pico_led: Pin<bank0::Gpio25, Output<PushPull>>,
 }
 
 // -----------------------------------------------------------------------------
@@ -468,6 +467,11 @@ impl Hardware {
 		delay: cortex_m::delay::Delay,
 	) -> (Hardware, IrqPin) {
 		let hal_pins = rp_pico::Pins::new(bank, pads, sio, resets);
+		// We construct the pin here and then throw it away. Then Core 1 does
+		// some unsafe writes to the GPIO_SET/GPIO_CLEAR registers to set/clear
+		// pin 25 to track render loop timing. This avoids trying to 'move' the pin
+		// over to Core 1.
+		let _pico_led = hal_pins.led.into_push_pull_output();
 
 		(
 			Hardware {
@@ -607,7 +611,6 @@ impl Hardware {
 					i2s_dac_data: hal_pins.gpio26.into_mode(),
 					i2s_bit_clock: hal_pins.gpio27.into_mode(),
 					i2s_lr_clock: hal_pins.gpio28.into_mode(),
-					pico_led: hal_pins.led.into_mode(),
 				},
 
 				// We are in SPI MODE 0. This means we change the COPI pin on the
