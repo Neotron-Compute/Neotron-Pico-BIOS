@@ -15,7 +15,7 @@ rp-pico = { version = "0.6", default-features = false, features = [ "rt", "criti
 # Cortex-M run-time (or start-up) code
 cortex-m-rt = "0.7"
 # The BIOS to OS API
-neotron-common-bios = "0.7.0"
+neotron-common-bios = "0.8.0"
 # For the RP2040 bootloader
 rp2040-boot2 = "0.3.0"
 # For hardware abstraction traits
@@ -39,7 +39,7 @@ neotron-bmc-protocol = { version = "0.1.0", git = "https://github.com/neotron-co
 # Time and frequency related functions
 fugit = "0.3"
 # PS/2 scancode decoding
-pc-keyboard = "0.6"
+pc-keyboard = "0.7.0"
 # Useful queues and other structures
 heapless = "0.7"
 
