@@ -1452,7 +1452,7 @@ unsafe extern "C" fn video_set_whole_palette(
 }
 
 extern "C" fn i2c_bus_get_info(_i2c_bus: u8) -> common::Option<common::i2c::BusInfo> {
-	unimplemented!();
+	common::Option::None
 }
 
 extern "C" fn i2c_write_read(
@@ -1462,57 +1462,57 @@ extern "C" fn i2c_write_read(
 	_tx2: common::ApiByteSlice,
 	_rx: common::ApiBuffer,
 ) -> common::Result<()> {
-	unimplemented!();
+	common::Result::Err(common::Error::Unimplemented)
 }
 
 extern "C" fn audio_mixer_channel_get_info(
 	_audio_mixer_id: u8,
 ) -> common::Option<common::audio::MixerChannelInfo> {
-	unimplemented!();
+	common::Option::None
 }
 
 extern "C" fn audio_mixer_channel_set_level(_audio_mixer_id: u8, _level: u8) -> common::Result<()> {
-	unimplemented!();
+	common::Result::Err(common::Error::Unimplemented)
 }
 
 extern "C" fn audio_output_set_config(_config: common::audio::Config) -> common::Result<()> {
-	unimplemented!();
+	common::Result::Err(common::Error::Unimplemented)
 }
 
 extern "C" fn audio_output_get_config() -> common::Result<common::audio::Config> {
-	unimplemented!();
+	common::Result::Err(common::Error::Unimplemented)
 }
 
 unsafe extern "C" fn audio_output_data(_samples: common::ApiByteSlice) -> common::Result<usize> {
-	unimplemented!();
+	common::Result::Err(common::Error::Unimplemented)
 }
 
 extern "C" fn audio_output_get_space() -> common::Result<usize> {
-	unimplemented!();
+	common::Result::Ok(0)
 }
 
 extern "C" fn audio_input_set_config(_config: common::audio::Config) -> common::Result<()> {
-	unimplemented!();
+	common::Result::Err(common::Error::Unimplemented)
 }
 
 extern "C" fn audio_input_get_config() -> common::Result<common::audio::Config> {
-	unimplemented!();
+	common::Result::Err(common::Error::Unimplemented)
 }
 
 extern "C" fn audio_input_data(_samples: common::ApiBuffer) -> common::Result<usize> {
-	unimplemented!();
+	common::Result::Err(common::Error::Unimplemented)
 }
 
 extern "C" fn audio_input_get_count() -> common::Result<usize> {
-	unimplemented!();
+	common::Result::Ok(0)
 }
 
 extern "C" fn bus_select(_periperal_id: common::Option<u8>) {
-	unimplemented!();
+	// Do nothing
 }
 
 extern "C" fn bus_get_info(_periperal_id: u8) -> common::Option<common::bus::PeripheralInfo> {
-	unimplemented!();
+	common::Option::None
 }
 
 extern "C" fn bus_write_read(
@@ -1520,11 +1520,11 @@ extern "C" fn bus_write_read(
 	_tx2: common::ApiByteSlice,
 	_rx: common::ApiBuffer,
 ) -> common::Result<()> {
-	unimplemented!();
+	common::Result::Err(common::Error::Unimplemented)
 }
 
 extern "C" fn bus_exchange(_buffer: common::ApiBuffer) -> common::Result<()> {
-	unimplemented!();
+	common::Result::Err(common::Error::Unimplemented)
 }
 
 extern "C" fn bus_interrupt_status() -> u32 {
