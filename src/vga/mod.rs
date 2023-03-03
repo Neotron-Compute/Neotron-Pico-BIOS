@@ -81,13 +81,13 @@ pub struct TextConsole {
 	text_buffer: AtomicPtr<GlyphAttr>,
 }
 
-/// Describes one scan-line's worth of pixels, including the length word required by the Pixel FIFO.
+/// Describes one scan-line's worth of PIO commands.
 #[repr(C, align(16))]
 struct LineBuffer {
-	/// Number of words we used up
-	length: usize,
 	/// Commands for the render engine
 	commands: [u16; MAX_NUM_COMMANDS_PER_LINE],
+	/// Number of words we used up
+	length: usize,
 }
 
 /// Describes the polarity of a sync pulse.
@@ -957,41 +957,54 @@ pub fn init(
 			"out exec, 16"    // 0
 		".wrap"
 		"plotXXLoad:"
-			"mov x, pins [3]" // 1
+			"mov pins, x [3]" // 1
 			"jmp plotYYLoad2" // 2
 		"plotYYLoad:"
-			"mov y, pins [4]" // 3
+			"mov pins, y [4]" // 3
 		"plotYYLoad2:"
 			"out x, 16"       // 4
 			"out y, 16"       // 5
 			"jmp main"        // 6
 		"plotXYLoad:"
-			"mov x, pins [3]" // 7
+			"mov pins, x [3]" // 7
 			"out x, 16"       // 8
-			"mov y, pins"     // 9
+			"mov pins, y"     // 9
 			"out y, 16"       // 10
 			"jmp main"        // 11
 		"plotYXLoad:"
-			"mov y, pins [3]" // 12
+			"mov pins, y [3]" // 12
 			"out y, 16"       // 13
-			"mov x, pins"     // 14
+			"mov pins, x"     // 14
 			"out x, 16"       // 15
 			"jmp main"        // 16
 		"plotXX:"
-			"mov x, pins [6]" // 17
+			"mov pins, x [6]" // 17
 			"jmp main"        // 18
 		"plotYY:"
-			"mov y, pins [6]" // 19
+			"mov pins, y [6]" // 19
 			"jmp main"        // 20
 		"plotXY:"
-			"mov x, pins [4]" // 21
-			"mov y, pins [1]" // 22
+			"mov pins, x [4]" // 21
+			"mov pins, y [1]" // 22
 			"jmp main"        // 23
 		"plotYX:"
-			"mov y, pins [4]" // 24
-			"mov x, pins [1]" // 25
+			"mov pins, y [4]" // 24
+			"mov pins, x [1]" // 25
 			"jmp main"        // 26
 	);
+
+	defmt::info!("CLEAR_OUTPUT_PINS = 0x{:04x}", CLEAR_OUTPUT_PINS);
+	defmt::info!("COMMAND_WAIT_IRQ = 0x{:04x}", COMMAND_WAIT_IRQ);
+	defmt::info!("COMMAND_LOAD_X = 0x{:04x}", COMMAND_LOAD_X);
+	defmt::info!("COMMAND_LOAD_Y = 0x{:04x}", COMMAND_LOAD_Y);
+	defmt::info!("COMMAND_PLOT_XX_LOAD = 0x{:04x}", COMMAND_PLOT_XX_LOAD);
+	defmt::info!("COMMAND_PLOT_YY_LOAD = 0x{:04x}", COMMAND_PLOT_YY_LOAD);
+	defmt::info!("COMMAND_PLOT_XY_LOAD = 0x{:04x}", COMMAND_PLOT_XY_LOAD);
+	defmt::info!("COMMAND_PLOT_YX_LOAD = 0x{:04x}", COMMAND_PLOT_YX_LOAD);
+	defmt::info!("COMMAND_PLOT_XX = 0x{:04x}", COMMAND_PLOT_XX);
+	defmt::info!("COMMAND_PLOT_YY = 0x{:04x}", COMMAND_PLOT_YY);
+	defmt::info!("COMMAND_PLOT_XY = 0x{:04x}", COMMAND_PLOT_XY);
+	defmt::info!("COMMAND_PLOT_YX = 0x{:04x}", COMMAND_PLOT_YX);
 
 	let pixel_program = pixel_program.program.set_origin(Some(0));
 
@@ -1538,11 +1551,11 @@ impl RenderEngine {
 	) {
 		let mut counter = 0..;
 
-		// Start off with Red on Green
+		// Start off with Red on Cyan
 		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_LOAD_X;
 		scan_line_buffer.commands[counter.next().unwrap()] = RGBColour::from_12bit(0xF, 0x0, 0x0).0;
 		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_LOAD_Y;
-		scan_line_buffer.commands[counter.next().unwrap()] = RGBColour::from_12bit(0x0, 0xF, 0x0).0;
+		scan_line_buffer.commands[counter.next().unwrap()] = RGBColour::from_12bit(0x0, 0xF, 0xF).0;
 
 		// FG FG FG FG FG FG FG FG
 		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XX;
