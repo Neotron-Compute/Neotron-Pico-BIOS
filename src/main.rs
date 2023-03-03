@@ -402,8 +402,11 @@ fn main() -> ! {
 	sign_on();
 
 	// Now jump to the OS
-	let code: &common::OsStartFn = unsafe { ::core::mem::transmute(&_flash_os_start) };
-	code(&API_CALLS);
+	// let code: &common::OsStartFn = unsafe { ::core::mem::transmute(&_flash_os_start) };
+	// code(&API_CALLS);
+	loop {
+		cortex_m::asm::wfe();
+	}
 }
 
 impl Hardware {

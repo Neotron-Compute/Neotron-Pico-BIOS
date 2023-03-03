@@ -84,10 +84,10 @@ pub struct TextConsole {
 /// Describes one scan-line's worth of pixels, including the length word required by the Pixel FIFO.
 #[repr(C, align(16))]
 struct LineBuffer {
-	/// Must be one less than the number of pixel-pairs in `pixels`
-	length: u32,
-	/// Pixels to be displayed, grouped into pairs (to save FIFO space and reduce DMA bandwidth)
-	pixels: [RGBPair; MAX_NUM_PIXEL_PAIRS_PER_LINE],
+	/// Number of words we used up
+	length: usize,
+	/// Commands for the render engine
+	commands: [u16; MAX_NUM_COMMANDS_PER_LINE],
 }
 
 /// Describes the polarity of a sync pulse.
@@ -180,11 +180,10 @@ const MAX_NUM_PIXELS_PER_LINE: usize = 640;
 /// Maximum number of lines on screen.
 const MAX_NUM_LINES: usize = 480;
 
-/// How many pixel pairs we send out.
+/// How many commands we can send per line.
 ///
-/// Each pixel is two 12-bit values packed into one 32-bit word(an `RGBPair`).
-/// This is to make more efficient use of DMA and FIFO resources.
-const MAX_NUM_PIXEL_PAIRS_PER_LINE: usize = MAX_NUM_PIXELS_PER_LINE / 2;
+/// 80 columns, three plots (size 1) and a plot-load (size 3), plus a wait.
+const MAX_NUM_COMMANDS_PER_LINE: usize = (80 * (3 + 3)) + 1;
 
 /// The highest number of columns in any text mode.
 pub const MAX_TEXT_COLS: usize = MAX_NUM_PIXELS_PER_LINE / 8;
@@ -226,14 +225,91 @@ const TIMING_DMA_CHAN: usize = 0;
 /// DMA channel for the pixel FIFO
 const PIXEL_DMA_CHAN: usize = 1;
 
+/// Clear the output pins
+const CLEAR_OUTPUT_PINS: u16 = pio::InstructionOperands::MOV {
+	destination: pio::MovDestination::PINS,
+	op: pio::MovOperation::None,
+	source: pio::MovSource::NULL,
+}
+.encode();
+
+/// A Wait IRQ command
+const COMMAND_WAIT_IRQ: u16 = pio::InstructionOperands::WAIT {
+	polarity: 1,
+	source: pio::WaitSource::IRQ,
+	index: 0,
+	relative: false,
+}
+.encode();
+
+const COMMAND_LOAD_X: u16 = pio::InstructionOperands::OUT {
+	destination: pio::OutDestination::X,
+	bit_count: 16,
+}
+.encode();
+
+const COMMAND_LOAD_Y: u16 = pio::InstructionOperands::OUT {
+	destination: pio::OutDestination::Y,
+	bit_count: 16,
+}
+.encode();
+
+const COMMAND_PLOT_XX_LOAD: u16 = pio::InstructionOperands::JMP {
+	condition: pio::JmpCondition::Always,
+	address: 1,
+}
+.encode();
+
+const COMMAND_PLOT_YY_LOAD: u16 = pio::InstructionOperands::JMP {
+	condition: pio::JmpCondition::Always,
+	address: 3,
+}
+.encode();
+
+const COMMAND_PLOT_XY_LOAD: u16 = pio::InstructionOperands::JMP {
+	condition: pio::JmpCondition::Always,
+	address: 7,
+}
+.encode();
+
+const COMMAND_PLOT_YX_LOAD: u16 = pio::InstructionOperands::JMP {
+	condition: pio::JmpCondition::Always,
+	address: 12,
+}
+.encode();
+
+const COMMAND_PLOT_XX: u16 = pio::InstructionOperands::JMP {
+	condition: pio::JmpCondition::Always,
+	address: 17,
+}
+.encode();
+
+const COMMAND_PLOT_YY: u16 = pio::InstructionOperands::JMP {
+	condition: pio::JmpCondition::Always,
+	address: 19,
+}
+.encode();
+
+const COMMAND_PLOT_XY: u16 = pio::InstructionOperands::JMP {
+	condition: pio::JmpCondition::Always,
+	address: 21,
+}
+.encode();
+
+const COMMAND_PLOT_YX: u16 = pio::InstructionOperands::JMP {
+	condition: pio::JmpCondition::Always,
+	address: 24,
+}
+.encode();
+
 /// One scan-line's worth of 12-bit pixels, used for the even scan-lines (0, 2, 4 ... NUM_LINES-2).
 ///
 /// Gets read by DMA, which pushes them into the pixel state machine's FIFO.
 ///
 /// Gets written to by `RenderEngine` running on Core 1.
 static mut PIXEL_DATA_BUFFER_EVEN: LineBuffer = LineBuffer {
-	length: (MAX_NUM_PIXEL_PAIRS_PER_LINE as u32) - 1,
-	pixels: [RGBPair::from_pixels(colours::WHITE, colours::BLACK); MAX_NUM_PIXEL_PAIRS_PER_LINE],
+	length: 1,
+	commands: [COMMAND_WAIT_IRQ; MAX_NUM_COMMANDS_PER_LINE],
 };
 
 /// One scan-line's worth of 12-bit pixels, used for the odd scan-lines (1, 3, 5 ... NUM_LINES-1).
@@ -242,8 +318,8 @@ static mut PIXEL_DATA_BUFFER_EVEN: LineBuffer = LineBuffer {
 ///
 /// Gets written to by `RenderEngine` running on Core 1.
 static mut PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer {
-	length: (MAX_NUM_PIXEL_PAIRS_PER_LINE as u32) - 1,
-	pixels: [RGBPair::from_pixels(colours::BLACK, colours::WHITE); MAX_NUM_PIXEL_PAIRS_PER_LINE],
+	length: 1,
+	commands: [COMMAND_WAIT_IRQ; MAX_NUM_COMMANDS_PER_LINE],
 };
 
 /// This is our text buffer.
@@ -854,35 +930,70 @@ pub fn init(
 		".wrap"
 	);
 
-	// This is the video pixels program. It waits for an IRQ
-	// (posted by the timing loop) then pulls pixel data from the FIFO. We post
-	// the number of pixels for that line, then the pixel data.
+	// This is the video pixels program. It waits for an IRQ (posted by the
+	// timing loop) then pulls instructions from the FIFO.
 	//
-	// Post <num_pixels> <pixel1> <pixel2> ... <pixelN>; each <pixelX> maps to
-	// the RGB output pins. On a Neotron Pico, there are 12 (4 Red, 4 Green and
-	// 4 Blue) - so we set autopull to 12, and each value should be 12-bits long.
+	// The instructions are usually JMP instructions, but they can also be a
+	// WAIT IRQ instruction.
 	//
-	// Currently the FIFO supplies only the pixels, not the length value. When
-	// we read the length from the FIFO as well, all hell breaks loose.
+	// Various routines are available, and you execute them by jumping to them.
+	//
+	// plotXX: plot two pixels using the colour in the X register
+	// plotYY: plot two pixels using the colour in the Y register
+	// plotXY: plot an X coloured pixel then a Y coloured pixel
+	// plotYX: plot a Y coloured pixel then an X coloured pixel
+	//
+	// plotXXLoad: plot two pixels using the colour in the X register, then load a new X and a new Y from the FIFO.
+	// plotYYLoad, plotXYLoad, plotYXLoad: as above
+	//
+	// Each "JUMP plotNNLoad" instruction should be followed by two 16-bit RGB colours.
 	//
 	// Note autopull should be set to 32-bits, OSR is set to shift right.
 	let pixel_program = pio_proc::pio_asm!(
 		".wrap_target"
-		// Wait for timing state machine to start visible line
-		"wait 1 irq 0"
-		// Read the line length (in pixel-pairs)
-		"out x, 32"
-		"loop1:"
-			// Write out first pixel - takes 5 clocks per pixel
-			"out pins, 16 [4]"
-			// Write out second pixel - takes 5 clocks per pixel (allowing one clock for the jump)
-			"out pins, 16 [3]"
-			// Repeat until all pixel pairs sent
-			"jmp x-- loop1"
-		// Clear all pins after visible section
-		"mov pins null"
+		"main:"
+			// This is our loop - this and only this
+			// Execute bottom 16-bits of OSR as an instruction. This take two cycles.
+			"out exec, 16"    // 0
 		".wrap"
+		"plotXXLoad:"
+			"mov x, pins [3]" // 1
+			"jmp plotYYLoad2" // 2
+		"plotYYLoad:"
+			"mov y, pins [4]" // 3
+		"plotYYLoad2:"
+			"out x, 16"       // 4
+			"out y, 16"       // 5
+			"jmp main"        // 6
+		"plotXYLoad:"
+			"mov x, pins [3]" // 7
+			"out x, 16"       // 8
+			"mov y, pins"     // 9
+			"out y, 16"       // 10
+			"jmp main"        // 11
+		"plotYXLoad:"
+			"mov y, pins [3]" // 12
+			"out y, 16"       // 13
+			"mov x, pins"     // 14
+			"out x, 16"       // 15
+			"jmp main"        // 16
+		"plotXX:"
+			"mov x, pins [6]" // 17
+			"jmp main"        // 18
+		"plotYY:"
+			"mov y, pins [6]" // 19
+			"jmp main"        // 20
+		"plotXY:"
+			"mov x, pins [4]" // 21
+			"mov y, pins [1]" // 22
+			"jmp main"        // 23
+		"plotYX:"
+			"mov y, pins [4]" // 24
+			"mov x, pins [1]" // 25
+			"jmp main"        // 26
 	);
+
+	let pixel_program = pixel_program.program.set_origin(Some(0));
 
 	// These two state machines run thus:
 	//
@@ -909,6 +1020,24 @@ pub fn init(
 	// https://gregchadwick.co.uk/blog/playing-with-the-pico-pt5/ who had a
 	// very similar idea to me, but wrote it up far better than I ever could.
 
+	// Important notes!
+	//
+	// You must not set a clock_divider (other than 1.0) on the pixel state
+	// machine. You might want the pixels to be twice as wide (or mode), but
+	// enabling a clock divider adds a lot of jitter (i.e. the start each
+	// each line differs by some number of 126 MHz clock cycles).
+
+	let pixels_installed = pio.install(&pixel_program).unwrap();
+	let (mut pixel_sm, _, pixel_fifo) =
+		rp_pico::hal::pio::PIOBuilder::from_program(pixels_installed)
+			.buffers(rp_pico::hal::pio::Buffers::OnlyTx)
+			.out_pins(2, 12) // Red0 is GPIO2, Blue3 is GPIO13
+			.autopull(true)
+			.out_shift_direction(rp_pico::hal::pio::ShiftDirection::Right)
+			.pull_threshold(32) // We read all 32-bits in each FIFO word
+			.build(sm1);
+	pixel_sm.set_pindirs((2..=13).map(|x| (x, rp_pico::hal::pio::PinDir::Output)));
+
 	let timing_installed = pio.install(&timing_program.program).unwrap();
 	let (mut timing_sm, _, timing_fifo) =
 		rp_pico::hal::pio::PIOBuilder::from_program(timing_installed)
@@ -922,24 +1051,6 @@ pub fn init(
 		(0, rp_pico::hal::pio::PinDir::Output),
 		(1, rp_pico::hal::pio::PinDir::Output),
 	]);
-
-	// Important notes!
-	//
-	// You must not set a clock_divider (other than 1.0) on the pixel state
-	// machine. You might want the pixels to be twice as wide (or mode), but
-	// enabling a clock divider adds a lot of jitter (i.e. the start each
-	// each line differs by some number of 126 MHz clock cycles).
-
-	let pixels_installed = pio.install(&pixel_program.program).unwrap();
-	let (mut pixel_sm, _, pixel_fifo) =
-		rp_pico::hal::pio::PIOBuilder::from_program(pixels_installed)
-			.buffers(rp_pico::hal::pio::Buffers::OnlyTx)
-			.out_pins(2, 12) // Red0 is GPIO2, Blue3 is GPIO13
-			.autopull(true)
-			.out_shift_direction(rp_pico::hal::pio::ShiftDirection::Right)
-			.pull_threshold(32) // We read all 32-bits in each FIFO word
-			.build(sm1);
-	pixel_sm.set_pindirs((2..=13).map(|x| (x, rp_pico::hal::pio::PinDir::Output)));
 
 	// Read from the timing buffer and write to the timing FIFO. We get an
 	// IRQ when the transfer is complete (i.e. when line has been fully
@@ -985,13 +1096,13 @@ pub fn init(
 	});
 	dma.ch[PIXEL_DMA_CHAN]
 		.ch_read_addr
-		.write(|w| unsafe { w.bits(PIXEL_DATA_BUFFER_EVEN.as_ptr()) });
+		.write(|w| unsafe { w.bits(PIXEL_DATA_BUFFER_EVEN.commands.as_ptr() as u32) });
 	dma.ch[PIXEL_DMA_CHAN]
 		.ch_write_addr
 		.write(|w| unsafe { w.bits(pixel_fifo.fifo_address() as usize as u32) });
 	dma.ch[PIXEL_DMA_CHAN]
 		.ch_trans_count
-		.write(|w| unsafe { w.bits(PIXEL_DATA_BUFFER_EVEN.pixels.len() as u32 + 1) });
+		.write(|w| unsafe { w.bits(PIXEL_DATA_BUFFER_EVEN.length as u32) });
 	dma.inte0.write(|w| unsafe {
 		w.inte0()
 			.bits((1 << PIXEL_DMA_CHAN) | (1 << TIMING_DMA_CHAN))
@@ -1319,13 +1430,19 @@ unsafe fn DMA_IRQ_0() {
 		if (next_display_line & 1) == 1 {
 			// Play the odd line
 			dma.ch[PIXEL_DMA_CHAN]
+				.ch_trans_count
+				.write(|w| unsafe { w.bits(PIXEL_DATA_BUFFER_ODD.length as u32) });
+			dma.ch[PIXEL_DMA_CHAN]
 				.ch_al3_read_addr_trig
-				.write(|w| w.bits(PIXEL_DATA_BUFFER_ODD.as_ptr()))
+				.write(|w| unsafe { w.bits(PIXEL_DATA_BUFFER_ODD.commands.as_ptr() as u32) });
 		} else {
 			// Play the even line
 			dma.ch[PIXEL_DMA_CHAN]
+				.ch_trans_count
+				.write(|w| unsafe { w.bits(PIXEL_DATA_BUFFER_EVEN.length as u32) });
+			dma.ch[PIXEL_DMA_CHAN]
 				.ch_al3_read_addr_trig
-				.write(|w| w.bits(PIXEL_DATA_BUFFER_EVEN.as_ptr()))
+				.write(|w| unsafe { w.bits(PIXEL_DATA_BUFFER_EVEN.commands.as_ptr() as u32) });
 		}
 
 		CURRENT_DISPLAY_LINE.store(next_display_line, Ordering::Relaxed);
@@ -1417,8 +1534,86 @@ impl RenderEngine {
 	pub fn draw_next_line_text16(
 		&mut self,
 		scan_line_buffer: &mut LineBuffer,
-		current_line_num: u16,
+		_current_line_num: u16,
 	) {
+		let mut counter = 0..;
+
+		// Start off with Red on Green
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_LOAD_X;
+		scan_line_buffer.commands[counter.next().unwrap()] = RGBColour::from_12bit(0xF, 0x0, 0x0).0;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_LOAD_Y;
+		scan_line_buffer.commands[counter.next().unwrap()] = RGBColour::from_12bit(0x0, 0xF, 0x0).0;
+
+		// FG FG FG FG FG FG FG FG
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XX;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XX;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XX;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XX;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XX;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XX;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XX;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XX;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XX;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XX;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XX;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XX;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XX;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+
+		// scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XX_LOAD;
+		// // Change to White on Red
+		// scan_line_buffer.commands[counter.next().unwrap()] = RGBColour::from_12bit(0xF, 0xF, 0xF).0;
+		// scan_line_buffer.commands[counter.next().unwrap()] = RGBColour::from_12bit(0x7, 0x0, 0x0).0;
+
+		// // BG BG BG BG BG BG BG BG
+		// scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		// scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		// scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY;
+		// scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YY_LOAD;
+		// // Change to Yellow on Blue
+		// scan_line_buffer.commands[counter.next().unwrap()] = RGBColour::from_12bit(0xF, 0xF, 0x0).0;
+		// scan_line_buffer.commands[counter.next().unwrap()] = RGBColour::from_12bit(0x0, 0x0, 0x7).0;
+
+		// // FG BG FG BG FG BG FG BG
+		// scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XY;
+		// scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XY;
+		// scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XY;
+		// scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_XY_LOAD;
+		// // White on Blue
+		// scan_line_buffer.commands[counter.next().unwrap()] = RGBColour::from_12bit(0xF, 0xF, 0xF).0;
+		// scan_line_buffer.commands[counter.next().unwrap()] = RGBColour::from_12bit(0xF, 0x0, 0x0).0;
+
+		// // BG FG BG FG BG FG BG FG
+		// scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YX;
+		// scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YX;
+		// scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YX;
+		// scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_PLOT_YX_LOAD;
+		// // Green on Black (load is reversed)
+		// scan_line_buffer.commands[counter.next().unwrap()] = RGBColour::from_12bit(0x0, 0x0, 0x0).0;
+		// scan_line_buffer.commands[counter.next().unwrap()] = RGBColour::from_12bit(0x0, 0xF, 0x0).0;
+
+		// Finish line here
+		scan_line_buffer.commands[counter.next().unwrap()] = CLEAR_OUTPUT_PINS;
+		scan_line_buffer.commands[counter.next().unwrap()] = COMMAND_WAIT_IRQ;
+
+		scan_line_buffer.length = counter.next().unwrap();
+
+		/*
 		// Convert our position in scan-lines to a text row, and a line within each glyph on that row
 		let text_row = (current_line_num - 1) as usize / 16;
 		let font_row = (current_line_num - 1) as usize % 16;
@@ -1477,6 +1672,7 @@ impl RenderEngine {
 				px_idx += 4;
 			}
 		}
+		*/
 	}
 
 	/// Draw a line of pixels into the relevant pixel buffer (either
@@ -1487,9 +1683,10 @@ impl RenderEngine {
 	#[link_section = ".data"]
 	pub fn draw_next_line_text8(
 		&mut self,
-		scan_line_buffer: &mut LineBuffer,
-		current_line_num: u16,
+		_scan_line_buffer: &mut LineBuffer,
+		_current_line_num: u16,
 	) {
+		/*
 		// Convert our position in scan-lines to a text row, and a line within each glyph on that row.
 		let text_row = (current_line_num - 1) as usize / 8;
 		let font_row = (current_line_num - 1) as usize % 8;
@@ -1548,6 +1745,7 @@ impl RenderEngine {
 				px_idx += 4;
 			}
 		}
+		*/
 	}
 }
 
@@ -1824,13 +2022,6 @@ impl core::fmt::Write for &TextConsole {
 		}
 
 		Ok(())
-	}
-}
-
-impl LineBuffer {
-	/// Convert the line buffer to a 32-bit address that the DMA engine understands.
-	fn as_ptr(&self) -> u32 {
-		self as *const _ as usize as u32
 	}
 }
 
