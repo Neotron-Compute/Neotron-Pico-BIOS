@@ -1026,9 +1026,21 @@ impl Hardware {
 }
 
 fn sign_on() {
-	static LICENCE_TEXT: &str = "\
-		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2022\n\
+	static LOGO_TEXT: &str = "\
 		\n\
+		╔═════════════════════════════════════════════════════════════════════════════╗\n\
+		║             ▒▒▒   ▒ ▒▒▒▒▒▒ ▒▒▒▒▒▒ ▒▒▒▒▒▒ ▒▒▒▒▒  ▒▒▒▒▒▒ ▒▒▒   ▒              ║\n\
+		║             ▒ ▒▒  ▒ ▒      ▒    ▒   ▒▒   ▒    ▒ ▒    ▒ ▒ ▒▒  ▒              ║\n\
+		║             ▒ ▒▒  ▒ ▒      ▒    ▒   ▒▒   ▒    ▒ ▒    ▒ ▒ ▒▒  ▒              ║\n\
+		║             ▒  ▒▒ ▒ ▒▒▒▒▒  ▒    ▒   ▒▒   ▒▒▒▒▒  ▒    ▒ ▒  ▒▒ ▒              ║\n\
+		║             ▒   ▒▒▒ ▒      ▒    ▒   ▒▒   ▒   ▒  ▒    ▒ ▒   ▒▒▒              ║\n\
+		║             ▒   ▒▒▒ ▒      ▒    ▒   ▒▒   ▒   ▒  ▒    ▒ ▒   ▒▒▒              ║\n\
+		║             ▒    ▒▒ ▒▒▒▒▒▒ ▒▒▒▒▒▒   ▒▒   ▒    ▒ ▒▒▒▒▒▒ ▒    ▒▒              ║\n\
+		╚═════════════════════════════════════════════════════════════════════════════╝\n";
+
+	static LICENCE_TEXT: &str = "\
+		\n\
+		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2022\n\
 		This program is free software under GPL v3 (or later)\n";
 
 	// Create a new temporary console for some boot-up messages
@@ -1037,17 +1049,21 @@ fn sign_on() {
 
 	// A crude way to clear the screen
 	for _col in 0..vga::MAX_TEXT_ROWS {
-		writeln!(&tc).unwrap();
+		writeln!(&tc, " ").unwrap();
 	}
 
 	tc.move_to(0, 0);
 
+	tc.change_attr(vga::Attr::new(11, 4));
+	write!(&tc, "{}", LOGO_TEXT).unwrap();
+
 	tc.change_attr(vga::Attr::new(15, 0));
-	writeln!(&tc, "Neotron Pico BIOS {}", VERSION.trim_matches('\0')).unwrap();
-	tc.change_attr(vga::Attr::new(15, 1));
 	write!(&tc, "{}", LICENCE_TEXT).unwrap();
 
-	tc.change_attr(vga::Attr::new(10, 0));
+	tc.change_attr(vga::Attr::new(15, 4));
+	writeln!(&tc, "BIOS Version: {}", VERSION.trim_matches('\0')).unwrap();
+
+	tc.change_attr(vga::Attr::new(15, 1));
 	let bmc_ver = critical_section::with(|cs| {
 		let mut lock = HARDWARE.borrow_ref_mut(cs);
 		let hw = lock.as_mut().unwrap();
@@ -1061,14 +1077,28 @@ fn sign_on() {
 	match bmc_ver {
 		Ok(string_bytes) => match core::str::from_utf8(&string_bytes) {
 			Ok(s) => {
-				writeln!(&tc, "BMC Version: {s}").unwrap();
+				writeln!(&tc, "BMC  Version: {}", s.trim_matches('\0')).unwrap();
 			}
 			Err(_e) => {
-				writeln!(&tc, "BMC Version: Unknown").unwrap();
+				writeln!(&tc, "BMC  Version: Unknown").unwrap();
 			}
 		},
 		Err(_e) => {
-			writeln!(&tc, "BMC Version: Error reading").unwrap();
+			writeln!(&tc, "BMC  Version: Error reading").unwrap();
+		}
+	}
+
+	tc.change_attr(vga::Attr::new(15, 0));
+	writeln!(&tc).unwrap();
+	writeln!(&tc).unwrap();
+
+	// Do a colour test
+	for bg in 0..=7 {
+		for fg in 0..=15 {
+			if fg != bg {
+				tc.change_attr(vga::Attr::new(fg, bg));
+				write!(&tc, "ABCabc123#!").unwrap();
+			}
 		}
 	}
 

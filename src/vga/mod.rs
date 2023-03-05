@@ -4,11 +4,10 @@
 //!
 //! It can generate 640x480@60Hz and 640x400@70Hz standard VGA video, with a
 //! 25.2 MHz pixel clock. The spec is 25.175 MHz, so we are 0.1% off). The
-//! assumption is that the CPU is clocked at 126 MHz, i.e. 5x the pixel
-//! clock. All of the PIO code relies on this assumption!
+//! assumption is that the CPU is clocked at 151.2 MHz, i.e. 6x the pixel clock.
+//! All of the PIO code relies on this assumption!
 //!
-//! Currently only an 80x25 two-colour text-mode is supported. Other modes will be
-//! added in the future.
+//! Currently 80x25, 80x30, 80x50 and 80x60 modes are supported in colour.
 
 // -----------------------------------------------------------------------------
 // Licence Statement
@@ -55,10 +54,6 @@ use rp_pico::{hal::pio::PIOExt, pac::interrupt};
 struct RenderEngine {
 	/// How many frames have been drawn
 	frame_count: u32,
-	/// Look-up table mapping two 1-bpp pixels to two 12-bit RGB values (packed into one 32-bit word).
-	///
-	/// You can adjust this table to convert text to different colours.
-	lookup: [RGBPair; 4],
 	/// The current video mode
 	current_video_mode: crate::common::video::Mode,
 	/// How many rows of text are we showing right now
@@ -209,7 +204,7 @@ static mut TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x400();
 /// We boot in 80x50 mode.
 static VIDEO_MODE: AtomicModeWrapper = AtomicModeWrapper::new(crate::common::video::Mode::new(
 	crate::common::video::Timing::T640x400,
-	crate::common::video::Format::Text8x16,
+	crate::common::video::Format::Text8x8,
 ));
 
 /// Tracks which scan-line we are currently on (for timing purposes => it goes 0..`TIMING_BUFFER.back_porch_ends_at`)
@@ -1363,20 +1358,14 @@ impl RenderEngine {
 	pub fn new() -> RenderEngine {
 		RenderEngine {
 			frame_count: 0,
-			lookup: [
-				RGBPair::from_pixels(colours::BLUE, colours::BLUE),
-				RGBPair::from_pixels(colours::BLUE, colours::YELLOW),
-				RGBPair::from_pixels(colours::YELLOW, colours::BLUE),
-				RGBPair::from_pixels(colours::YELLOW, colours::YELLOW),
-			],
 			// Should match the default value of TIMING_BUFFER and VIDEO_MODE
 			current_video_mode: crate::common::video::Mode::new(
-				crate::common::video::Timing::T640x480,
-				crate::common::video::Format::Text8x16,
+				crate::common::video::Timing::T640x400,
+				crate::common::video::Format::Text8x8,
 			),
 			// Should match the mode above
 			num_text_cols: 80,
-			num_text_rows: 25,
+			num_text_rows: 50,
 		}
 	}
 
@@ -1422,10 +1411,10 @@ impl RenderEngine {
 
 		match self.current_video_mode.format() {
 			crate::common::video::Format::Text8x16 => {
-				self.draw_next_line_text16(scan_line_buffer, current_line_num)
+				self.draw_next_line_text::<16>(&font16::FONT, scan_line_buffer, current_line_num)
 			}
 			crate::common::video::Format::Text8x8 => {
-				self.draw_next_line_text8(scan_line_buffer, current_line_num)
+				self.draw_next_line_text::<8>(&font8::FONT, scan_line_buffer, current_line_num)
 			}
 			_ => {
 				// Draw nothing
@@ -1439,14 +1428,15 @@ impl RenderEngine {
 	///
 	/// The `current_line_num` goes from `1..=NUM_LINES`.
 	#[link_section = ".data"]
-	pub fn draw_next_line_text16(
+	pub fn draw_next_line_text<const GLYPH_HEIGHT: usize>(
 		&mut self,
+		font: &Font,
 		scan_line_buffer: &mut LineBuffer,
 		current_line_num: u16,
 	) {
 		// Convert our position in scan-lines to a text row, and a line within each glyph on that row
-		let text_row = (current_line_num - 1) as usize / 16;
-		let font_row = (current_line_num - 1) as usize % 16;
+		let text_row = (current_line_num - 1) as usize / GLYPH_HEIGHT;
+		let font_row = (current_line_num - 1) as usize % GLYPH_HEIGHT;
 
 		if text_row < self.num_text_rows {
 			// Note (unsafe): We could stash the char array inside `self`
@@ -1465,7 +1455,7 @@ impl RenderEngine {
 			// is the same for every glyph on this row, we calculate a
 			// new pointer once, in advance, and save ourselves an
 			// addition each time around the loop.
-			let font_ptr = unsafe { font16::FONT.data.as_ptr().add(font_row) };
+			let font_ptr = unsafe { font.data.as_ptr().add(font_row) };
 
 			// Get a pointer into our scan-line buffer
 			let mut scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
@@ -1473,7 +1463,7 @@ impl RenderEngine {
 			// Convert from characters to coloured pixels, using the font as a look-up table.
 
 			for glyphattr in row_slice.iter() {
-				let index = (glyphattr.glyph().0 as isize) * 16;
+				let index = (glyphattr.glyph().0 as usize) * GLYPH_HEIGHT;
 				let attr = glyphattr.attr();
 
 				unsafe {
@@ -1481,7 +1471,7 @@ impl RenderEngine {
 					// can't afford a bounds-check on an array. This is safe
 					// because the font is `256 * width` bytes long and we can't
 					// index more than `255 * width` bytes into it.
-					let mono_pixels = *font_ptr.offset(index);
+					let mono_pixels = *font_ptr.add(index);
 
 					// 0bXX------
 					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 6);
@@ -1498,77 +1488,6 @@ impl RenderEngine {
 
 					scan_line_buffer_ptr = scan_line_buffer_ptr.offset(4);
 				}
-			}
-		}
-	}
-
-	/// Draw a line of pixels into the relevant pixel buffer (either
-	/// [`PIXEL_DATA_BUFFER_ODD`] or [`PIXEL_DATA_BUFFER_EVEN`]) using the 8x8
-	/// font.
-	///
-	/// The `current_line_num` goes from `1..=NUM_LINES`.
-	#[link_section = ".data"]
-	pub fn draw_next_line_text8(
-		&mut self,
-		scan_line_buffer: &mut LineBuffer,
-		current_line_num: u16,
-	) {
-		// Convert our position in scan-lines to a text row, and a line within each glyph on that row.
-		let text_row = (current_line_num - 1) as usize / 8;
-		let font_row = (current_line_num - 1) as usize % 8;
-
-		if text_row < self.num_text_rows {
-			// Note (unsafe): We could stash the char array inside `self`
-			// but at some point we are going to need one CPU rendering
-			// the text, and the other CPU running code and writing to
-			// the buffer. This might be Undefined Behaviour, but
-			// unfortunately real-time video is all about shared mutable
-			// state. At least our platform is fixed, so we can simply
-			// test if it works, for some given version of the Rust compiler.
-			let row_slice = unsafe {
-				&GLYPH_ATTR_ARRAY
-					[(text_row * self.num_text_cols)..((text_row + 1) * self.num_text_cols)]
-			};
-			// Every font look-up we are about to do for this row will
-			// involve offsetting by the row within each glyph. As this
-			// is the same for every glyph on this row, we calculate a
-			// new pointer once, in advance, and save ourselves an
-			// addition each time around the loop.
-			let font_ptr = unsafe { font8::FONT.data.as_ptr().add(font_row) };
-
-			// Get a pointer into our scan-line buffer
-			let scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
-			let mut px_idx = 0;
-
-			// Convert from characters to coloured pixels, using the font as a look-up table.
-			for glyphattr in row_slice.iter() {
-				let index = (glyphattr.glyph().0 as isize) * 8;
-				// Note (unsafe): We use pointer arithmetic here because we
-				// can't afford a bounds-check on an array. This is safe
-				// because the font is `256 * width` bytes long and we can't
-				// index more than `255 * width` bytes into it.
-				let mono_pixels = unsafe { *font_ptr.offset(index) } as usize;
-				// Convert from eight mono pixels in one byte to four RGB
-				// pairs. Hopefully the `& 3` elides the panic calls.
-				unsafe {
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx),
-						self.lookup[(mono_pixels >> 6) & 3],
-					);
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx + 1),
-						self.lookup[(mono_pixels >> 4) & 3],
-					);
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx + 2),
-						self.lookup[(mono_pixels >> 2) & 3],
-					);
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx + 3),
-						self.lookup[mono_pixels & 3],
-					);
-				}
-				px_idx += 4;
 			}
 		}
 	}
@@ -1589,8 +1508,8 @@ impl TextConsole {
 			current_row: AtomicU16::new(0),
 			current_col: AtomicU16::new(0),
 			text_buffer: AtomicPtr::new(core::ptr::null_mut()),
-			// White on Dark Red, with the default palette
-			current_attr: AtomicU8::new(Attr::new(15, 1).0),
+			// White on Black, with the default palette
+			current_attr: AtomicU8::new(Attr::new(15, 0).0),
 		}
 	}
 
@@ -2168,16 +2087,6 @@ impl Attr {
 		let mut result = (bg & 0x07) << 4;
 		result |= fg & 0x0F;
 		Attr(result)
-	}
-
-	/// Get the foreground palette index (results in 0..=15)
-	const fn fg(self) -> u8 {
-		self.0 & 0x0F
-	}
-
-	/// Get the background palette index (results in 0..=7)
-	const fn bg(self) -> u8 {
-		(self.0 >> 4) & 0x07
 	}
 }
 
