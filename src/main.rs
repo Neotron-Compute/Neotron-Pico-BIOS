@@ -290,8 +290,8 @@ fn main() -> ! {
 	// VERSION has a trailing `\0` as that is what the BIOS/OS API requires.
 	info!("Neotron BIOS {} starting...", VERSION.trim_matches('\0'));
 
-	// Run at 126 MHz SYS_PLL, 48 MHz, USB_PLL. This is important, we as clock
-	// the PIO at ÷ 5, to give 25.2 MHz (which is close enough to the 25.175
+	// Run at 151.2 MHz SYS_PLL, 48 MHz, USB_PLL. This is important, we as clock
+	// the PIO at ÷ 6, to give 25.2 MHz (which is close enough to the 25.175
 	// MHz standard VGA pixel clock).
 
 	// Step 1. Turn on the crystal.
@@ -303,14 +303,14 @@ fn main() -> ! {
 	// Step 3. Create a clocks manager.
 	let mut clocks = hal::clocks::ClocksManager::new(pp.CLOCKS);
 	// Step 4. Set up the system PLL. We take Crystal Oscillator (=12 MHz),
-	// ×126 (=1512 MHz), ÷6 (=252 MHz), ÷2 (=126 MHz)
+	// ×126 (=1512 MHz), ÷5 (=302.4 MHz), ÷2 (=151.2 MHz)
 	let pll_sys = hal::pll::setup_pll_blocking(
 		pp.PLL_SYS,
 		xosc.operating_frequency(),
 		hal::pll::PLLConfig {
 			vco_freq: 1512.MHz(),
 			refdiv: 1,
-			post_div1: 6,
+			post_div1: 5,
 			post_div2: 2,
 		},
 		&mut clocks,
@@ -1028,9 +1028,12 @@ fn sign_on() {
 
 	tc.move_to(0, 0);
 
+	tc.change_attr(vga::Attr::new(15, 0));
 	writeln!(&tc, "Neotron Pico BIOS {}", VERSION.trim_matches('\0')).unwrap();
+	tc.change_attr(vga::Attr::new(15, 1));
 	write!(&tc, "{}", LICENCE_TEXT).unwrap();
 
+	tc.change_attr(vga::Attr::new(10, 0));
 	let bmc_ver = critical_section::with(|cs| {
 		let mut lock = HARDWARE.borrow_ref_mut(cs);
 		let hw = lock.as_mut().unwrap();

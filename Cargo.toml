@@ -55,6 +55,8 @@ codegen-units = 1
 debug = true
 # better optimizations
 lto = true
+# set the optimisation level
+opt-level = 3
 
 [patch.crates-io]
 rp2040-boot2 = { version = "0.3.0", git = "https://github.com/rp-rs/rp2040-boot2" }

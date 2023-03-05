@@ -79,6 +79,7 @@ pub struct TextConsole {
 	current_col: AtomicU16,
 	current_row: AtomicU16,
 	text_buffer: AtomicPtr<GlyphAttr>,
+	current_attr: AtomicU8,
 }
 
 /// Describes one scan-line's worth of pixels, including the length word required by the Pixel FIFO.
@@ -164,6 +165,11 @@ pub struct GlyphAttr(u16);
 /// Holds a video mode, but as an atomic value suitable for use in a `static`.
 struct AtomicModeWrapper {
 	value: AtomicU8,
+}
+
+/// See [`TEXT_COLOUR_LOOKUP`]
+struct TextColourLookup {
+	entries: [RGBPair; 512],
 }
 
 // -----------------------------------------------------------------------------
@@ -270,6 +276,19 @@ static CORE1_ENTRY_FUNCTION: [u16; 2] = [
 	0xbd03, // pop {r0, r1, pc}
 	0x46c0, // nop - pad this out to 32-bits long
 ];
+
+/// Holds the colour look-up table for text mode.
+///
+/// The input is a 9-bit vlaue comprised of the 4-bit foreground colour index,
+/// the 3-bit background colour index, and a two mono pixels. The output is a
+/// 32-bit RGB Colour Pair, containing two RGB pixels.
+///
+/// ```
+/// +-----+-----+-----+-----+-----+-----+-----+-----+-----+
+/// | FG3 | FG2 | FG1 | FG0 | BG2 | BG1 | BG0 | PX1 | PX0 |
+/// +-----+-----+-----+-----+-----+-----+-----+-----+-----+
+/// ```
+static mut TEXT_COLOUR_LOOKUP: TextColourLookup = TextColourLookup::blank();
 
 /// A set of useful constants representing common RGB colours.
 pub mod colours {
@@ -854,13 +873,14 @@ pub fn init(
 		".wrap"
 	);
 
-	// This is the video pixels program. It waits for an IRQ
-	// (posted by the timing loop) then pulls pixel data from the FIFO. We post
-	// the number of pixels for that line, then the pixel data.
+	// This is the video pixels program. It waits for an IRQ (posted by the
+	// timing loop) then pulls pixel data from the FIFO. We post the number of
+	// pixels for that line, then the pixel data.
 	//
 	// Post <num_pixels> <pixel1> <pixel2> ... <pixelN>; each <pixelX> maps to
 	// the RGB output pins. On a Neotron Pico, there are 12 (4 Red, 4 Green and
-	// 4 Blue) - so we set autopull to 12, and each value should be 12-bits long.
+	// 4 Blue) - each value should be 12-bits long in the bottom of a 16-bit
+	// word.
 	//
 	// Currently the FIFO supplies only the pixels, not the length value. When
 	// we read the length from the FIFO as well, all hell breaks loose.
@@ -874,9 +894,9 @@ pub fn init(
 		"out x, 32"
 		"loop1:"
 			// Write out first pixel - takes 5 clocks per pixel
-			"out pins, 16 [4]"
+			"out pins, 16 [5]"
 			// Write out second pixel - takes 5 clocks per pixel (allowing one clock for the jump)
-			"out pins, 16 [3]"
+			"out pins, 16 [4]"
 			// Repeat until all pixel pairs sent
 			"jmp x-- loop1"
 		// Clear all pins after visible section
@@ -928,7 +948,7 @@ pub fn init(
 	// You must not set a clock_divider (other than 1.0) on the pixel state
 	// machine. You might want the pixels to be twice as wide (or mode), but
 	// enabling a clock divider adds a lot of jitter (i.e. the start each
-	// each line differs by some number of 126 MHz clock cycles).
+	// each line differs by some number of 151.2 MHz clock cycles).
 
 	let pixels_installed = pio.install(&pixel_program.program).unwrap();
 	let (mut pixel_sm, _, pixel_fifo) =
@@ -1034,6 +1054,11 @@ pub fn init(
 		core1_stack.as_ptr(),
 		core1_stack.len()
 	);
+
+	// No-one else is looking at this right now.
+	unsafe {
+		TEXT_COLOUR_LOOKUP.init(&VIDEO_PALETTE);
+	}
 
 	multicore_launch_core1_with_stack(core1_main, core1_stack, ppb, fifo, psm);
 
@@ -1443,38 +1468,36 @@ impl RenderEngine {
 			let font_ptr = unsafe { font16::FONT.data.as_ptr().add(font_row) };
 
 			// Get a pointer into our scan-line buffer
-			let scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
-			let mut px_idx = 0;
+			let mut scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
 
 			// Convert from characters to coloured pixels, using the font as a look-up table.
+
 			for glyphattr in row_slice.iter() {
 				let index = (glyphattr.glyph().0 as isize) * 16;
-				// Note (unsafe): We use pointer arithmetic here because we
-				// can't afford a bounds-check on an array. This is safe
-				// because the font is `256 * width` bytes long and we can't
-				// index more than `255 * width` bytes into it.
-				let mono_pixels = unsafe { *font_ptr.offset(index) } as usize;
-				// Convert from eight mono pixels in one byte to four RGB
-				// pairs. Hopefully the `& 3` elides the panic calls.
+				let attr = glyphattr.attr();
+
 				unsafe {
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx),
-						self.lookup[(mono_pixels >> 6) & 3],
-					);
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx + 1),
-						self.lookup[(mono_pixels >> 4) & 3],
-					);
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx + 2),
-						self.lookup[(mono_pixels >> 2) & 3],
-					);
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx + 3),
-						self.lookup[mono_pixels & 3],
-					);
+					// Note (unsafe): We use pointer arithmetic here because we
+					// can't afford a bounds-check on an array. This is safe
+					// because the font is `256 * width` bytes long and we can't
+					// index more than `255 * width` bytes into it.
+					let mono_pixels = *font_ptr.offset(index);
+
+					// 0bXX------
+					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 6);
+					scan_line_buffer_ptr.write(pair);
+					// 0b--XX----
+					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 4);
+					scan_line_buffer_ptr.offset(1).write(pair);
+					// 0b----XX--
+					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 2);
+					scan_line_buffer_ptr.offset(2).write(pair);
+					// 0b------XX
+					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels);
+					scan_line_buffer_ptr.offset(3).write(pair);
+
+					scan_line_buffer_ptr = scan_line_buffer_ptr.offset(4);
 				}
-				px_idx += 4;
 			}
 		}
 	}
@@ -1566,6 +1589,8 @@ impl TextConsole {
 			current_row: AtomicU16::new(0),
 			current_col: AtomicU16::new(0),
 			text_buffer: AtomicPtr::new(core::ptr::null_mut()),
+			// White on Dark Red, with the default palette
+			current_attr: AtomicU8::new(Attr::new(15, 1).0),
 		}
 	}
 
@@ -1763,6 +1788,7 @@ impl TextConsole {
 		let mode = VIDEO_MODE.get_mode();
 		let num_rows = mode.text_height().unwrap_or(0) as usize;
 		let num_cols = mode.text_width().unwrap_or(0) as usize;
+		let attr = Attr(self.current_attr.load(Ordering::Relaxed));
 
 		if glyph.0 == b'\r' {
 			*col = 0;
@@ -1775,7 +1801,7 @@ impl TextConsole {
 			unsafe {
 				buffer
 					.add(offset)
-					.write_volatile(GlyphAttr::new(glyph, Attr(0)))
+					.write_volatile(GlyphAttr::new(glyph, attr))
 			};
 			*col += 1;
 		}
@@ -1795,10 +1821,15 @@ impl TextConsole {
 				unsafe {
 					buffer
 						.add(offset)
-						.write_volatile(GlyphAttr::new(Glyph(b' '), Attr(0)))
+						.write_volatile(GlyphAttr::new(Glyph(b' '), attr))
 				};
 			}
 		}
+	}
+
+	pub fn change_attr(&self, attr: Attr) {
+		let value = attr.0;
+		self.current_attr.store(value, Ordering::Relaxed);
 	}
 }
 
@@ -1851,6 +1882,8 @@ impl SyncPolarity {
 }
 
 impl ScanlineTimingBuffer {
+	const CLOCKS_PER_PIXEL: u32 = 6;
+
 	/// Create a timing buffer for each scan-line in the V-Sync visible portion.
 	///
 	/// The timings are in the order (front-porch, sync, back-porch, visible) and are in pixel clocks.
@@ -1862,13 +1895,23 @@ impl ScanlineTimingBuffer {
 		ScanlineTimingBuffer {
 			data: [
 				// Front porch (as per the spec)
-				Self::make_timing(timings.0 * 5, hsync.disabled(), vsync.disabled(), false),
+				Self::make_timing(
+					timings.0 * Self::CLOCKS_PER_PIXEL,
+					hsync.disabled(),
+					vsync.disabled(),
+					false,
+				),
 				// Sync pulse (as per the spec)
-				Self::make_timing(timings.1 * 5, hsync.enabled(), vsync.disabled(), false),
+				Self::make_timing(
+					timings.1 * Self::CLOCKS_PER_PIXEL,
+					hsync.enabled(),
+					vsync.disabled(),
+					false,
+				),
 				// Back porch. Adjusted by a few clocks to account for interrupt +
 				// PIO SM start latency.
 				Self::make_timing(
-					(timings.2 * 5) - 5,
+					(timings.2 * Self::CLOCKS_PER_PIXEL) - 5,
 					hsync.disabled(),
 					vsync.disabled(),
 					false,
@@ -1877,7 +1920,7 @@ impl ScanlineTimingBuffer {
 				// moving. Adjusted to compensate for changes made to previous
 				// period to ensure scan-line remains at correct length.
 				Self::make_timing(
-					(timings.3 * 5) + 5,
+					(timings.3 * Self::CLOCKS_PER_PIXEL) + 5,
 					hsync.disabled(),
 					vsync.disabled(),
 					true,
@@ -1895,13 +1938,33 @@ impl ScanlineTimingBuffer {
 		ScanlineTimingBuffer {
 			data: [
 				// Front porch (as per the spec)
-				Self::make_timing(timings.0 * 5, hsync.disabled(), vsync.disabled(), false),
+				Self::make_timing(
+					timings.0 * Self::CLOCKS_PER_PIXEL,
+					hsync.disabled(),
+					vsync.disabled(),
+					false,
+				),
 				// Sync pulse (as per the spec)
-				Self::make_timing(timings.1 * 5, hsync.enabled(), vsync.disabled(), false),
+				Self::make_timing(
+					timings.1 * Self::CLOCKS_PER_PIXEL,
+					hsync.enabled(),
+					vsync.disabled(),
+					false,
+				),
 				// Back porch.
-				Self::make_timing(timings.2 * 5, hsync.disabled(), vsync.disabled(), false),
+				Self::make_timing(
+					timings.2 * Self::CLOCKS_PER_PIXEL,
+					hsync.disabled(),
+					vsync.disabled(),
+					false,
+				),
 				// Visible portion.
-				Self::make_timing(timings.3 * 5, hsync.disabled(), vsync.disabled(), false),
+				Self::make_timing(
+					timings.3 * Self::CLOCKS_PER_PIXEL,
+					hsync.disabled(),
+					vsync.disabled(),
+					false,
+				),
 			],
 		}
 	}
@@ -1915,13 +1978,33 @@ impl ScanlineTimingBuffer {
 		ScanlineTimingBuffer {
 			data: [
 				// Front porch (as per the spec)
-				Self::make_timing(timings.0 * 5, hsync.disabled(), vsync.enabled(), false),
+				Self::make_timing(
+					timings.0 * Self::CLOCKS_PER_PIXEL,
+					hsync.disabled(),
+					vsync.enabled(),
+					false,
+				),
 				// Sync pulse (as per the spec)
-				Self::make_timing(timings.1 * 5, hsync.enabled(), vsync.enabled(), false),
+				Self::make_timing(
+					timings.1 * Self::CLOCKS_PER_PIXEL,
+					hsync.enabled(),
+					vsync.enabled(),
+					false,
+				),
 				// Back porch.
-				Self::make_timing(timings.2 * 5, hsync.disabled(), vsync.enabled(), false),
+				Self::make_timing(
+					timings.2 * Self::CLOCKS_PER_PIXEL,
+					hsync.disabled(),
+					vsync.enabled(),
+					false,
+				),
 				// Visible portion.
-				Self::make_timing(timings.3 * 5, hsync.disabled(), vsync.enabled(), false),
+				Self::make_timing(
+					timings.3 * Self::CLOCKS_PER_PIXEL,
+					hsync.disabled(),
+					vsync.enabled(),
+					false,
+				),
 			],
 		}
 	}
@@ -2076,6 +2159,28 @@ impl RGBPair {
 	}
 }
 
+impl Attr {
+	/// Construct a new `Attr` from a foreground and a background index.
+	///
+	/// * The `fg` value must be in the range `0..=15`.
+	/// * The `bg` value must be in the range `0..=7`.
+	pub const fn new(fg: u8, bg: u8) -> Attr {
+		let mut result = (bg & 0x07) << 4;
+		result |= fg & 0x0F;
+		Attr(result)
+	}
+
+	/// Get the foreground palette index (results in 0..=15)
+	const fn fg(self) -> u8 {
+		self.0 & 0x0F
+	}
+
+	/// Get the background palette index (results in 0..=7)
+	const fn bg(self) -> u8 {
+		(self.0 >> 4) & 0x07
+	}
+}
+
 impl GlyphAttr {
 	/// Make a new glyph/attribute pair.
 	pub const fn new(glyph: Glyph, attr: Attr) -> GlyphAttr {
@@ -2112,6 +2217,48 @@ impl AtomicModeWrapper {
 		let value = self.value.load(Ordering::SeqCst);
 		// Safety: the 'set_mode' function ensure this is always valid.
 		unsafe { crate::common::video::Mode::from_u8(value) }
+	}
+}
+
+impl TextColourLookup {
+	const fn blank() -> TextColourLookup {
+		TextColourLookup {
+			entries: [RGBPair(0); 512],
+		}
+	}
+
+	fn init(&mut self, palette: &[RGBColour]) {
+		for (fg, fg_colour) in palette.iter().take(16).enumerate() {
+			for (bg, bg_colour) in palette.iter().take(8).enumerate() {
+				let attr = Attr::new(fg as u8, bg as u8);
+				for pixels in 0..=3 {
+					let index: usize = (((attr.0 & 0x7F) as usize) << 2) | (pixels & 0x03) as usize;
+					debug!(
+						"fg = {}, bg = {}, px = {:b}, index = {}",
+						fg, bg, pixels, index
+					);
+					let pair = RGBPair::from_pixels(
+						if pixels & 0x02 == 0x02 {
+							*fg_colour
+						} else {
+							*bg_colour
+						},
+						if pixels & 0x01 == 0x01 {
+							*fg_colour
+						} else {
+							*bg_colour
+						},
+					);
+					self.entries[index] = pair;
+				}
+			}
+		}
+	}
+
+	#[inline]
+	fn lookup(&self, attr: Attr, pixels: u8) -> RGBPair {
+		let index: usize = (((attr.0 & 0x7F) as usize) << 2) | (pixels & 0x03) as usize;
+		unsafe { core::ptr::read(self.entries.as_ptr().add(index)) }
 	}
 }
 
