@@ -274,7 +274,7 @@ static CORE1_ENTRY_FUNCTION: [u16; 2] = [
 
 /// Holds the colour look-up table for text mode.
 ///
-/// The input is a 9-bit vlaue comprised of the 4-bit foreground colour index,
+/// The input is a 9-bit value comprised of the 4-bit foreground colour index,
 /// the 3-bit background colour index, and a two mono pixels. The output is a
 /// 32-bit RGB Colour Pair, containing two RGB pixels.
 ///
