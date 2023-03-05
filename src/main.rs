@@ -302,8 +302,22 @@ fn main() -> ! {
 	watchdog.enable_tick_generation((rp_pico::XOSC_CRYSTAL_FREQ / 1_000_000) as u8);
 	// Step 3. Create a clocks manager.
 	let mut clocks = hal::clocks::ClocksManager::new(pp.CLOCKS);
-	// Step 4. Set up the system PLL. We take Crystal Oscillator (=12 MHz),
-	// ×126 (=1512 MHz), ÷5 (=302.4 MHz), ÷2 (=151.2 MHz)
+	// Step 4. Set up the system PLL.
+	//
+	// We take the Crystal Oscillator (=12 MHz) with no divider, and ×126 to
+	// give a FOUTVCO of 1512 MHz. This must be in the range 750 MHz - 1600 MHz.
+	// The factor of 126 is calculated automatically given the desired FOUTVCO.
+	//
+	// Next we ÷5 on the first post divider to give 302.4 MHz.
+	//
+	// Finally we ÷2 on the second post divider to give 151.2 MHz.
+	//
+	// We note from the [RP2040
+	// Datasheet](https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf),
+	// Section 2.18.2.1:
+	//
+	// > Jitter is minimised by running the VCO at the highest possible
+	// > frequency, so that higher post-divide values can be used.
 	let pll_sys = hal::pll::setup_pll_blocking(
 		pp.PLL_SYS,
 		xosc.operating_frequency(),
@@ -318,7 +332,7 @@ fn main() -> ! {
 	)
 	.map_err(|_x| false)
 	.unwrap();
-	// Step 5. Set up a 48 MHz PLL for the USB system.
+	// Step 5. Set up a 48 MHz PLL for the USB system.
 	let pll_usb = hal::pll::setup_pll_blocking(
 		pp.PLL_USB,
 		xosc.operating_frequency(),
