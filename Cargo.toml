@@ -55,8 +55,10 @@ codegen-units = 1
 debug = true
 # better optimizations
 lto = true
-# set the optimisation level
-opt-level = 3
+# Set the optimisation level to optimise for space. This also happens to be a
+# good choice for performance on the RP2040, where code executes from external
+# SPI Flash and has to be buffered in a small on-chip cache memory.
+opt-level = "s"
 
 [patch.crates-io]
 rp2040-boot2 = { version = "0.3.0", git = "https://github.com/rp-rs/rp2040-boot2" }
