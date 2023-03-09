@@ -1055,10 +1055,10 @@ fn sign_on() {
 	tc.move_to(0, 0);
 
 	tc.change_attr(vga::Attr::new(11, 4));
-	write!(&tc, "{}", LOGO_TEXT).unwrap();
+	write!(&tc, "{LOGO_TEXT}").unwrap();
 
 	tc.change_attr(vga::Attr::new(15, 0));
-	write!(&tc, "{}", LICENCE_TEXT).unwrap();
+	write!(&tc, "{LICENCE_TEXT}").unwrap();
 
 	tc.change_attr(vga::Attr::new(15, 4));
 	writeln!(&tc, "BIOS Version: {}", VERSION.trim_matches('\0')).unwrap();
