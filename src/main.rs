@@ -1475,27 +1475,32 @@ pub extern "C" fn video_wait_for_line(line: u16) {
 	}
 }
 
-/// Read the RGB palette. Currently we only have two colours and you can't
-/// change them.
+/// Read the RGB palette.
 extern "C" fn video_get_palette(index: u8) -> common::Option<common::video::RGBColour> {
-	match index {
-		0 => common::Option::Some(vga::colours::BLUE.into()),
-		1 => common::Option::Some(vga::colours::YELLOW.into()),
-		_ => common::Option::None,
-	}
+	let raw_u16 = vga::VIDEO_PALETTE[index as usize].load(Ordering::Relaxed);
+	let our_colour = vga::RGBColour(raw_u16);
+	// Convert from our 12-bit colour type to the public 24-bit colour type
+	common::Option::Some(our_colour.into())
 }
 
-/// Update the RGB palette
-extern "C" fn video_set_palette(_index: u8, _rgb: common::video::RGBColour) {
-	// TODO set the palette when we actually have one
+/// Update the RGB palette.
+extern "C" fn video_set_palette(index: u8, rgb: common::video::RGBColour) {
+	// Convert from their 24-bit colour type to our 12-bit colour type
+	let our_colour: vga::RGBColour = rgb.into();
+	// Store it
+	vga::VIDEO_PALETTE[index as usize].store(our_colour.0, Ordering::Relaxed);
 }
 
 /// Update all the RGB palette
 unsafe extern "C" fn video_set_whole_palette(
-	_palette: *const common::video::RGBColour,
-	_length: usize,
+	palette: *const common::video::RGBColour,
+	length: usize,
 ) {
-	// TODO set the palette when we actually have one
+	// Don't let them set more than 255 entries
+	let num_entries = length.min(255);
+	for i in 0..num_entries {
+		video_set_palette(i as u8, palette.add(i).read())
+	}
 }
 
 extern "C" fn i2c_bus_get_info(_i2c_bus: u8) -> common::Option<common::i2c::BusInfo> {
@@ -1676,6 +1681,7 @@ extern "C" fn block_dev_eject(_dev_id: u8) -> common::Result<()> {
 /// Sleep the CPU until the next interrupt.
 extern "C" fn power_idle() {
 	if !INTERRUPT_PENDING.load(Ordering::Relaxed) {
+		defmt::debug!("Idle...");
 		cortex_m::asm::wfe();
 	}
 }
