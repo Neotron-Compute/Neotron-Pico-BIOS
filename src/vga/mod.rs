@@ -41,6 +41,7 @@ mod font8;
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, AtomicU8, Ordering};
 use defmt::{debug, trace};
+use neotron_common_bios::video::{Attr, TextBackgroundColour, TextForegroundColour};
 use rp_pico::{hal::pio::PIOExt, pac::interrupt};
 
 // -----------------------------------------------------------------------------
@@ -145,11 +146,6 @@ pub struct RGBPair(u32);
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct Glyph(u8);
-
-/// Represents VGA format foreground/background attributes.
-#[repr(transparent)]
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub struct Attr(u8);
 
 /// Represents a glyph/attribute pair. This is what out text console is made
 /// out of. They work in exactly the same way as IBM PC VGA.
@@ -306,6 +302,10 @@ pub mod colours {
 }
 
 /// Holds the 256-entry palette for indexed colour modes.
+///
+/// Note, the first eight entries should match
+/// [`neotron_common_bios::video::TextBackgroundColour`] and the first 16 entries
+/// should meatch [`neotron_common_bios::video::TextForegroundColour`].
 pub static VIDEO_PALETTE: [AtomicU16; 256] = [
 	// Index 000: 0x000 (Black)
 	AtomicU16::new(RGBColour::from_12bit(0x0, 0x0, 0x0).0),
@@ -1509,7 +1509,14 @@ impl TextConsole {
 			current_col: AtomicU16::new(0),
 			text_buffer: AtomicPtr::new(core::ptr::null_mut()),
 			// White on Black, with the default palette
-			current_attr: AtomicU8::new(Attr::new(15, 0).0),
+			current_attr: AtomicU8::new(
+				Attr::new(
+					TextForegroundColour::WHITE,
+					TextBackgroundColour::BLACK,
+					false,
+				)
+				.0,
+			),
 		}
 	}
 
@@ -2087,18 +2094,6 @@ impl RGBPair {
 	}
 }
 
-impl Attr {
-	/// Construct a new `Attr` from a foreground and a background index.
-	///
-	/// * The `fg` value must be in the range `0..=15`.
-	/// * The `bg` value must be in the range `0..=7`.
-	pub const fn new(fg: u8, bg: u8) -> Attr {
-		let mut result = (bg & 0x07) << 4;
-		result |= fg & 0x0F;
-		Attr(result)
-	}
-}
-
 impl GlyphAttr {
 	/// Make a new glyph/attribute pair.
 	pub const fn new(glyph: Glyph, attr: Attr) -> GlyphAttr {
@@ -2148,7 +2143,13 @@ impl TextColourLookup {
 	fn init(&mut self, palette: &[AtomicU16]) {
 		for (fg, fg_colour) in palette.iter().take(16).enumerate() {
 			for (bg, bg_colour) in palette.iter().take(8).enumerate() {
-				let attr = Attr::new(fg as u8, bg as u8);
+				let attr = unsafe {
+					Attr::new(
+						TextForegroundColour::new_unchecked(fg as u8),
+						TextBackgroundColour::new_unchecked(bg as u8),
+						false,
+					)
+				};
 				for pixels in 0..=3 {
 					let index: usize = (((attr.0 & 0x7F) as usize) << 2) | (pixels & 0x03) as usize;
 					let pair = RGBPair::from_pixels(

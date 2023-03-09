@@ -83,7 +83,10 @@ use rp_pico::{
 };
 
 // Other Neotron Crates
-use common::MemoryRegion;
+use common::{
+	video::{Attr, TextBackgroundColour, TextForegroundColour},
+	MemoryRegion,
+};
 use neotron_bmc_commands::Command;
 use neotron_bmc_protocol::Receivable;
 use neotron_common_bios as common;
@@ -1054,16 +1057,32 @@ fn sign_on() {
 
 	tc.move_to(0, 0);
 
-	tc.change_attr(vga::Attr::new(11, 4));
+	tc.change_attr(Attr::new(
+		TextForegroundColour::BRIGHT_YELLOW,
+		TextBackgroundColour::BLUE,
+		false,
+	));
 	write!(&tc, "{LOGO_TEXT}").unwrap();
 
-	tc.change_attr(vga::Attr::new(15, 0));
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::BLACK,
+		false,
+	));
 	write!(&tc, "{LICENCE_TEXT}").unwrap();
 
-	tc.change_attr(vga::Attr::new(15, 4));
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::BLUE,
+		false,
+	));
 	writeln!(&tc, "BIOS Version: {}", VERSION.trim_matches('\0')).unwrap();
 
-	tc.change_attr(vga::Attr::new(15, 1));
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::DARK_RED,
+		false,
+	));
 	let bmc_ver = critical_section::with(|cs| {
 		let mut lock = HARDWARE.borrow_ref_mut(cs);
 		let hw = lock.as_mut().unwrap();
@@ -1088,7 +1107,11 @@ fn sign_on() {
 		}
 	}
 
-	tc.change_attr(vga::Attr::new(15, 0));
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::BLACK,
+		false,
+	));
 	writeln!(&tc).unwrap();
 	writeln!(&tc).unwrap();
 
@@ -1096,7 +1119,16 @@ fn sign_on() {
 	for bg in 0..=7 {
 		for fg in 0..=15 {
 			if fg != bg {
-				tc.change_attr(vga::Attr::new(fg, bg));
+				tc.change_attr(
+					// Safety: The loop above ensures bg and fg stay within bounds (0..=7 and 0..=15)
+					unsafe {
+						Attr::new(
+							TextForegroundColour::new_unchecked(fg),
+							TextBackgroundColour::new_unchecked(bg),
+							false,
+						)
+					},
+				);
 				write!(&tc, "ABCabc123#!").unwrap();
 			}
 		}
