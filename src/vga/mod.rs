@@ -2142,10 +2142,6 @@ impl TextColourLookup {
 				let attr = Attr::new(fg as u8, bg as u8);
 				for pixels in 0..=3 {
 					let index: usize = (((attr.0 & 0x7F) as usize) << 2) | (pixels & 0x03) as usize;
-					debug!(
-						"fg = {}, bg = {}, px = {:b}, index = {}",
-						fg, bg, pixels, index
-					);
 					let pair = RGBPair::from_pixels(
 						if pixels & 0x02 == 0x02 {
 							*fg_colour
