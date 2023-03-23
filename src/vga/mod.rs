@@ -4,11 +4,10 @@
 //!
 //! It can generate 640x480@60Hz and 640x400@70Hz standard VGA video, with a
 //! 25.2 MHz pixel clock. The spec is 25.175 MHz, so we are 0.1% off). The
-//! assumption is that the CPU is clocked at 126 MHz, i.e. 5x the pixel
-//! clock. All of the PIO code relies on this assumption!
+//! assumption is that the CPU is clocked at 151.2 MHz, i.e. 6x the pixel clock.
+//! All of the PIO code relies on this assumption!
 //!
-//! Currently only an 80x25 two-colour text-mode is supported. Other modes will be
-//! added in the future.
+//! Currently 80x25, 80x30, 80x50 and 80x60 modes are supported in colour.
 
 // -----------------------------------------------------------------------------
 // Licence Statement
@@ -42,6 +41,7 @@ mod font8;
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, AtomicU8, Ordering};
 use defmt::{debug, trace};
+use neotron_common_bios::video::{Attr, TextBackgroundColour, TextForegroundColour};
 use rp_pico::{hal::pio::PIOExt, pac::interrupt};
 
 // -----------------------------------------------------------------------------
@@ -55,10 +55,6 @@ use rp_pico::{hal::pio::PIOExt, pac::interrupt};
 struct RenderEngine {
 	/// How many frames have been drawn
 	frame_count: u32,
-	/// Look-up table mapping two 1-bpp pixels to two 12-bit RGB values (packed into one 32-bit word).
-	///
-	/// You can adjust this table to convert text to different colours.
-	lookup: [RGBPair; 4],
 	/// The current video mode
 	current_video_mode: crate::common::video::Mode,
 	/// How many rows of text are we showing right now
@@ -79,6 +75,7 @@ pub struct TextConsole {
 	current_col: AtomicU16,
 	current_row: AtomicU16,
 	text_buffer: AtomicPtr<GlyphAttr>,
+	current_attr: AtomicU8,
 }
 
 /// Describes one scan-line's worth of pixels, including the length word required by the Pixel FIFO.
@@ -135,7 +132,7 @@ struct TimingBuffer {
 /// the lowest GPIO pin.
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Eq)]
-pub struct RGBColour(u16);
+pub struct RGBColour(pub u16);
 
 /// Represents two `RGBColour` pixels packed together.
 ///
@@ -150,11 +147,6 @@ pub struct RGBPair(u32);
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct Glyph(u8);
 
-/// Represents VGA format foreground/background attributes.
-#[repr(transparent)]
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub struct Attr(u8);
-
 /// Represents a glyph/attribute pair. This is what out text console is made
 /// out of. They work in exactly the same way as IBM PC VGA.
 #[repr(transparent)]
@@ -164,6 +156,11 @@ pub struct GlyphAttr(u16);
 /// Holds a video mode, but as an atomic value suitable for use in a `static`.
 struct AtomicModeWrapper {
 	value: AtomicU8,
+}
+
+/// See [`TEXT_COLOUR_LOOKUP`]
+struct TextColourLookup {
+	entries: [RGBPair; 512],
 }
 
 // -----------------------------------------------------------------------------
@@ -203,7 +200,7 @@ static mut TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x400();
 /// We boot in 80x50 mode.
 static VIDEO_MODE: AtomicModeWrapper = AtomicModeWrapper::new(crate::common::video::Mode::new(
 	crate::common::video::Timing::T640x400,
-	crate::common::video::Format::Text8x16,
+	crate::common::video::Format::Text8x8,
 ));
 
 /// Tracks which scan-line we are currently on (for timing purposes => it goes 0..`TIMING_BUFFER.back_porch_ends_at`)
@@ -271,6 +268,19 @@ static CORE1_ENTRY_FUNCTION: [u16; 2] = [
 	0x46c0, // nop - pad this out to 32-bits long
 ];
 
+/// Holds the colour look-up table for text mode.
+///
+/// The input is a 9-bit value comprised of the 4-bit foreground colour index,
+/// the 3-bit background colour index, and a two mono pixels. The output is a
+/// 32-bit RGB Colour Pair, containing two RGB pixels.
+///
+/// ```
+/// +-----+-----+-----+-----+-----+-----+-----+-----+-----+
+/// | FG3 | FG2 | FG1 | FG0 | BG2 | BG1 | BG0 | PX1 | PX0 |
+/// +-----+-----+-----+-----+-----+-----+-----+-----+-----+
+/// ```
+static mut TEXT_COLOUR_LOOKUP: TextColourLookup = TextColourLookup::blank();
+
 /// A set of useful constants representing common RGB colours.
 pub mod colours {
 	pub const BLACK: super::RGBColour = super::RGBColour::from_24bit(0x00, 0x00, 0x00);
@@ -292,519 +302,523 @@ pub mod colours {
 }
 
 /// Holds the 256-entry palette for indexed colour modes.
-static mut VIDEO_PALETTE: [RGBColour; 256] = [
+///
+/// Note, the first eight entries should match
+/// [`neotron_common_bios::video::TextBackgroundColour`] and the first 16 entries
+/// should meatch [`neotron_common_bios::video::TextForegroundColour`].
+pub static VIDEO_PALETTE: [AtomicU16; 256] = [
 	// Index 000: 0x000 (Black)
-	RGBColour::from_12bit(0x0, 0x0, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x0, 0x0).0),
 	// Index 001: 0x800 (Dark Red)
-	RGBColour::from_12bit(0x8, 0x0, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x0, 0x0).0),
 	// Index 002: 0x080 (Dark Green)
-	RGBColour::from_12bit(0x0, 0x8, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x8, 0x0).0),
 	// Index 003: 0x880 (Orange)
-	RGBColour::from_12bit(0x8, 0x8, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x8, 0x0).0),
 	// Index 004: 0x008 (Blue)
-	RGBColour::from_12bit(0x0, 0x0, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x0, 0x8).0),
 	// Index 005: 0x808 (Dark Magenta)
-	RGBColour::from_12bit(0x8, 0x0, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x0, 0x8).0),
 	// Index 006: 0x088 (Dark Cyan)
-	RGBColour::from_12bit(0x0, 0x8, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x8, 0x8).0),
 	// Index 007: 0xcc0 (Yellow)
-	RGBColour::from_12bit(0xc, 0xc, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xc, 0x0).0),
 	// Index 008: 0x888 (Grey)
-	RGBColour::from_12bit(0x8, 0x8, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x8, 0x8).0),
 	// Index 009: 0xf00 (Bright Red)
-	RGBColour::from_12bit(0xf, 0x0, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x0, 0x0).0),
 	// Index 010: 0x0f0 (Bright Green)
-	RGBColour::from_12bit(0x0, 0xf, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xf, 0x0).0),
 	// Index 011: 0xff0 (Bright Yellow)
-	RGBColour::from_12bit(0xf, 0xf, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xf, 0x0).0),
 	// Index 012: 0x00f (Bright Blue)
-	RGBColour::from_12bit(0x0, 0x0, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x0, 0xf).0),
 	// Index 013: 0xf0f (Bright Magenta)
-	RGBColour::from_12bit(0xf, 0x0, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x0, 0xf).0),
 	// Index 014: 0x0ff (Bright Cyan)
-	RGBColour::from_12bit(0x0, 0xf, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xf, 0xf).0),
 	// Index 015: 0xfff (White)
-	RGBColour::from_12bit(0xf, 0xf, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xf, 0xf).0),
 	// Index 016: 0x003
-	RGBColour::from_12bit(0x0, 0x0, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x0, 0x3).0),
 	// Index 017: 0x006
-	RGBColour::from_12bit(0x0, 0x0, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x0, 0x6).0),
 	// Index 018: 0x00c
-	RGBColour::from_12bit(0x0, 0x0, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x0, 0xc).0),
 	// Index 019: 0x020
-	RGBColour::from_12bit(0x0, 0x2, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x2, 0x0).0),
 	// Index 020: 0x023
-	RGBColour::from_12bit(0x0, 0x2, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x2, 0x3).0),
 	// Index 021: 0x026
-	RGBColour::from_12bit(0x0, 0x2, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x2, 0x6).0),
 	// Index 022: 0x028
-	RGBColour::from_12bit(0x0, 0x2, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x2, 0x8).0),
 	// Index 023: 0x02c
-	RGBColour::from_12bit(0x0, 0x2, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x2, 0xc).0),
 	// Index 024: 0x02f
-	RGBColour::from_12bit(0x0, 0x2, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x2, 0xf).0),
 	// Index 025: 0x040
-	RGBColour::from_12bit(0x0, 0x4, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x4, 0x0).0),
 	// Index 026: 0x043
-	RGBColour::from_12bit(0x0, 0x4, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x4, 0x3).0),
 	// Index 027: 0x046
-	RGBColour::from_12bit(0x0, 0x4, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x4, 0x6).0),
 	// Index 028: 0x048
-	RGBColour::from_12bit(0x0, 0x4, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x4, 0x8).0),
 	// Index 029: 0x04c
-	RGBColour::from_12bit(0x0, 0x4, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x4, 0xc).0),
 	// Index 030: 0x04f
-	RGBColour::from_12bit(0x0, 0x4, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x4, 0xf).0),
 	// Index 031: 0x083
-	RGBColour::from_12bit(0x0, 0x8, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x8, 0x3).0),
 	// Index 032: 0x086
-	RGBColour::from_12bit(0x0, 0x8, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x8, 0x6).0),
 	// Index 033: 0x08c
-	RGBColour::from_12bit(0x0, 0x8, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x8, 0xc).0),
 	// Index 034: 0x08f
-	RGBColour::from_12bit(0x0, 0x8, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x8, 0xf).0),
 	// Index 035: 0x0a0
-	RGBColour::from_12bit(0x0, 0xa, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xa, 0x0).0),
 	// Index 036: 0x0a3
-	RGBColour::from_12bit(0x0, 0xa, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xa, 0x3).0),
 	// Index 037: 0x0a6
-	RGBColour::from_12bit(0x0, 0xa, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xa, 0x6).0),
 	// Index 038: 0x0a8
-	RGBColour::from_12bit(0x0, 0xa, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xa, 0x8).0),
 	// Index 039: 0x0ac
-	RGBColour::from_12bit(0x0, 0xa, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xa, 0xc).0),
 	// Index 040: 0x0af
-	RGBColour::from_12bit(0x0, 0xa, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xa, 0xf).0),
 	// Index 041: 0x0e0
-	RGBColour::from_12bit(0x0, 0xe, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xe, 0x0).0),
 	// Index 042: 0x0e3
-	RGBColour::from_12bit(0x0, 0xe, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xe, 0x3).0),
 	// Index 043: 0x0e6
-	RGBColour::from_12bit(0x0, 0xe, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xe, 0x6).0),
 	// Index 044: 0x0e8
-	RGBColour::from_12bit(0x0, 0xe, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xe, 0x8).0),
 	// Index 045: 0x0ec
-	RGBColour::from_12bit(0x0, 0xe, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xe, 0xc).0),
 	// Index 046: 0x0ef
-	RGBColour::from_12bit(0x0, 0xe, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xe, 0xf).0),
 	// Index 047: 0x0f3
-	RGBColour::from_12bit(0x0, 0xf, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xf, 0x3).0),
 	// Index 048: 0x0f6
-	RGBColour::from_12bit(0x0, 0xf, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xf, 0x6).0),
 	// Index 049: 0x0f8
-	RGBColour::from_12bit(0x0, 0xf, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xf, 0x8).0),
 	// Index 050: 0x0fc
-	RGBColour::from_12bit(0x0, 0xf, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xf, 0xc).0),
 	// Index 051: 0x300
-	RGBColour::from_12bit(0x3, 0x0, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x0, 0x0).0),
 	// Index 052: 0x303
-	RGBColour::from_12bit(0x3, 0x0, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x0, 0x3).0),
 	// Index 053: 0x306
-	RGBColour::from_12bit(0x3, 0x0, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x0, 0x6).0),
 	// Index 054: 0x308
-	RGBColour::from_12bit(0x3, 0x0, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x0, 0x8).0),
 	// Index 055: 0x30c
-	RGBColour::from_12bit(0x3, 0x0, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x0, 0xc).0),
 	// Index 056: 0x30f
-	RGBColour::from_12bit(0x3, 0x0, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x0, 0xf).0),
 	// Index 057: 0x320
-	RGBColour::from_12bit(0x3, 0x2, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x2, 0x0).0),
 	// Index 058: 0x323
-	RGBColour::from_12bit(0x3, 0x2, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x2, 0x3).0),
 	// Index 059: 0x326
-	RGBColour::from_12bit(0x3, 0x2, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x2, 0x6).0),
 	// Index 060: 0x328
-	RGBColour::from_12bit(0x3, 0x2, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x2, 0x8).0),
 	// Index 061: 0x32c
-	RGBColour::from_12bit(0x3, 0x2, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x2, 0xc).0),
 	// Index 062: 0x32f
-	RGBColour::from_12bit(0x3, 0x2, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x2, 0xf).0),
 	// Index 063: 0x340
-	RGBColour::from_12bit(0x3, 0x4, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x4, 0x0).0),
 	// Index 064: 0x343
-	RGBColour::from_12bit(0x3, 0x4, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x4, 0x3).0),
 	// Index 065: 0x346
-	RGBColour::from_12bit(0x3, 0x4, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x4, 0x6).0),
 	// Index 066: 0x348
-	RGBColour::from_12bit(0x3, 0x4, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x4, 0x8).0),
 	// Index 067: 0x34c
-	RGBColour::from_12bit(0x3, 0x4, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x4, 0xc).0),
 	// Index 068: 0x34f
-	RGBColour::from_12bit(0x3, 0x4, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x4, 0xf).0),
 	// Index 069: 0x380
-	RGBColour::from_12bit(0x3, 0x8, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x8, 0x0).0),
 	// Index 070: 0x383
-	RGBColour::from_12bit(0x3, 0x8, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x8, 0x3).0),
 	// Index 071: 0x386
-	RGBColour::from_12bit(0x3, 0x8, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x8, 0x6).0),
 	// Index 072: 0x388
-	RGBColour::from_12bit(0x3, 0x8, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x8, 0x8).0),
 	// Index 073: 0x38c
-	RGBColour::from_12bit(0x3, 0x8, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x8, 0xc).0),
 	// Index 074: 0x38f
-	RGBColour::from_12bit(0x3, 0x8, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x8, 0xf).0),
 	// Index 075: 0x3a0
-	RGBColour::from_12bit(0x3, 0xa, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xa, 0x0).0),
 	// Index 076: 0x3a3
-	RGBColour::from_12bit(0x3, 0xa, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xa, 0x3).0),
 	// Index 077: 0x3a6
-	RGBColour::from_12bit(0x3, 0xa, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xa, 0x6).0),
 	// Index 078: 0x3a8
-	RGBColour::from_12bit(0x3, 0xa, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xa, 0x8).0),
 	// Index 079: 0x3ac
-	RGBColour::from_12bit(0x3, 0xa, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xa, 0xc).0),
 	// Index 080: 0x3af
-	RGBColour::from_12bit(0x3, 0xa, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xa, 0xf).0),
 	// Index 081: 0x3e0
-	RGBColour::from_12bit(0x3, 0xe, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xe, 0x0).0),
 	// Index 082: 0x3e3
-	RGBColour::from_12bit(0x3, 0xe, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xe, 0x3).0),
 	// Index 083: 0x3e6
-	RGBColour::from_12bit(0x3, 0xe, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xe, 0x6).0),
 	// Index 084: 0x3e8
-	RGBColour::from_12bit(0x3, 0xe, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xe, 0x8).0),
 	// Index 085: 0x3ec
-	RGBColour::from_12bit(0x3, 0xe, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xe, 0xc).0),
 	// Index 086: 0x3ef
-	RGBColour::from_12bit(0x3, 0xe, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xe, 0xf).0),
 	// Index 087: 0x3f0
-	RGBColour::from_12bit(0x3, 0xf, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xf, 0x0).0),
 	// Index 088: 0x3f3
-	RGBColour::from_12bit(0x3, 0xf, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xf, 0x3).0),
 	// Index 089: 0x3f6
-	RGBColour::from_12bit(0x3, 0xf, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xf, 0x6).0),
 	// Index 090: 0x3f8
-	RGBColour::from_12bit(0x3, 0xf, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xf, 0x8).0),
 	// Index 091: 0x3fc
-	RGBColour::from_12bit(0x3, 0xf, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xf, 0xc).0),
 	// Index 092: 0x3ff
-	RGBColour::from_12bit(0x3, 0xf, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0xf, 0xf).0),
 	// Index 093: 0x600
-	RGBColour::from_12bit(0x6, 0x0, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x0, 0x0).0),
 	// Index 094: 0x603
-	RGBColour::from_12bit(0x6, 0x0, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x0, 0x3).0),
 	// Index 095: 0x606
-	RGBColour::from_12bit(0x6, 0x0, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x0, 0x6).0),
 	// Index 096: 0x608
-	RGBColour::from_12bit(0x6, 0x0, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x0, 0x8).0),
 	// Index 097: 0x60c
-	RGBColour::from_12bit(0x6, 0x0, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x0, 0xc).0),
 	// Index 098: 0x60f
-	RGBColour::from_12bit(0x6, 0x0, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x0, 0xf).0),
 	// Index 099: 0x620
-	RGBColour::from_12bit(0x6, 0x2, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x2, 0x0).0),
 	// Index 100: 0x623
-	RGBColour::from_12bit(0x6, 0x2, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x2, 0x3).0),
 	// Index 101: 0x626
-	RGBColour::from_12bit(0x6, 0x2, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x2, 0x6).0),
 	// Index 102: 0x628
-	RGBColour::from_12bit(0x6, 0x2, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x2, 0x8).0),
 	// Index 103: 0x62c
-	RGBColour::from_12bit(0x6, 0x2, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x2, 0xc).0),
 	// Index 104: 0x62f
-	RGBColour::from_12bit(0x6, 0x2, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x2, 0xf).0),
 	// Index 105: 0x640
-	RGBColour::from_12bit(0x6, 0x4, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x4, 0x0).0),
 	// Index 106: 0x643
-	RGBColour::from_12bit(0x6, 0x4, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x4, 0x3).0),
 	// Index 107: 0x646
-	RGBColour::from_12bit(0x6, 0x4, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x4, 0x6).0),
 	// Index 108: 0x648
-	RGBColour::from_12bit(0x6, 0x4, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x4, 0x8).0),
 	// Index 109: 0x64c
-	RGBColour::from_12bit(0x6, 0x4, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x4, 0xc).0),
 	// Index 110: 0x64f
-	RGBColour::from_12bit(0x6, 0x4, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x4, 0xf).0),
 	// Index 111: 0x680
-	RGBColour::from_12bit(0x6, 0x8, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x8, 0x0).0),
 	// Index 112: 0x683
-	RGBColour::from_12bit(0x6, 0x8, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x8, 0x3).0),
 	// Index 113: 0x686
-	RGBColour::from_12bit(0x6, 0x8, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x8, 0x6).0),
 	// Index 114: 0x688
-	RGBColour::from_12bit(0x6, 0x8, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x8, 0x8).0),
 	// Index 115: 0x68c
-	RGBColour::from_12bit(0x6, 0x8, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x8, 0xc).0),
 	// Index 116: 0x68f
-	RGBColour::from_12bit(0x6, 0x8, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x8, 0xf).0),
 	// Index 117: 0x6a0
-	RGBColour::from_12bit(0x6, 0xa, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xa, 0x0).0),
 	// Index 118: 0x6a3
-	RGBColour::from_12bit(0x6, 0xa, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xa, 0x3).0),
 	// Index 119: 0x6a6
-	RGBColour::from_12bit(0x6, 0xa, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xa, 0x6).0),
 	// Index 120: 0x6a8
-	RGBColour::from_12bit(0x6, 0xa, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xa, 0x8).0),
 	// Index 121: 0x6ac
-	RGBColour::from_12bit(0x6, 0xa, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xa, 0xc).0),
 	// Index 122: 0x6af
-	RGBColour::from_12bit(0x6, 0xa, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xa, 0xf).0),
 	// Index 123: 0x6e0
-	RGBColour::from_12bit(0x6, 0xe, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xe, 0x0).0),
 	// Index 124: 0x6e3
-	RGBColour::from_12bit(0x6, 0xe, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xe, 0x3).0),
 	// Index 125: 0x6e6
-	RGBColour::from_12bit(0x6, 0xe, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xe, 0x6).0),
 	// Index 126: 0x6e8
-	RGBColour::from_12bit(0x6, 0xe, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xe, 0x8).0),
 	// Index 127: 0x6ec
-	RGBColour::from_12bit(0x6, 0xe, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xe, 0xc).0),
 	// Index 128: 0x6ef
-	RGBColour::from_12bit(0x6, 0xe, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xe, 0xf).0),
 	// Index 129: 0x6f0
-	RGBColour::from_12bit(0x6, 0xf, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xf, 0x0).0),
 	// Index 130: 0x6f3
-	RGBColour::from_12bit(0x6, 0xf, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xf, 0x3).0),
 	// Index 131: 0x6f6
-	RGBColour::from_12bit(0x6, 0xf, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xf, 0x6).0),
 	// Index 132: 0x6f8
-	RGBColour::from_12bit(0x6, 0xf, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xf, 0x8).0),
 	// Index 133: 0x6fc
-	RGBColour::from_12bit(0x6, 0xf, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xf, 0xc).0),
 	// Index 134: 0x6ff
-	RGBColour::from_12bit(0x6, 0xf, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0xf, 0xf).0),
 	// Index 135: 0x803
-	RGBColour::from_12bit(0x8, 0x0, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x0, 0x3).0),
 	// Index 136: 0x806
-	RGBColour::from_12bit(0x8, 0x0, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x0, 0x6).0),
 	// Index 137: 0x80c
-	RGBColour::from_12bit(0x8, 0x0, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x0, 0xc).0),
 	// Index 138: 0x80f
-	RGBColour::from_12bit(0x8, 0x0, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x0, 0xf).0),
 	// Index 139: 0x820
-	RGBColour::from_12bit(0x8, 0x2, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x2, 0x0).0),
 	// Index 140: 0x823
-	RGBColour::from_12bit(0x8, 0x2, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x2, 0x3).0),
 	// Index 141: 0x826
-	RGBColour::from_12bit(0x8, 0x2, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x2, 0x6).0),
 	// Index 142: 0x828
-	RGBColour::from_12bit(0x8, 0x2, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x2, 0x8).0),
 	// Index 143: 0x82c
-	RGBColour::from_12bit(0x8, 0x2, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x2, 0xc).0),
 	// Index 144: 0x82f
-	RGBColour::from_12bit(0x8, 0x2, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x2, 0xf).0),
 	// Index 145: 0x840
-	RGBColour::from_12bit(0x8, 0x4, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x4, 0x0).0),
 	// Index 146: 0x843
-	RGBColour::from_12bit(0x8, 0x4, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x4, 0x3).0),
 	// Index 147: 0x846
-	RGBColour::from_12bit(0x8, 0x4, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x4, 0x6).0),
 	// Index 148: 0x848
-	RGBColour::from_12bit(0x8, 0x4, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x4, 0x8).0),
 	// Index 149: 0x84c
-	RGBColour::from_12bit(0x8, 0x4, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x4, 0xc).0),
 	// Index 150: 0x84f
-	RGBColour::from_12bit(0x8, 0x4, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x4, 0xf).0),
 	// Index 151: 0x883
-	RGBColour::from_12bit(0x8, 0x8, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x8, 0x3).0),
 	// Index 152: 0x886
-	RGBColour::from_12bit(0x8, 0x8, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x8, 0x6).0),
 	// Index 153: 0x88c
-	RGBColour::from_12bit(0x8, 0x8, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x8, 0xc).0),
 	// Index 154: 0x88f
-	RGBColour::from_12bit(0x8, 0x8, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0x8, 0xf).0),
 	// Index 155: 0x8a0
-	RGBColour::from_12bit(0x8, 0xa, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xa, 0x0).0),
 	// Index 156: 0x8a3
-	RGBColour::from_12bit(0x8, 0xa, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xa, 0x3).0),
 	// Index 157: 0x8a6
-	RGBColour::from_12bit(0x8, 0xa, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xa, 0x6).0),
 	// Index 158: 0x8a8
-	RGBColour::from_12bit(0x8, 0xa, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xa, 0x8).0),
 	// Index 159: 0x8ac
-	RGBColour::from_12bit(0x8, 0xa, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xa, 0xc).0),
 	// Index 160: 0x8af
-	RGBColour::from_12bit(0x8, 0xa, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xa, 0xf).0),
 	// Index 161: 0x8e0
-	RGBColour::from_12bit(0x8, 0xe, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xe, 0x0).0),
 	// Index 162: 0x8e3
-	RGBColour::from_12bit(0x8, 0xe, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xe, 0x3).0),
 	// Index 163: 0x8e6
-	RGBColour::from_12bit(0x8, 0xe, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xe, 0x6).0),
 	// Index 164: 0x8e8
-	RGBColour::from_12bit(0x8, 0xe, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xe, 0x8).0),
 	// Index 165: 0x8ec
-	RGBColour::from_12bit(0x8, 0xe, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xe, 0xc).0),
 	// Index 166: 0x8ef
-	RGBColour::from_12bit(0x8, 0xe, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xe, 0xf).0),
 	// Index 167: 0x8f0
-	RGBColour::from_12bit(0x8, 0xf, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xf, 0x0).0),
 	// Index 168: 0x8f3
-	RGBColour::from_12bit(0x8, 0xf, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xf, 0x3).0),
 	// Index 169: 0x8f6
-	RGBColour::from_12bit(0x8, 0xf, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xf, 0x6).0),
 	// Index 170: 0x8f8
-	RGBColour::from_12bit(0x8, 0xf, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xf, 0x8).0),
 	// Index 171: 0x8fc
-	RGBColour::from_12bit(0x8, 0xf, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xf, 0xc).0),
 	// Index 172: 0x8ff
-	RGBColour::from_12bit(0x8, 0xf, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0x8, 0xf, 0xf).0),
 	// Index 173: 0xc00
-	RGBColour::from_12bit(0xc, 0x0, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x0, 0x0).0),
 	// Index 174: 0xc03
-	RGBColour::from_12bit(0xc, 0x0, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x0, 0x3).0),
 	// Index 175: 0xc06
-	RGBColour::from_12bit(0xc, 0x0, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x0, 0x6).0),
 	// Index 176: 0xc08
-	RGBColour::from_12bit(0xc, 0x0, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x0, 0x8).0),
 	// Index 177: 0xc0c
-	RGBColour::from_12bit(0xc, 0x0, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x0, 0xc).0),
 	// Index 178: 0xc0f
-	RGBColour::from_12bit(0xc, 0x0, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x0, 0xf).0),
 	// Index 179: 0xc20
-	RGBColour::from_12bit(0xc, 0x2, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x2, 0x0).0),
 	// Index 180: 0xc23
-	RGBColour::from_12bit(0xc, 0x2, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x2, 0x3).0),
 	// Index 181: 0xc26
-	RGBColour::from_12bit(0xc, 0x2, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x2, 0x6).0),
 	// Index 182: 0xc28
-	RGBColour::from_12bit(0xc, 0x2, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x2, 0x8).0),
 	// Index 183: 0xc2c
-	RGBColour::from_12bit(0xc, 0x2, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x2, 0xc).0),
 	// Index 184: 0xc2f
-	RGBColour::from_12bit(0xc, 0x2, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x2, 0xf).0),
 	// Index 185: 0xc40
-	RGBColour::from_12bit(0xc, 0x4, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x4, 0x0).0),
 	// Index 186: 0xc43
-	RGBColour::from_12bit(0xc, 0x4, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x4, 0x3).0),
 	// Index 187: 0xc46
-	RGBColour::from_12bit(0xc, 0x4, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x4, 0x6).0),
 	// Index 188: 0xc48
-	RGBColour::from_12bit(0xc, 0x4, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x4, 0x8).0),
 	// Index 189: 0xc4c
-	RGBColour::from_12bit(0xc, 0x4, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x4, 0xc).0),
 	// Index 190: 0xc4f
-	RGBColour::from_12bit(0xc, 0x4, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x4, 0xf).0),
 	// Index 191: 0xc80
-	RGBColour::from_12bit(0xc, 0x8, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x8, 0x0).0),
 	// Index 192: 0xc83
-	RGBColour::from_12bit(0xc, 0x8, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x8, 0x3).0),
 	// Index 193: 0xc86
-	RGBColour::from_12bit(0xc, 0x8, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x8, 0x6).0),
 	// Index 194: 0xc88
-	RGBColour::from_12bit(0xc, 0x8, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x8, 0x8).0),
 	// Index 195: 0xc8c
-	RGBColour::from_12bit(0xc, 0x8, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x8, 0xc).0),
 	// Index 196: 0xc8f
-	RGBColour::from_12bit(0xc, 0x8, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0x8, 0xf).0),
 	// Index 197: 0xca0
-	RGBColour::from_12bit(0xc, 0xa, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xa, 0x0).0),
 	// Index 198: 0xca3
-	RGBColour::from_12bit(0xc, 0xa, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xa, 0x3).0),
 	// Index 199: 0xca6
-	RGBColour::from_12bit(0xc, 0xa, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xa, 0x6).0),
 	// Index 200: 0xca8
-	RGBColour::from_12bit(0xc, 0xa, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xa, 0x8).0),
 	// Index 201: 0xcac
-	RGBColour::from_12bit(0xc, 0xa, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xa, 0xc).0),
 	// Index 202: 0xcaf
-	RGBColour::from_12bit(0xc, 0xa, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xa, 0xf).0),
 	// Index 203: 0xce0
-	RGBColour::from_12bit(0xc, 0xe, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xe, 0x0).0),
 	// Index 204: 0xce3
-	RGBColour::from_12bit(0xc, 0xe, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xe, 0x3).0),
 	// Index 205: 0xce6
-	RGBColour::from_12bit(0xc, 0xe, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xe, 0x6).0),
 	// Index 206: 0xce8
-	RGBColour::from_12bit(0xc, 0xe, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xe, 0x8).0),
 	// Index 207: 0xcec
-	RGBColour::from_12bit(0xc, 0xe, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xe, 0xc).0),
 	// Index 208: 0xcef
-	RGBColour::from_12bit(0xc, 0xe, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xe, 0xf).0),
 	// Index 209: 0xcf0
-	RGBColour::from_12bit(0xc, 0xf, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xf, 0x0).0),
 	// Index 210: 0xcf3
-	RGBColour::from_12bit(0xc, 0xf, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xf, 0x3).0),
 	// Index 211: 0xcf6
-	RGBColour::from_12bit(0xc, 0xf, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xf, 0x6).0),
 	// Index 212: 0xcf8
-	RGBColour::from_12bit(0xc, 0xf, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xf, 0x8).0),
 	// Index 213: 0xcfc
-	RGBColour::from_12bit(0xc, 0xf, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xf, 0xc).0),
 	// Index 214: 0xcff
-	RGBColour::from_12bit(0xc, 0xf, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0xc, 0xf, 0xf).0),
 	// Index 215: 0xf03
-	RGBColour::from_12bit(0xf, 0x0, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x0, 0x3).0),
 	// Index 216: 0xf06
-	RGBColour::from_12bit(0xf, 0x0, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x0, 0x6).0),
 	// Index 217: 0xf08
-	RGBColour::from_12bit(0xf, 0x0, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x0, 0x8).0),
 	// Index 218: 0xf0c
-	RGBColour::from_12bit(0xf, 0x0, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x0, 0xc).0),
 	// Index 219: 0xf20
-	RGBColour::from_12bit(0xf, 0x2, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x2, 0x0).0),
 	// Index 220: 0xf23
-	RGBColour::from_12bit(0xf, 0x2, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x2, 0x3).0),
 	// Index 221: 0xf26
-	RGBColour::from_12bit(0xf, 0x2, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x2, 0x6).0),
 	// Index 222: 0xf28
-	RGBColour::from_12bit(0xf, 0x2, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x2, 0x8).0),
 	// Index 223: 0xf2c
-	RGBColour::from_12bit(0xf, 0x2, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x2, 0xc).0),
 	// Index 224: 0xf2f
-	RGBColour::from_12bit(0xf, 0x2, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x2, 0xf).0),
 	// Index 225: 0xf40
-	RGBColour::from_12bit(0xf, 0x4, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x4, 0x0).0),
 	// Index 226: 0xf43
-	RGBColour::from_12bit(0xf, 0x4, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x4, 0x3).0),
 	// Index 227: 0xf46
-	RGBColour::from_12bit(0xf, 0x4, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x4, 0x6).0),
 	// Index 228: 0xf48
-	RGBColour::from_12bit(0xf, 0x4, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x4, 0x8).0),
 	// Index 229: 0xf4c
-	RGBColour::from_12bit(0xf, 0x4, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x4, 0xc).0),
 	// Index 230: 0xf4f
-	RGBColour::from_12bit(0xf, 0x4, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x4, 0xf).0),
 	// Index 231: 0xf80
-	RGBColour::from_12bit(0xf, 0x8, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x8, 0x0).0),
 	// Index 232: 0xf83
-	RGBColour::from_12bit(0xf, 0x8, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x8, 0x3).0),
 	// Index 233: 0xf86
-	RGBColour::from_12bit(0xf, 0x8, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x8, 0x6).0),
 	// Index 234: 0xf88
-	RGBColour::from_12bit(0xf, 0x8, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x8, 0x8).0),
 	// Index 235: 0xf8c
-	RGBColour::from_12bit(0xf, 0x8, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x8, 0xc).0),
 	// Index 236: 0xf8f
-	RGBColour::from_12bit(0xf, 0x8, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x8, 0xf).0),
 	// Index 237: 0xfa0
-	RGBColour::from_12bit(0xf, 0xa, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xa, 0x0).0),
 	// Index 238: 0xfa3
-	RGBColour::from_12bit(0xf, 0xa, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xa, 0x3).0),
 	// Index 239: 0xfa6
-	RGBColour::from_12bit(0xf, 0xa, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xa, 0x6).0),
 	// Index 240: 0xfa8
-	RGBColour::from_12bit(0xf, 0xa, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xa, 0x8).0),
 	// Index 241: 0xfac
-	RGBColour::from_12bit(0xf, 0xa, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xa, 0xc).0),
 	// Index 242: 0xfaf
-	RGBColour::from_12bit(0xf, 0xa, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xa, 0xf).0),
 	// Index 243: 0xfe0
-	RGBColour::from_12bit(0xf, 0xe, 0x0),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xe, 0x0).0),
 	// Index 244: 0xfe3
-	RGBColour::from_12bit(0xf, 0xe, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xe, 0x3).0),
 	// Index 245: 0xfe6
-	RGBColour::from_12bit(0xf, 0xe, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xe, 0x6).0),
 	// Index 246: 0xfe8
-	RGBColour::from_12bit(0xf, 0xe, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xe, 0x8).0),
 	// Index 247: 0xfec
-	RGBColour::from_12bit(0xf, 0xe, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xe, 0xc).0),
 	// Index 248: 0xfef
-	RGBColour::from_12bit(0xf, 0xe, 0xf),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xe, 0xf).0),
 	// Index 249: 0xff3
-	RGBColour::from_12bit(0xf, 0xf, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xf, 0x3).0),
 	// Index 250: 0xff6
-	RGBColour::from_12bit(0xf, 0xf, 0x6),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xf, 0x6).0),
 	// Index 251: 0xff8
-	RGBColour::from_12bit(0xf, 0xf, 0x8),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xf, 0x8).0),
 	// Index 252: 0xffc
-	RGBColour::from_12bit(0xf, 0xf, 0xc),
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xf, 0xc).0),
 	// Index 253: 0xbbb
-	RGBColour::from_12bit(0xb, 0xb, 0xb),
+	AtomicU16::new(RGBColour::from_12bit(0xb, 0xb, 0xb).0),
 	// Index 254: 0x333
-	RGBColour::from_12bit(0x3, 0x3, 0x3),
+	AtomicU16::new(RGBColour::from_12bit(0x3, 0x3, 0x3).0),
 	// Index 255: 0x777
-	RGBColour::from_12bit(0x7, 0x7, 0x7),
+	AtomicU16::new(RGBColour::from_12bit(0x7, 0x7, 0x7).0),
 ];
 
 // -----------------------------------------------------------------------------
@@ -854,13 +868,14 @@ pub fn init(
 		".wrap"
 	);
 
-	// This is the video pixels program. It waits for an IRQ
-	// (posted by the timing loop) then pulls pixel data from the FIFO. We post
-	// the number of pixels for that line, then the pixel data.
+	// This is the video pixels program. It waits for an IRQ (posted by the
+	// timing loop) then pulls pixel data from the FIFO. We post the number of
+	// pixels for that line, then the pixel data.
 	//
 	// Post <num_pixels> <pixel1> <pixel2> ... <pixelN>; each <pixelX> maps to
 	// the RGB output pins. On a Neotron Pico, there are 12 (4 Red, 4 Green and
-	// 4 Blue) - so we set autopull to 12, and each value should be 12-bits long.
+	// 4 Blue) - each value should be 12-bits long in the bottom of a 16-bit
+	// word.
 	//
 	// Currently the FIFO supplies only the pixels, not the length value. When
 	// we read the length from the FIFO as well, all hell breaks loose.
@@ -874,9 +889,9 @@ pub fn init(
 		"out x, 32"
 		"loop1:"
 			// Write out first pixel - takes 5 clocks per pixel
-			"out pins, 16 [4]"
+			"out pins, 16 [5]"
 			// Write out second pixel - takes 5 clocks per pixel (allowing one clock for the jump)
-			"out pins, 16 [3]"
+			"out pins, 16 [4]"
 			// Repeat until all pixel pairs sent
 			"jmp x-- loop1"
 		// Clear all pins after visible section
@@ -928,7 +943,7 @@ pub fn init(
 	// You must not set a clock_divider (other than 1.0) on the pixel state
 	// machine. You might want the pixels to be twice as wide (or mode), but
 	// enabling a clock divider adds a lot of jitter (i.e. the start each
-	// each line differs by some number of 126 MHz clock cycles).
+	// each line differs by some number of 151.2 MHz clock cycles).
 
 	let pixels_installed = pio.install(&pixel_program.program).unwrap();
 	let (mut pixel_sm, _, pixel_fifo) =
@@ -1034,6 +1049,11 @@ pub fn init(
 		core1_stack.as_ptr(),
 		core1_stack.len()
 	);
+
+	// No-one else is looking at this right now.
+	unsafe {
+		TEXT_COLOUR_LOOKUP.init(&VIDEO_PALETTE);
+	}
 
 	multicore_launch_core1_with_stack(core1_main, core1_stack, ppb, fifo, psm);
 
@@ -1338,20 +1358,14 @@ impl RenderEngine {
 	pub fn new() -> RenderEngine {
 		RenderEngine {
 			frame_count: 0,
-			lookup: [
-				RGBPair::from_pixels(colours::BLUE, colours::BLUE),
-				RGBPair::from_pixels(colours::BLUE, colours::YELLOW),
-				RGBPair::from_pixels(colours::YELLOW, colours::BLUE),
-				RGBPair::from_pixels(colours::YELLOW, colours::YELLOW),
-			],
 			// Should match the default value of TIMING_BUFFER and VIDEO_MODE
 			current_video_mode: crate::common::video::Mode::new(
-				crate::common::video::Timing::T640x480,
-				crate::common::video::Format::Text8x16,
+				crate::common::video::Timing::T640x400,
+				crate::common::video::Format::Text8x8,
 			),
 			// Should match the mode above
 			num_text_cols: 80,
-			num_text_rows: 25,
+			num_text_rows: 50,
 		}
 	}
 
@@ -1397,10 +1411,10 @@ impl RenderEngine {
 
 		match self.current_video_mode.format() {
 			crate::common::video::Format::Text8x16 => {
-				self.draw_next_line_text16(scan_line_buffer, current_line_num)
+				self.draw_next_line_text::<16>(&font16::FONT, scan_line_buffer, current_line_num)
 			}
 			crate::common::video::Format::Text8x8 => {
-				self.draw_next_line_text8(scan_line_buffer, current_line_num)
+				self.draw_next_line_text::<8>(&font8::FONT, scan_line_buffer, current_line_num)
 			}
 			_ => {
 				// Draw nothing
@@ -1414,14 +1428,15 @@ impl RenderEngine {
 	///
 	/// The `current_line_num` goes from `1..=NUM_LINES`.
 	#[link_section = ".data"]
-	pub fn draw_next_line_text16(
+	pub fn draw_next_line_text<const GLYPH_HEIGHT: usize>(
 		&mut self,
+		font: &Font,
 		scan_line_buffer: &mut LineBuffer,
 		current_line_num: u16,
 	) {
 		// Convert our position in scan-lines to a text row, and a line within each glyph on that row
-		let text_row = (current_line_num - 1) as usize / 16;
-		let font_row = (current_line_num - 1) as usize % 16;
+		let text_row = (current_line_num - 1) as usize / GLYPH_HEIGHT;
+		let font_row = (current_line_num - 1) as usize % GLYPH_HEIGHT;
 
 		if text_row < self.num_text_rows {
 			// Note (unsafe): We could stash the char array inside `self`
@@ -1440,112 +1455,39 @@ impl RenderEngine {
 			// is the same for every glyph on this row, we calculate a
 			// new pointer once, in advance, and save ourselves an
 			// addition each time around the loop.
-			let font_ptr = unsafe { font16::FONT.data.as_ptr().add(font_row) };
+			let font_ptr = unsafe { font.data.as_ptr().add(font_row) };
 
 			// Get a pointer into our scan-line buffer
-			let scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
-			let mut px_idx = 0;
+			let mut scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
 
 			// Convert from characters to coloured pixels, using the font as a look-up table.
+
 			for glyphattr in row_slice.iter() {
-				let index = (glyphattr.glyph().0 as isize) * 16;
-				// Note (unsafe): We use pointer arithmetic here because we
-				// can't afford a bounds-check on an array. This is safe
-				// because the font is `256 * width` bytes long and we can't
-				// index more than `255 * width` bytes into it.
-				let mono_pixels = unsafe { *font_ptr.offset(index) } as usize;
-				// Convert from eight mono pixels in one byte to four RGB
-				// pairs. Hopefully the `& 3` elides the panic calls.
+				let index = (glyphattr.glyph().0 as usize) * GLYPH_HEIGHT;
+				let attr = glyphattr.attr();
+
 				unsafe {
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx),
-						self.lookup[(mono_pixels >> 6) & 3],
-					);
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx + 1),
-						self.lookup[(mono_pixels >> 4) & 3],
-					);
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx + 2),
-						self.lookup[(mono_pixels >> 2) & 3],
-					);
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx + 3),
-						self.lookup[mono_pixels & 3],
-					);
+					// Note (unsafe): We use pointer arithmetic here because we
+					// can't afford a bounds-check on an array. This is safe
+					// because the font is `256 * width` bytes long and we can't
+					// index more than `255 * width` bytes into it.
+					let mono_pixels = *font_ptr.add(index);
+
+					// 0bXX------
+					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 6);
+					scan_line_buffer_ptr.write(pair);
+					// 0b--XX----
+					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 4);
+					scan_line_buffer_ptr.offset(1).write(pair);
+					// 0b----XX--
+					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 2);
+					scan_line_buffer_ptr.offset(2).write(pair);
+					// 0b------XX
+					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels);
+					scan_line_buffer_ptr.offset(3).write(pair);
+
+					scan_line_buffer_ptr = scan_line_buffer_ptr.offset(4);
 				}
-				px_idx += 4;
-			}
-		}
-	}
-
-	/// Draw a line of pixels into the relevant pixel buffer (either
-	/// [`PIXEL_DATA_BUFFER_ODD`] or [`PIXEL_DATA_BUFFER_EVEN`]) using the 8x8
-	/// font.
-	///
-	/// The `current_line_num` goes from `1..=NUM_LINES`.
-	#[link_section = ".data"]
-	pub fn draw_next_line_text8(
-		&mut self,
-		scan_line_buffer: &mut LineBuffer,
-		current_line_num: u16,
-	) {
-		// Convert our position in scan-lines to a text row, and a line within each glyph on that row.
-		let text_row = (current_line_num - 1) as usize / 8;
-		let font_row = (current_line_num - 1) as usize % 8;
-
-		if text_row < self.num_text_rows {
-			// Note (unsafe): We could stash the char array inside `self`
-			// but at some point we are going to need one CPU rendering
-			// the text, and the other CPU running code and writing to
-			// the buffer. This might be Undefined Behaviour, but
-			// unfortunately real-time video is all about shared mutable
-			// state. At least our platform is fixed, so we can simply
-			// test if it works, for some given version of the Rust compiler.
-			let row_slice = unsafe {
-				&GLYPH_ATTR_ARRAY
-					[(text_row * self.num_text_cols)..((text_row + 1) * self.num_text_cols)]
-			};
-			// Every font look-up we are about to do for this row will
-			// involve offsetting by the row within each glyph. As this
-			// is the same for every glyph on this row, we calculate a
-			// new pointer once, in advance, and save ourselves an
-			// addition each time around the loop.
-			let font_ptr = unsafe { font8::FONT.data.as_ptr().add(font_row) };
-
-			// Get a pointer into our scan-line buffer
-			let scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
-			let mut px_idx = 0;
-
-			// Convert from characters to coloured pixels, using the font as a look-up table.
-			for glyphattr in row_slice.iter() {
-				let index = (glyphattr.glyph().0 as isize) * 8;
-				// Note (unsafe): We use pointer arithmetic here because we
-				// can't afford a bounds-check on an array. This is safe
-				// because the font is `256 * width` bytes long and we can't
-				// index more than `255 * width` bytes into it.
-				let mono_pixels = unsafe { *font_ptr.offset(index) } as usize;
-				// Convert from eight mono pixels in one byte to four RGB
-				// pairs. Hopefully the `& 3` elides the panic calls.
-				unsafe {
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx),
-						self.lookup[(mono_pixels >> 6) & 3],
-					);
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx + 1),
-						self.lookup[(mono_pixels >> 4) & 3],
-					);
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx + 2),
-						self.lookup[(mono_pixels >> 2) & 3],
-					);
-					core::ptr::write_volatile(
-						scan_line_buffer_ptr.offset(px_idx + 3),
-						self.lookup[mono_pixels & 3],
-					);
-				}
-				px_idx += 4;
 			}
 		}
 	}
@@ -1566,6 +1508,15 @@ impl TextConsole {
 			current_row: AtomicU16::new(0),
 			current_col: AtomicU16::new(0),
 			text_buffer: AtomicPtr::new(core::ptr::null_mut()),
+			// White on Black, with the default palette
+			current_attr: AtomicU8::new(
+				Attr::new(
+					TextForegroundColour::WHITE,
+					TextBackgroundColour::BLACK,
+					false,
+				)
+				.0,
+			),
 		}
 	}
 
@@ -1763,6 +1714,7 @@ impl TextConsole {
 		let mode = VIDEO_MODE.get_mode();
 		let num_rows = mode.text_height().unwrap_or(0) as usize;
 		let num_cols = mode.text_width().unwrap_or(0) as usize;
+		let attr = Attr(self.current_attr.load(Ordering::Relaxed));
 
 		if glyph.0 == b'\r' {
 			*col = 0;
@@ -1775,7 +1727,7 @@ impl TextConsole {
 			unsafe {
 				buffer
 					.add(offset)
-					.write_volatile(GlyphAttr::new(glyph, Attr(0)))
+					.write_volatile(GlyphAttr::new(glyph, attr))
 			};
 			*col += 1;
 		}
@@ -1795,10 +1747,15 @@ impl TextConsole {
 				unsafe {
 					buffer
 						.add(offset)
-						.write_volatile(GlyphAttr::new(Glyph(b' '), Attr(0)))
+						.write_volatile(GlyphAttr::new(Glyph(b' '), attr))
 				};
 			}
 		}
+	}
+
+	pub fn change_attr(&self, attr: Attr) {
+		let value = attr.0;
+		self.current_attr.store(value, Ordering::Relaxed);
 	}
 }
 
@@ -1851,6 +1808,8 @@ impl SyncPolarity {
 }
 
 impl ScanlineTimingBuffer {
+	const CLOCKS_PER_PIXEL: u32 = 6;
+
 	/// Create a timing buffer for each scan-line in the V-Sync visible portion.
 	///
 	/// The timings are in the order (front-porch, sync, back-porch, visible) and are in pixel clocks.
@@ -1862,13 +1821,23 @@ impl ScanlineTimingBuffer {
 		ScanlineTimingBuffer {
 			data: [
 				// Front porch (as per the spec)
-				Self::make_timing(timings.0 * 5, hsync.disabled(), vsync.disabled(), false),
+				Self::make_timing(
+					timings.0 * Self::CLOCKS_PER_PIXEL,
+					hsync.disabled(),
+					vsync.disabled(),
+					false,
+				),
 				// Sync pulse (as per the spec)
-				Self::make_timing(timings.1 * 5, hsync.enabled(), vsync.disabled(), false),
+				Self::make_timing(
+					timings.1 * Self::CLOCKS_PER_PIXEL,
+					hsync.enabled(),
+					vsync.disabled(),
+					false,
+				),
 				// Back porch. Adjusted by a few clocks to account for interrupt +
 				// PIO SM start latency.
 				Self::make_timing(
-					(timings.2 * 5) - 5,
+					(timings.2 * Self::CLOCKS_PER_PIXEL) - 5,
 					hsync.disabled(),
 					vsync.disabled(),
 					false,
@@ -1877,7 +1846,7 @@ impl ScanlineTimingBuffer {
 				// moving. Adjusted to compensate for changes made to previous
 				// period to ensure scan-line remains at correct length.
 				Self::make_timing(
-					(timings.3 * 5) + 5,
+					(timings.3 * Self::CLOCKS_PER_PIXEL) + 5,
 					hsync.disabled(),
 					vsync.disabled(),
 					true,
@@ -1895,13 +1864,33 @@ impl ScanlineTimingBuffer {
 		ScanlineTimingBuffer {
 			data: [
 				// Front porch (as per the spec)
-				Self::make_timing(timings.0 * 5, hsync.disabled(), vsync.disabled(), false),
+				Self::make_timing(
+					timings.0 * Self::CLOCKS_PER_PIXEL,
+					hsync.disabled(),
+					vsync.disabled(),
+					false,
+				),
 				// Sync pulse (as per the spec)
-				Self::make_timing(timings.1 * 5, hsync.enabled(), vsync.disabled(), false),
+				Self::make_timing(
+					timings.1 * Self::CLOCKS_PER_PIXEL,
+					hsync.enabled(),
+					vsync.disabled(),
+					false,
+				),
 				// Back porch.
-				Self::make_timing(timings.2 * 5, hsync.disabled(), vsync.disabled(), false),
+				Self::make_timing(
+					timings.2 * Self::CLOCKS_PER_PIXEL,
+					hsync.disabled(),
+					vsync.disabled(),
+					false,
+				),
 				// Visible portion.
-				Self::make_timing(timings.3 * 5, hsync.disabled(), vsync.disabled(), false),
+				Self::make_timing(
+					timings.3 * Self::CLOCKS_PER_PIXEL,
+					hsync.disabled(),
+					vsync.disabled(),
+					false,
+				),
 			],
 		}
 	}
@@ -1915,13 +1904,33 @@ impl ScanlineTimingBuffer {
 		ScanlineTimingBuffer {
 			data: [
 				// Front porch (as per the spec)
-				Self::make_timing(timings.0 * 5, hsync.disabled(), vsync.enabled(), false),
+				Self::make_timing(
+					timings.0 * Self::CLOCKS_PER_PIXEL,
+					hsync.disabled(),
+					vsync.enabled(),
+					false,
+				),
 				// Sync pulse (as per the spec)
-				Self::make_timing(timings.1 * 5, hsync.enabled(), vsync.enabled(), false),
+				Self::make_timing(
+					timings.1 * Self::CLOCKS_PER_PIXEL,
+					hsync.enabled(),
+					vsync.enabled(),
+					false,
+				),
 				// Back porch.
-				Self::make_timing(timings.2 * 5, hsync.disabled(), vsync.enabled(), false),
+				Self::make_timing(
+					timings.2 * Self::CLOCKS_PER_PIXEL,
+					hsync.disabled(),
+					vsync.enabled(),
+					false,
+				),
 				// Visible portion.
-				Self::make_timing(timings.3 * 5, hsync.disabled(), vsync.enabled(), false),
+				Self::make_timing(
+					timings.3 * Self::CLOCKS_PER_PIXEL,
+					hsync.disabled(),
+					vsync.enabled(),
+					false,
+				),
 			],
 		}
 	}
@@ -2068,6 +2077,15 @@ impl From<RGBColour> for crate::common::video::RGBColour {
 	}
 }
 
+impl From<crate::common::video::RGBColour> for RGBColour {
+	fn from(val: crate::common::video::RGBColour) -> RGBColour {
+		let red = val.red();
+		let green = val.green();
+		let blue = val.blue();
+		RGBColour::from_24bit(red, green, blue)
+	}
+}
+
 impl RGBPair {
 	pub const fn from_pixels(first: RGBColour, second: RGBColour) -> RGBPair {
 		let first: u32 = first.0 as u32;
@@ -2112,6 +2130,50 @@ impl AtomicModeWrapper {
 		let value = self.value.load(Ordering::SeqCst);
 		// Safety: the 'set_mode' function ensure this is always valid.
 		unsafe { crate::common::video::Mode::from_u8(value) }
+	}
+}
+
+impl TextColourLookup {
+	const fn blank() -> TextColourLookup {
+		TextColourLookup {
+			entries: [RGBPair(0); 512],
+		}
+	}
+
+	fn init(&mut self, palette: &[AtomicU16]) {
+		for (fg, fg_colour) in palette.iter().take(16).enumerate() {
+			for (bg, bg_colour) in palette.iter().take(8).enumerate() {
+				let attr = unsafe {
+					Attr::new(
+						TextForegroundColour::new_unchecked(fg as u8),
+						TextBackgroundColour::new_unchecked(bg as u8),
+						false,
+					)
+				};
+				for pixels in 0..=3 {
+					let index: usize = (((attr.0 & 0x7F) as usize) << 2) | (pixels & 0x03) as usize;
+					let pair = RGBPair::from_pixels(
+						if pixels & 0x02 == 0x02 {
+							RGBColour(fg_colour.load(Ordering::Relaxed))
+						} else {
+							RGBColour(bg_colour.load(Ordering::Relaxed))
+						},
+						if pixels & 0x01 == 0x01 {
+							RGBColour(fg_colour.load(Ordering::Relaxed))
+						} else {
+							RGBColour(bg_colour.load(Ordering::Relaxed))
+						},
+					);
+					self.entries[index] = pair;
+				}
+			}
+		}
+	}
+
+	#[inline]
+	fn lookup(&self, attr: Attr, pixels: u8) -> RGBPair {
+		let index: usize = (((attr.0 & 0x7F) as usize) << 2) | (pixels & 0x03) as usize;
+		unsafe { core::ptr::read(self.entries.as_ptr().add(index)) }
 	}
 }
 

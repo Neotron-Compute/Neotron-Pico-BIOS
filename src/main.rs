@@ -83,7 +83,10 @@ use rp_pico::{
 };
 
 // Other Neotron Crates
-use common::MemoryRegion;
+use common::{
+	video::{Attr, TextBackgroundColour, TextForegroundColour},
+	MemoryRegion,
+};
 use neotron_bmc_commands::Command;
 use neotron_bmc_protocol::Receivable;
 use neotron_common_bios as common;
@@ -290,8 +293,8 @@ fn main() -> ! {
 	// VERSION has a trailing `\0` as that is what the BIOS/OS API requires.
 	info!("Neotron BIOS {} starting...", VERSION.trim_matches('\0'));
 
-	// Run at 126 MHz SYS_PLL, 48 MHz, USB_PLL. This is important, we as clock
-	// the PIO at ÷ 5, to give 25.2 MHz (which is close enough to the 25.175
+	// Run at 151.2 MHz SYS_PLL, 48 MHz, USB_PLL. This is important, we as clock
+	// the PIO at ÷ 6, to give 25.2 MHz (which is close enough to the 25.175
 	// MHz standard VGA pixel clock).
 
 	// Step 1. Turn on the crystal.
@@ -302,15 +305,29 @@ fn main() -> ! {
 	watchdog.enable_tick_generation((rp_pico::XOSC_CRYSTAL_FREQ / 1_000_000) as u8);
 	// Step 3. Create a clocks manager.
 	let mut clocks = hal::clocks::ClocksManager::new(pp.CLOCKS);
-	// Step 4. Set up the system PLL. We take Crystal Oscillator (=12 MHz),
-	// ×126 (=1512 MHz), ÷6 (=252 MHz), ÷2 (=126 MHz)
+	// Step 4. Set up the system PLL.
+	//
+	// We take the Crystal Oscillator (=12 MHz) with no divider, and ×126 to
+	// give a FOUTVCO of 1512 MHz. This must be in the range 750 MHz - 1600 MHz.
+	// The factor of 126 is calculated automatically given the desired FOUTVCO.
+	//
+	// Next we ÷5 on the first post divider to give 302.4 MHz.
+	//
+	// Finally we ÷2 on the second post divider to give 151.2 MHz.
+	//
+	// We note from the [RP2040
+	// Datasheet](https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf),
+	// Section 2.18.2.1:
+	//
+	// > Jitter is minimised by running the VCO at the highest possible
+	// > frequency, so that higher post-divide values can be used.
 	let pll_sys = hal::pll::setup_pll_blocking(
 		pp.PLL_SYS,
 		xosc.operating_frequency(),
 		hal::pll::PLLConfig {
 			vco_freq: 1512.MHz(),
 			refdiv: 1,
-			post_div1: 6,
+			post_div1: 5,
 			post_div2: 2,
 		},
 		&mut clocks,
@@ -318,7 +335,7 @@ fn main() -> ! {
 	)
 	.map_err(|_x| false)
 	.unwrap();
-	// Step 5. Set up a 48 MHz PLL for the USB system.
+	// Step 5. Set up a 48 MHz PLL for the USB system.
 	let pll_usb = hal::pll::setup_pll_blocking(
 		pp.PLL_USB,
 		xosc.operating_frequency(),
@@ -1012,9 +1029,21 @@ impl Hardware {
 }
 
 fn sign_on() {
-	static LICENCE_TEXT: &str = "\
-		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2022\n\
+	static LOGO_TEXT: &str = "\
 		\n\
+		╔═════════════════════════════════════════════════════════════════════════════╗\n\
+		║             ▒▒▒   ▒ ▒▒▒▒▒▒ ▒▒▒▒▒▒ ▒▒▒▒▒▒ ▒▒▒▒▒  ▒▒▒▒▒▒ ▒▒▒   ▒              ║\n\
+		║             ▒ ▒▒  ▒ ▒      ▒    ▒   ▒▒   ▒    ▒ ▒    ▒ ▒ ▒▒  ▒              ║\n\
+		║             ▒ ▒▒  ▒ ▒      ▒    ▒   ▒▒   ▒    ▒ ▒    ▒ ▒ ▒▒  ▒              ║\n\
+		║             ▒  ▒▒ ▒ ▒▒▒▒▒  ▒    ▒   ▒▒   ▒▒▒▒▒  ▒    ▒ ▒  ▒▒ ▒              ║\n\
+		║             ▒   ▒▒▒ ▒      ▒    ▒   ▒▒   ▒   ▒  ▒    ▒ ▒   ▒▒▒              ║\n\
+		║             ▒   ▒▒▒ ▒      ▒    ▒   ▒▒   ▒   ▒  ▒    ▒ ▒   ▒▒▒              ║\n\
+		║             ▒    ▒▒ ▒▒▒▒▒▒ ▒▒▒▒▒▒   ▒▒   ▒    ▒ ▒▒▒▒▒▒ ▒    ▒▒              ║\n\
+		╚═════════════════════════════════════════════════════════════════════════════╝\n";
+
+	static LICENCE_TEXT: &str = "\
+		\n\
+		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2022\n\
 		This program is free software under GPL v3 (or later)\n";
 
 	// Create a new temporary console for some boot-up messages
@@ -1023,14 +1052,37 @@ fn sign_on() {
 
 	// A crude way to clear the screen
 	for _col in 0..vga::MAX_TEXT_ROWS {
-		writeln!(&tc).unwrap();
+		writeln!(&tc, " ").unwrap();
 	}
 
 	tc.move_to(0, 0);
 
-	writeln!(&tc, "Neotron Pico BIOS {}", VERSION.trim_matches('\0')).unwrap();
-	write!(&tc, "{}", LICENCE_TEXT).unwrap();
+	tc.change_attr(Attr::new(
+		TextForegroundColour::BRIGHT_YELLOW,
+		TextBackgroundColour::BLUE,
+		false,
+	));
+	write!(&tc, "{LOGO_TEXT}").unwrap();
 
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::BLACK,
+		false,
+	));
+	write!(&tc, "{LICENCE_TEXT}").unwrap();
+
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::BLUE,
+		false,
+	));
+	writeln!(&tc, "BIOS Version: {}", VERSION.trim_matches('\0')).unwrap();
+
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::DARK_RED,
+		false,
+	));
 	let bmc_ver = critical_section::with(|cs| {
 		let mut lock = HARDWARE.borrow_ref_mut(cs);
 		let hw = lock.as_mut().unwrap();
@@ -1044,14 +1096,41 @@ fn sign_on() {
 	match bmc_ver {
 		Ok(string_bytes) => match core::str::from_utf8(&string_bytes) {
 			Ok(s) => {
-				writeln!(&tc, "BMC Version: {s}").unwrap();
+				writeln!(&tc, "BMC  Version: {}", s.trim_matches('\0')).unwrap();
 			}
 			Err(_e) => {
-				writeln!(&tc, "BMC Version: Unknown").unwrap();
+				writeln!(&tc, "BMC  Version: Unknown").unwrap();
 			}
 		},
 		Err(_e) => {
-			writeln!(&tc, "BMC Version: Error reading").unwrap();
+			writeln!(&tc, "BMC  Version: Error reading").unwrap();
+		}
+	}
+
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::BLACK,
+		false,
+	));
+	writeln!(&tc).unwrap();
+	writeln!(&tc).unwrap();
+
+	// Do a colour test
+	for bg in 0..=7 {
+		for fg in 0..=15 {
+			if fg != bg {
+				tc.change_attr(
+					// Safety: The loop above ensures bg and fg stay within bounds (0..=7 and 0..=15)
+					unsafe {
+						Attr::new(
+							TextForegroundColour::new_unchecked(fg),
+							TextBackgroundColour::new_unchecked(bg),
+							false,
+						)
+					},
+				);
+				write!(&tc, "ABCabc123#!").unwrap();
+			}
 		}
 	}
 
@@ -1428,27 +1507,32 @@ pub extern "C" fn video_wait_for_line(line: u16) {
 	}
 }
 
-/// Read the RGB palette. Currently we only have two colours and you can't
-/// change them.
+/// Read the RGB palette.
 extern "C" fn video_get_palette(index: u8) -> common::Option<common::video::RGBColour> {
-	match index {
-		0 => common::Option::Some(vga::colours::BLUE.into()),
-		1 => common::Option::Some(vga::colours::YELLOW.into()),
-		_ => common::Option::None,
-	}
+	let raw_u16 = vga::VIDEO_PALETTE[index as usize].load(Ordering::Relaxed);
+	let our_colour = vga::RGBColour(raw_u16);
+	// Convert from our 12-bit colour type to the public 24-bit colour type
+	common::Option::Some(our_colour.into())
 }
 
-/// Update the RGB palette
-extern "C" fn video_set_palette(_index: u8, _rgb: common::video::RGBColour) {
-	// TODO set the palette when we actually have one
+/// Update the RGB palette.
+extern "C" fn video_set_palette(index: u8, rgb: common::video::RGBColour) {
+	// Convert from their 24-bit colour type to our 12-bit colour type
+	let our_colour: vga::RGBColour = rgb.into();
+	// Store it
+	vga::VIDEO_PALETTE[index as usize].store(our_colour.0, Ordering::Relaxed);
 }
 
 /// Update all the RGB palette
 unsafe extern "C" fn video_set_whole_palette(
-	_palette: *const common::video::RGBColour,
-	_length: usize,
+	palette: *const common::video::RGBColour,
+	length: usize,
 ) {
-	// TODO set the palette when we actually have one
+	// Don't let them set more than 255 entries
+	let num_entries = length.min(255);
+	for i in 0..num_entries {
+		video_set_palette(i as u8, palette.add(i).read())
+	}
 }
 
 extern "C" fn i2c_bus_get_info(_i2c_bus: u8) -> common::Option<common::i2c::BusInfo> {
@@ -1629,6 +1713,7 @@ extern "C" fn block_dev_eject(_dev_id: u8) -> common::Result<()> {
 /// Sleep the CPU until the next interrupt.
 extern "C" fn power_idle() {
 	if !INTERRUPT_PENDING.load(Ordering::Relaxed) {
+		defmt::debug!("Idle...");
 		cortex_m::asm::wfe();
 	}
 }
