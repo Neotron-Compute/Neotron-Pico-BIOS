@@ -404,10 +404,13 @@ fn main() -> ! {
 
 	// Unmask the IO_BANK0 IRQ so that the NVIC interrupt controller
 	// will jump to the interrupt function when the interrupt occurs.
+	// Then enable interrupts on Core 0.
+	//
 	// We do this last so that the interrupt can't go off while
-	// it is in the middle of being configured
+	// it is in the middle of being configured.
 	unsafe {
 		pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
+		cortex_m::interrupt::enable();
 	}
 
 	// Empty the keyboard FIFO
@@ -835,7 +838,7 @@ impl Hardware {
 		if INTERRUPT_PENDING.load(Ordering::Relaxed) {
 			// The IO chip reports 0 for pending, 1 for not pending.
 			self.interrupts_pending = self.io_read_interrupts() ^ 0xFF;
-			defmt::info!("Interrupts: 0b{:08b}", self.interrupts_pending);
+			defmt::info!("MCP23S17 IRQ pins: 0b{:08b}", self.interrupts_pending);
 			// Change the debug LEDs so we can see the interrupts
 			self.irq_count = self.irq_count.wrapping_add(1);
 			self.set_debug_leds((self.irq_count & 0x0F) as u8);
