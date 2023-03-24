@@ -45,6 +45,7 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 // Sub-modules
 // -----------------------------------------------------------------------------
 
+pub mod rtc;
 pub mod vga;
 
 // -----------------------------------------------------------------------------
@@ -64,6 +65,7 @@ use cortex_m_rt::entry;
 use critical_section::Mutex;
 use defmt::info;
 use defmt_rtt as _;
+use ds1307::{Datelike, Timelike};
 use embedded_hal::{
 	blocking::spi::{Transfer as _SpiTransfer, Write as _SpiWrite},
 	digital::v2::{InputPin, OutputPin},
@@ -121,6 +123,19 @@ struct Hardware {
 	interrupts_pending: u8,
 	/// The number of IRQs we've had
 	irq_count: u32,
+	/// Our I2C Bus
+	i2c: shared_bus::BusManagerSimple<
+		hal::i2c::I2C<
+			pac::I2C1,
+			(
+				Pin<bank0::Gpio14, Function<hal::gpio::I2C>>,
+				Pin<bank0::Gpio15, Function<hal::gpio::I2C>>,
+			),
+			hal::i2c::Controller,
+		>,
+	>,
+	/// Our RTC
+	rtc: rtc::Rtc,
 }
 
 /// Flips between true and false so we always send a unique read request
@@ -159,8 +174,6 @@ struct Pins {
 	blue2: Pin<bank0::Gpio12, Function<pac::PIO0>>,
 	blue3: Pin<bank0::Gpio13, Function<pac::PIO0>>,
 	npower_save: Pin<bank0::Gpio23, Output<PushPull>>,
-	i2c_sda: Pin<bank0::Gpio14, Function<hal::gpio::I2C>>,
-	i2c_scl: Pin<bank0::Gpio15, Function<hal::gpio::I2C>>,
 	spi_cipo: Pin<bank0::Gpio16, Function<hal::gpio::Spi>>,
 	nspi_cs_io: Pin<bank0::Gpio17, Output<PushPull>>,
 	spi_clk: Pin<bank0::Gpio18, Function<hal::gpio::Spi>>,
@@ -372,11 +385,28 @@ fn main() -> ! {
 		sio.gpio_bank0,
 		&mut pp.RESETS,
 		pp.SPI0,
+		pp.I2C1,
 		clocks,
 		delay,
 	);
 	hw.init_io_chip();
 	hw.set_hdd_led(false);
+	match hw.rtc.get_time(hw.i2c.acquire_i2c()) {
+		Ok(time) => {
+			defmt::info!(
+				"Time: {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+				time.year(),
+				time.month(),
+				time.day(),
+				time.hour(),
+				time.minute(),
+				time.second()
+			);
+		}
+		Err(_) => {
+			defmt::info!("Time: Unknown");
+		}
+	}
 
 	nirq_io.set_interrupt_enabled(hal::gpio::Interrupt::EdgeLow, true);
 	nirq_io.set_interrupt_enabled(hal::gpio::Interrupt::EdgeHigh, true);
@@ -483,6 +513,7 @@ impl Hardware {
 		sio: hal::sio::SioGpioBank0,
 		resets: &mut pac::RESETS,
 		spi: pac::SPI0,
+		i2c: pac::I2C1,
 		clocks: ClocksManager,
 		delay: cortex_m::delay::Delay,
 	) -> (Hardware, IrqPin) {
@@ -492,6 +523,27 @@ impl Hardware {
 		// pin 25 to track render loop timing. This avoids trying to 'move' the pin
 		// over to Core 1.
 		let _pico_led = hal_pins.led.into_push_pull_output();
+		let raw_i2c = hal::i2c::I2C::i2c1(
+			i2c,
+			{
+				let mut pin = hal_pins.gpio14.into_mode();
+				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+				pin
+			},
+			{
+				let mut pin = hal_pins.gpio15.into_mode();
+				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+				pin
+			},
+			100.kHz(),
+			resets,
+			&clocks.system_clock,
+		);
+		let i2c = shared_bus::BusManagerSimple::new(raw_i2c);
+		let proxy = i2c.acquire_i2c();
+		let rtc = rtc::Rtc::new(proxy);
 
 		(
 			Hardware {
@@ -587,18 +639,6 @@ impl Hardware {
 						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 						pin
 					},
-					i2c_sda: {
-						let mut pin = hal_pins.gpio14.into_mode();
-						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-						pin
-					},
-					i2c_scl: {
-						let mut pin = hal_pins.gpio15.into_mode();
-						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-						pin
-					},
 					spi_cipo: {
 						let mut pin = hal_pins.gpio16.into_mode();
 						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
@@ -652,10 +692,19 @@ impl Hardware {
 				bmc_buffer: [0u8; 64],
 				interrupts_pending: 0,
 				irq_count: 0,
+				i2c,
+				rtc,
 			},
 			hal_pins.gpio20.into_pull_up_input(),
 		)
 	}
+
+	// i2c_sda: {
+	//
+	// },
+	// i2c_scl: {
+	//
+	// },
 
 	/// Perform some SPI operation with the I/O chip selected.
 	///

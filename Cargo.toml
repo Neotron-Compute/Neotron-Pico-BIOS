@@ -42,6 +42,12 @@ fugit = "0.3"
 pc-keyboard = "0.7.0"
 # Useful queues and other structures
 heapless = "0.7"
+# The Dallas DS1307 RTC driver
+ds1307 = "0.5.0"
+# The Microchip MCP7940x RTC driver
+mcp794xx = "0.3.0"
+# I2C Bus Sharing
+shared-bus = "0.2"
 
 [[bin]]
 name = "neotron-pico-bios"
