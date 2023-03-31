@@ -100,6 +100,11 @@ use neotron_common_bios as common;
 /// The type of our IRQ input pin from the MCP23S17.
 type IrqPin = Pin<bank0::Gpio20, Input<PullUp>>;
 
+type I2cPins = (
+	Pin<bank0::Gpio14, Function<hal::gpio::I2C>>,
+	Pin<bank0::Gpio15, Function<hal::gpio::I2C>>,
+);
+
 /// All the hardware we use on the Pico
 struct Hardware {
 	/// All the pins we use on the Raspberry Pi Pico
@@ -124,18 +129,11 @@ struct Hardware {
 	/// The number of IRQs we've had
 	irq_count: u32,
 	/// Our I2C Bus
-	i2c: shared_bus::BusManagerSimple<
-		hal::i2c::I2C<
-			pac::I2C1,
-			(
-				Pin<bank0::Gpio14, Function<hal::gpio::I2C>>,
-				Pin<bank0::Gpio15, Function<hal::gpio::I2C>>,
-			),
-			hal::i2c::Controller,
-		>,
-	>,
+	i2c: shared_bus::BusManagerSimple<hal::i2c::I2C<pac::I2C1, I2cPins, hal::i2c::Controller>>,
 	/// Our RTC
 	rtc: rtc::Rtc,
+	/// A Timer
+	timer: hal::timer::Timer,
 }
 
 /// Flips between true and false so we always send a unique read request
@@ -388,6 +386,7 @@ fn main() -> ! {
 		pp.I2C1,
 		clocks,
 		delay,
+		pp.TIMER,
 	);
 	hw.init_io_chip();
 	hw.set_hdd_led(false);
@@ -507,6 +506,7 @@ impl Hardware {
 	/// Build all our hardware drivers.
 	///
 	/// Puts the pins into the right modes, builds the SPI driver, etc.
+	#[allow(clippy::too_many_arguments)]
 	fn build(
 		bank: pac::IO_BANK0,
 		pads: pac::PADS_BANK0,
@@ -516,6 +516,7 @@ impl Hardware {
 		i2c: pac::I2C1,
 		clocks: ClocksManager,
 		delay: cortex_m::delay::Delay,
+		timer: pac::TIMER,
 	) -> (Hardware, IrqPin) {
 		let hal_pins = rp_pico::Pins::new(bank, pads, sio, resets);
 		// We construct the pin here and then throw it away. Then Core 1 does
@@ -544,6 +545,7 @@ impl Hardware {
 		let i2c = shared_bus::BusManagerSimple::new(raw_i2c);
 		let proxy = i2c.acquire_i2c();
 		let rtc = rtc::Rtc::new(proxy);
+		let timer = hal::timer::Timer::new(timer, resets);
 
 		(
 			Hardware {
@@ -694,6 +696,7 @@ impl Hardware {
 				irq_count: 0,
 				i2c,
 				rtc,
+				timer,
 			},
 			hal_pins.gpio20.into_pull_up_input(),
 		)
@@ -1770,14 +1773,18 @@ extern "C" fn power_idle() {
 	}
 }
 
-/// TODO: Get the monotonic run-time of the system from SysTick.
 extern "C" fn time_ticks_get() -> common::Ticks {
-	common::Ticks(0)
+	critical_section::with(|cs| {
+		let mut lock = HARDWARE.borrow_ref_mut(cs);
+		let hw = lock.as_mut().unwrap();
+		let now = hw.timer.get_counter();
+		common::Ticks(now.ticks())
+	})
 }
 
-/// We have a 1 kHz SysTick
+/// We have a 1 MHz timer
 extern "C" fn time_ticks_per_second() -> common::Ticks {
-	common::Ticks(1000)
+	common::Ticks(1_000_000)
 }
 
 static IRQ_PIN: Mutex<RefCell<Option<IrqPin>>> = Mutex::new(RefCell::new(None));
