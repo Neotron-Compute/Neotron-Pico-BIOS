@@ -10,6 +10,13 @@ pub enum Rtc {
 	None,
 }
 
+/// The ways this module can fail
+pub enum Error<E> {
+	BusError(E),
+	DriverBug,
+	NoRtcFound,
+}
+
 impl Rtc {
 	/// Create a new RTC object.
 	///
@@ -60,7 +67,7 @@ impl Rtc {
 	/// We don't care about timezones - this is basic Gregorian naive wall-clock date/time.
 	///
 	/// You get `Err()` if the RTC doesn't respond or wasn't found on start-up.
-	pub fn get_time<T, E>(&self, bus: T) -> Result<NaiveDateTime, ()>
+	pub fn get_time<T, E>(&mut self, bus: T) -> Result<NaiveDateTime, Error<E>>
 	where
 		T: embedded_hal::blocking::i2c::WriteRead<Error = E>
 			+ embedded_hal::blocking::i2c::Write<Error = E>,
@@ -68,13 +75,48 @@ impl Rtc {
 		match self {
 			Self::Ds1307 => {
 				let mut driver = ds1307::Ds1307::new(bus);
-				driver.datetime().map_err(|_e| ())
+				driver.datetime().map_err(|e| match e {
+					ds1307::Error::I2C(bus_error) => Error::BusError(bus_error),
+					ds1307::Error::InvalidInputData => Error::DriverBug,
+				})
 			}
 			Self::Mcp7940n => {
 				let mut driver = mcp794xx::Mcp794xx::new_mcp7940n(bus);
-				driver.datetime().map_err(|_e| ())
+				driver.datetime().map_err(|e| match e {
+					mcp794xx::Error::Comm(bus_error) => Error::BusError(bus_error),
+					mcp794xx::Error::InvalidInputData => Error::DriverBug,
+				})
 			}
-			Self::None => Err(()),
+			Self::None => Err(Error::NoRtcFound),
+		}
+	}
+
+	/// Set the current wall-time
+	///
+	/// We don't care about timezones - this is basic Gregorian naive wall-clock date/time.
+	///
+	/// You get `Err()` if the RTC doesn't respond or wasn't found on start-up.
+	pub fn set_time<T, E>(&mut self, bus: T, new_time: NaiveDateTime) -> Result<(), Error<E>>
+	where
+		T: embedded_hal::blocking::i2c::WriteRead<Error = E>
+			+ embedded_hal::blocking::i2c::Write<Error = E>,
+	{
+		match self {
+			Self::Ds1307 => {
+				let mut driver = ds1307::Ds1307::new(bus);
+				driver.set_datetime(&new_time).map_err(|e| match e {
+					ds1307::Error::I2C(bus_error) => Error::BusError(bus_error),
+					ds1307::Error::InvalidInputData => Error::DriverBug,
+				})
+			}
+			Self::Mcp7940n => {
+				let mut driver = mcp794xx::Mcp794xx::new_mcp7940n(bus);
+				driver.set_datetime(&new_time).map_err(|e| match e {
+					mcp794xx::Error::Comm(bus_error) => Error::BusError(bus_error),
+					mcp794xx::Error::InvalidInputData => Error::DriverBug,
+				})
+			}
+			Self::None => Err(Error::NoRtcFound),
 		}
 	}
 }
