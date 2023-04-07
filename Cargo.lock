@@ -246,6 +246,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ds1307"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "111baaf868b52da3308be02b86f126bd071bed9910c8210ec1c6cde41ff59b9f"
+dependencies = [
+ "embedded-hal",
+ "rtcc",
+]
+
+[[package]]
 name = "either"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -416,6 +426,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcp794xx"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3db5877a524650782ac5488a8a6054782b31ff0b9c3bb6cb78a12ccd24764f"
+dependencies = [
+ "embedded-hal",
+ "rtcc",
+]
+
+[[package]]
 name = "memchr"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -472,9 +492,11 @@ dependencies = [
  "critical-section",
  "defmt",
  "defmt-rtt",
+ "ds1307",
  "embedded-hal",
  "fugit",
  "heapless",
+ "mcp794xx",
  "neotron-bmc-commands",
  "neotron-bmc-protocol",
  "neotron-common-bios",
@@ -484,6 +506,7 @@ dependencies = [
  "pio-proc",
  "rp-pico",
  "rp2040-boot2",
+ "shared-bus",
 ]
 
 [[package]]
@@ -802,6 +825,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtcc"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3623619ce77c09a7d87cf7c61c5c887b9c7dee8805f66af6c4aa5824be4d9930"
+dependencies = [
+ "chrono",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -851,6 +883,16 @@ name = "semver-parser"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
+
+[[package]]
+name = "shared-bus"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05f8438a40b91c8b9531c664e9680c55b92bd78cd6809a8b45b4512b1e5765f2"
+dependencies = [
+ "embedded-hal",
+ "nb 0.1.3",
+]
 
 [[package]]
 name = "siphasher"

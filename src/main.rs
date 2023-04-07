@@ -45,6 +45,7 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 // Sub-modules
 // -----------------------------------------------------------------------------
 
+pub mod rtc;
 pub mod vga;
 
 // -----------------------------------------------------------------------------
@@ -64,6 +65,7 @@ use cortex_m_rt::entry;
 use critical_section::Mutex;
 use defmt::info;
 use defmt_rtt as _;
+use ds1307::{Datelike, NaiveDateTime, Timelike};
 use embedded_hal::{
 	blocking::spi::{Transfer as _SpiTransfer, Write as _SpiWrite},
 	digital::v2::{InputPin, OutputPin},
@@ -95,8 +97,16 @@ use neotron_common_bios as common;
 // Types
 // -----------------------------------------------------------------------------
 
+/// What we count our system ticks in
+type Duration = fugit::Duration<u64, 1, 1_000_000>;
+
 /// The type of our IRQ input pin from the MCP23S17.
 type IrqPin = Pin<bank0::Gpio20, Input<PullUp>>;
+
+type I2cPins = (
+	Pin<bank0::Gpio14, Function<hal::gpio::I2C>>,
+	Pin<bank0::Gpio15, Function<hal::gpio::I2C>>,
+);
 
 /// All the hardware we use on the Pico
 struct Hardware {
@@ -121,6 +131,14 @@ struct Hardware {
 	interrupts_pending: u8,
 	/// The number of IRQs we've had
 	irq_count: u32,
+	/// Our I2C Bus
+	i2c: shared_bus::BusManagerSimple<hal::i2c::I2C<pac::I2C1, I2cPins, hal::i2c::Controller>>,
+	/// Our External RTC (on the I2C bus)
+	rtc: rtc::Rtc,
+	/// The time we started up at, in microseconds since the Neotron epoch
+	bootup_at: Duration,
+	/// A Timer
+	timer: hal::timer::Timer,
 }
 
 /// Flips between true and false so we always send a unique read request
@@ -159,8 +177,6 @@ struct Pins {
 	blue2: Pin<bank0::Gpio12, Function<pac::PIO0>>,
 	blue3: Pin<bank0::Gpio13, Function<pac::PIO0>>,
 	npower_save: Pin<bank0::Gpio23, Output<PushPull>>,
-	i2c_sda: Pin<bank0::Gpio14, Function<hal::gpio::I2C>>,
-	i2c_scl: Pin<bank0::Gpio15, Function<hal::gpio::I2C>>,
 	spi_cipo: Pin<bank0::Gpio16, Function<hal::gpio::Spi>>,
 	nspi_cs_io: Pin<bank0::Gpio17, Output<PushPull>>,
 	spi_clk: Pin<bank0::Gpio18, Function<hal::gpio::Spi>>,
@@ -257,6 +273,9 @@ static API_CALLS: common::Api = common::Api {
 	block_dev_eject,
 	power_idle,
 };
+
+/// Seconds between the Neotron Epoch (2000-011-011T00:00:00) and the UNIX Epoch (1970-01-01T00:00:00).
+const SECONDS_BETWEEN_UNIX_AND_NEOTRON_EPOCH: i64 = 946684800;
 
 extern "C" {
 	static mut _flash_os_start: u32;
@@ -370,10 +389,12 @@ fn main() -> ! {
 		pp.IO_BANK0,
 		pp.PADS_BANK0,
 		sio.gpio_bank0,
-		&mut pp.RESETS,
 		pp.SPI0,
+		pp.I2C1,
+		pp.TIMER,
 		clocks,
 		delay,
+		&mut pp.RESETS,
 	);
 	hw.init_io_chip();
 	hw.set_hdd_led(false);
@@ -477,14 +498,17 @@ impl Hardware {
 	/// Build all our hardware drivers.
 	///
 	/// Puts the pins into the right modes, builds the SPI driver, etc.
+	#[allow(clippy::too_many_arguments)]
 	fn build(
 		bank: pac::IO_BANK0,
 		pads: pac::PADS_BANK0,
 		sio: hal::sio::SioGpioBank0,
-		resets: &mut pac::RESETS,
 		spi: pac::SPI0,
+		i2c: pac::I2C1,
+		timer: pac::TIMER,
 		clocks: ClocksManager,
 		delay: cortex_m::delay::Delay,
+		resets: &mut pac::RESETS,
 	) -> (Hardware, IrqPin) {
 		let hal_pins = rp_pico::Pins::new(bank, pads, sio, resets);
 		// We construct the pin here and then throw it away. Then Core 1 does
@@ -492,6 +516,50 @@ impl Hardware {
 		// pin 25 to track render loop timing. This avoids trying to 'move' the pin
 		// over to Core 1.
 		let _pico_led = hal_pins.led.into_push_pull_output();
+		let raw_i2c = hal::i2c::I2C::i2c1(
+			i2c,
+			{
+				let mut pin = hal_pins.gpio14.into_mode();
+				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+				pin
+			},
+			{
+				let mut pin = hal_pins.gpio15.into_mode();
+				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+				pin
+			},
+			100.kHz(),
+			resets,
+			&clocks.system_clock,
+		);
+		let i2c = shared_bus::BusManagerSimple::new(raw_i2c);
+		let proxy = i2c.acquire_i2c();
+		let mut external_rtc = rtc::Rtc::new(proxy);
+		let timer = hal::timer::Timer::new(timer, resets);
+		// Do a conversion from external RTC time (chrono::NaiveDateTime) to a format we can track
+		let ticks_at_boot_us = match external_rtc.get_time(i2c.acquire_i2c()) {
+			Ok(time) => {
+				defmt::info!(
+					"Time: {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+					time.year(),
+					time.month(),
+					time.day(),
+					time.hour(),
+					time.minute(),
+					time.second()
+				);
+				let ticks_at_boot_us =
+					time.timestamp_micros() - (SECONDS_BETWEEN_UNIX_AND_NEOTRON_EPOCH * 1_000_000);
+				defmt::info!("Ticks at boot: {}", ticks_at_boot_us);
+				ticks_at_boot_us
+			}
+			Err(_) => {
+				defmt::info!("Time: Unknown");
+				0
+			}
+		};
 
 		(
 			Hardware {
@@ -587,18 +655,6 @@ impl Hardware {
 						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 						pin
 					},
-					i2c_sda: {
-						let mut pin = hal_pins.gpio14.into_mode();
-						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-						pin
-					},
-					i2c_scl: {
-						let mut pin = hal_pins.gpio15.into_mode();
-						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-						pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-						pin
-					},
 					spi_cipo: {
 						let mut pin = hal_pins.gpio16.into_mode();
 						pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
@@ -652,10 +708,21 @@ impl Hardware {
 				bmc_buffer: [0u8; 64],
 				interrupts_pending: 0,
 				irq_count: 0,
+				i2c,
+				rtc: external_rtc,
+				bootup_at: Duration::from_ticks(ticks_at_boot_us as u64),
+				timer,
 			},
 			hal_pins.gpio20.into_pull_up_input(),
 		)
 	}
+
+	// i2c_sda: {
+	//
+	// },
+	// i2c_scl: {
+	//
+	// },
 
 	/// Perform some SPI operation with the I/O chip selected.
 	///
@@ -838,7 +905,7 @@ impl Hardware {
 		if INTERRUPT_PENDING.load(Ordering::Relaxed) {
 			// The IO chip reports 0 for pending, 1 for not pending.
 			self.interrupts_pending = self.io_read_interrupts() ^ 0xFF;
-			defmt::info!("MCP23S17 IRQ pins: 0b{:08b}", self.interrupts_pending);
+			defmt::debug!("MCP23S17 IRQ pins: 0b{:08b}", self.interrupts_pending);
 			// Change the debug LEDs so we can see the interrupts
 			self.irq_count = self.irq_count.wrapping_add(1);
 			self.set_debug_leds((self.irq_count & 0x0F) as u8);
@@ -1233,8 +1300,22 @@ pub extern "C" fn serial_read(
 /// If the BIOS does not have a battery-backed clock, or if that battery has
 /// failed to keep time, the system starts up assuming it is the epoch.
 pub extern "C" fn time_clock_get() -> common::Time {
-	// TODO: Read from the MCP7940N
-	common::Time { secs: 0, nsecs: 0 }
+	// We track real-time using the RP2040 1 MHz timer. We noted the wall-time at boot-up.
+
+	let ticks_since_epoch = critical_section::with(|cs| {
+		let mut lock = HARDWARE.borrow_ref_mut(cs);
+		let hw = lock.as_mut().unwrap();
+		// We can unwrap this because we set the day-of-week correctly on startup
+		let ticks_since_boot = hw.timer.get_counter().duration_since_epoch();
+		ticks_since_boot + hw.bootup_at
+	});
+
+	let nanos_since_epoch = ticks_since_epoch.to_nanos();
+
+	let secs = (nanos_since_epoch / 1_000_000_000) as u32;
+	let nsecs = (nanos_since_epoch % 1_000_000_000) as u32;
+	defmt::info!("Time is {}.{:09}s", secs, nsecs);
+	common::Time { secs, nsecs }
 }
 
 /// Set the current wall time.
@@ -1246,8 +1327,49 @@ pub extern "C" fn time_clock_get() -> common::Time {
 /// time (e.g. the user has updated the current time, or if you get a GPS
 /// fix). The BIOS should push the time out to the battery-backed Real
 /// Time Clock, if it has one.
-pub extern "C" fn time_clock_set(_time: common::Time) {
-	// TODO: Update the MCP7940N RTC
+pub extern "C" fn time_clock_set(time: common::Time) {
+	critical_section::with(|cs| {
+		let mut lock = HARDWARE.borrow_ref_mut(cs);
+		let hw = lock.as_mut().unwrap();
+
+		// 1. How long have we been running, in 1 MHz ticks?
+		let ticks_since_boot = hw.timer.get_counter().duration_since_epoch();
+
+		// 2. What is the given time as 1 MHz ticks since the epoch?
+		let ticks_since_epoch = u64::from(time.secs) * 1_000_000 + u64::from(time.nsecs / 1000);
+		let ticks_since_epoch = Duration::from_ticks(ticks_since_epoch);
+
+		// 3. Work backwards, and find the time it must have been when we booted up.
+		let ticks_at_boot = ticks_since_epoch
+			.checked_sub(ticks_since_boot)
+			.unwrap_or_else(|| Duration::from_ticks(0));
+
+		// 4. Store that value
+		defmt::info!("Ticks at boot: {}", ticks_at_boot.ticks());
+		hw.bootup_at = ticks_at_boot;
+
+		// 5. Convert to calendar time
+		if let Some(new_time) = NaiveDateTime::from_timestamp_opt(
+			i64::from(time.secs) + SECONDS_BETWEEN_UNIX_AND_NEOTRON_EPOCH,
+			time.nsecs,
+		) {
+			// 6. Update the hardware RTC as well
+			match hw.rtc.set_time(hw.i2c.acquire_i2c(), new_time) {
+				Ok(_) => {
+					defmt::info!("Time set in RTC OK");
+				}
+				Err(rtc::Error::BusError(_)) => {
+					defmt::warn!("Failed to talk to RTC to set time");
+				}
+				Err(rtc::Error::DriverBug) => {
+					defmt::warn!("RTC driver failed");
+				}
+				Err(rtc::Error::NoRtcFound) => {
+					defmt::info!("Not setting time - no RTC found");
+				}
+			}
+		}
+	});
 }
 
 /// Get the configuration data block.
@@ -1721,14 +1843,18 @@ extern "C" fn power_idle() {
 	}
 }
 
-/// TODO: Get the monotonic run-time of the system from SysTick.
 extern "C" fn time_ticks_get() -> common::Ticks {
-	common::Ticks(0)
+	critical_section::with(|cs| {
+		let mut lock = HARDWARE.borrow_ref_mut(cs);
+		let hw = lock.as_mut().unwrap();
+		let now = hw.timer.get_counter();
+		common::Ticks(now.ticks())
+	})
 }
 
-/// We have a 1 kHz SysTick
+/// We have a 1 MHz timer
 extern "C" fn time_ticks_per_second() -> common::Ticks {
-	common::Ticks(1000)
+	common::Ticks(1_000_000)
 }
 
 static IRQ_PIN: Mutex<RefCell<Option<IrqPin>>> = Mutex::new(RefCell::new(None));
