@@ -45,6 +45,7 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 // Sub-modules
 // -----------------------------------------------------------------------------
 
+pub mod mcp23s17;
 pub mod rtc;
 pub mod vga;
 
@@ -108,12 +109,14 @@ type I2cPins = (
 	Pin<bank0::Gpio15, Function<hal::gpio::I2C>>,
 );
 
+type SpiBus = hal::Spi<hal::spi::Enabled, pac::SPI0, 8>;
+
 /// All the hardware we use on the Pico
 struct Hardware {
 	/// All the pins we use on the Raspberry Pi Pico
 	pins: Pins,
 	/// The SPI bus connected to all the slots
-	spi_bus: hal::Spi<hal::spi::Enabled, pac::SPI0, 8>,
+	spi_bus: SpiBus,
 	/// Something to perform small delays with. Uses SysTICK.
 	delay: cortex_m::delay::Delay,
 	/// Current 5-bit value shown on the LEDs (including the HDD in bit 0).
@@ -215,11 +218,11 @@ static HARDWARE: Mutex<core::cell::RefCell<Option<Hardware>>> =
 pub static OS_IMAGE: [u8; include_bytes!("thumbv6m-none-eabi-flash1002-libneotron_os.bin").len()] =
 	*include_bytes!("thumbv6m-none-eabi-flash1002-libneotron_os.bin");
 
-// Tracks if we have had an IO interrupt.
-//
-// Set by the GPIO interrupt routine to reflect the level state of the IRQ input
-// from the IO chip. This this value is `true` if any of `IRQ0` through `IRQ7`
-// is currently active (low).
+/// Tracks if we have had an IO interrupt.
+///
+/// Set by the GPIO interrupt routine to reflect the level state of the IRQ input
+/// from the IO chip. This this value is `true` if any of `IRQ0` through `IRQ7`
+/// is currently active (low).
 static INTERRUPT_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// The table of API calls we provide the OS
@@ -474,27 +477,6 @@ impl Hardware {
 	/// Give the BMC 6us to calculate its response
 	const BMC_REQUEST_RESPONSE_DELAY_CLOCKS: u32 = 6_000 / Self::NS_PER_CLOCK_CYCLE;
 
-	/// Data Direction Register A on the MCP23S17
-	const MCP23S17_DDRA: u8 = 0x00;
-
-	/// Interrupt-on-Change Control Register B on the MCP23S17
-	const MCP23S17_GPINTENB: u8 = 0x05;
-
-	/// Interrupt Control Register B on the MCP23S17
-	const MCP23S17_DEFVALB: u8 = 0x07;
-
-	/// Interrupt Control Register B on the MCP23S17
-	const MCP23S17_INTCONB: u8 = 0x09;
-
-	/// GPIO Pull-Up Register B on the MCP23S17
-	const MCP23S17_GPPUB: u8 = 0x0D;
-
-	/// GPIO Data Register A on the MCP23S17
-	const MCP23S17_GPIOA: u8 = 0x12;
-
-	/// GPIO Data Register B on the MCP23S17
-	const MCP23S17_GPIOB: u8 = 0x13;
-
 	/// Build all our hardware drivers.
 	///
 	/// Puts the pins into the right modes, builds the SPI driver, etc.
@@ -729,43 +711,45 @@ impl Hardware {
 	/// You are required to have called `self.release_cs_lines()` previously,
 	/// otherwise the I/O chip and your selected bus device will both see a
 	/// chip-select signal.
-	fn with_io_cs<F>(&mut self, func: F)
+	fn with_io_cs<F, T>(&mut self, func: F) -> T
 	where
-		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>),
+		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>) -> T,
 	{
 		// Select MCP23S17
 		self.pins.nspi_cs_io.set_low().unwrap();
 		// Setup time
 		cortex_m::asm::delay(Self::CS_IO_SETUP_CPU_CLOCKS);
 		// Do the SPI thing
-		func(&mut self.spi_bus);
+		let result = func(&mut self.spi_bus);
 		// Hold the CS pin a bit longer
 		cortex_m::asm::delay(Self::CS_IO_HOLD_CPU_CLOCKS);
 		// Release the CS pin
 		self.pins.nspi_cs_io.set_high().unwrap();
+		// Return the result from the closure
+		result
 	}
 
 	/// Write to a register on the MCP23S17 I/O chip.
 	///
 	/// * `register` - the address of the register to write to
-	/// * `data` - the value to write
-	fn io_chip_write(&mut self, register: u8, data: u8) {
+	/// * `value` - the value to write
+	fn io_chip_write(&mut self, register: mcp23s17::Register, value: u8) {
 		// Inter-packet delay
 		cortex_m::asm::delay(Self::CS_IO_DISABLE_CPU_CLOCKS);
 
 		// Do the operation with CS pin active
 		self.with_io_cs(|spi| {
-			spi.write(&[0x40, register, data]).unwrap();
+			mcp23s17::write_register(spi, register, value);
 		});
 
 		// Inter-packet delay
 		cortex_m::asm::delay(Self::CS_IO_DISABLE_CPU_CLOCKS);
 
 		let read_back = self.io_chip_read(register);
-		if read_back != data {
+		if read_back != value {
 			defmt::panic!(
-				"Wrote 0x{:02x} to IO chip register {}, got 0x{:02x}",
-				data,
+				"Wrote 0x{:02x} to IO chip register {:?}, got 0x{:02x}",
+				value,
 				register,
 				read_back
 			);
@@ -775,20 +759,12 @@ impl Hardware {
 	/// Read from a register on the MCP23S17 I/O chip.
 	///
 	/// * `register` - the address of the register to read from
-	fn io_chip_read(&mut self, register: u8) -> u8 {
+	fn io_chip_read(&mut self, register: mcp23s17::Register) -> u8 {
 		// Inter-packet delay
 		cortex_m::asm::delay(Self::CS_IO_DISABLE_CPU_CLOCKS);
 
-		// Starts with outbound, is replaced with inbound
-		let mut buffer = [0x41, register, 0x00];
-
 		// Do the operation with CS pin active
-		self.with_io_cs(|spi| {
-			spi.transfer(&mut buffer).unwrap();
-		});
-
-		// Last byte has the value we read
-		buffer[2]
+		self.with_io_cs(|spi| mcp23s17::read_register(spi, register))
 	}
 
 	/// Set the four debug LEDs on the PCB.
@@ -798,7 +774,10 @@ impl Hardware {
 		// LEDs are active-low.
 		let leds = (leds ^ 0xFF) & 0xF;
 		self.led_state = leds << 1 | (self.led_state & 1);
-		self.io_chip_write(0x12, self.led_state << 3 | self.last_cs);
+		self.io_chip_write(
+			mcp23s17::Register::GPIOA,
+			self.led_state << 3 | self.last_cs,
+		);
 	}
 
 	/// Set the HDD LED on the PCB.
@@ -807,7 +786,10 @@ impl Hardware {
 	fn set_hdd_led(&mut self, enabled: bool) {
 		// LEDs are active-low.
 		self.led_state = (self.led_state & 0x1e) | u8::from(!enabled);
-		self.io_chip_write(0x12, self.led_state << 3 | self.last_cs);
+		self.io_chip_write(
+			mcp23s17::Register::GPIOA,
+			self.led_state << 3 | self.last_cs,
+		);
 	}
 
 	/// Perform some SPI transaction with a specific bus chip-select pin active.
@@ -823,7 +805,7 @@ impl Hardware {
 
 		if cs != self.last_cs {
 			// Set CS Outputs into decoder/buffer
-			self.io_chip_write(0x12, self.led_state << 3 | cs);
+			self.io_chip_write(mcp23s17::Register::GPIOA, self.led_state << 3 | cs);
 			self.last_cs = cs;
 		}
 
@@ -863,20 +845,16 @@ impl Hardware {
 		// Undrive CS lines from decoder/buffer
 		self.release_cs_lines();
 
-		// Inter-packet delay
 		cortex_m::asm::delay(Self::CS_IO_DISABLE_CPU_CLOCKS);
 
 		// Set IODIRA = 0x00 => GPIOA is all outputs
-		self.io_chip_write(Self::MCP23S17_DDRA, 0x00);
-
-		// Inter-packet delay
-		cortex_m::asm::delay(Self::CS_IO_DISABLE_CPU_CLOCKS);
+		self.io_chip_write(mcp23s17::Register::DDRA, 0x00);
 
 		// Set GPIOA = 0x00 => GPIOA is all low
-		self.io_chip_write(Self::MCP23S17_GPIOA, 0x00);
+		self.io_chip_write(mcp23s17::Register::GPIOA, 0x00);
 
 		// Set GPPUB to = 0xFF => GPIOB is pulled-up
-		self.io_chip_write(Self::MCP23S17_GPPUB, 0xFF);
+		self.io_chip_write(mcp23s17::Register::GPPUB, 0xFF);
 
 		// Set up interrupts. We want the line to go low if anything on GPIOB is
 		// low.
@@ -885,18 +863,18 @@ impl Hardware {
 		// for the interrupt-on-change feature. All the bits are set, so the
 		// corresponding I/O pin is compared against the associated bit in the
 		// DEFVAL register.
-		self.io_chip_write(Self::MCP23S17_INTCONB, 0xFF);
+		self.io_chip_write(mcp23s17::Register::INTCONB, 0xFF);
 
 		// All the bits are set, so the corresponding pins are enabled for
 		// interrupt-on-change. The DEFVAL and INTCON registers must also be
 		// configured if any pins are enabled for interrupt-on-change.
-		self.io_chip_write(Self::MCP23S17_GPINTENB, 0xFF);
+		self.io_chip_write(mcp23s17::Register::GPINTENB, 0xFF);
 
 		// The default comparison value is configured in the DEFVAL register. If
 		// enabled (via GPINTEN and INTCON) to compare against the DEFVAL
 		// register, an opposite value on the associated pin will cause an
 		// interrupt to occur.
-		self.io_chip_write(Self::MCP23S17_DEFVALB, 0xFF);
+		self.io_chip_write(mcp23s17::Register::DEFVALB, 0x00);
 	}
 
 	/// If the interrupt flag was set by the IRQ handler, read the interrupt
@@ -912,9 +890,11 @@ impl Hardware {
 		}
 	}
 
-	/// Returns the contents of the GPIOB register, i.e. eight bits, where if bit N is low, IRQN is active.
+	/// Returns the contents of the GPIOB register, i.e. eight bits, where if
+	/// bit N is low, IRQN is active.
 	fn io_read_interrupts(&mut self) -> u8 {
-		self.io_chip_read(Self::MCP23S17_GPIOB)
+		self.io_chip_read(mcp23s17::Register::GPIOB)
+	}
 	}
 
 	/// Send a request to the BMC (a register read or a register write) and get
