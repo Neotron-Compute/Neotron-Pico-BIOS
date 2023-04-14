@@ -58,7 +58,7 @@ use core::{
 	cell::RefCell,
 	convert::TryFrom,
 	fmt::Write,
-	sync::atomic::{AtomicBool, Ordering},
+	sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 // Third Party Stuff
@@ -111,6 +111,17 @@ type I2cPins = (
 
 type SpiBus = hal::Spi<hal::spi::Enabled, pac::SPI0, 8>;
 
+/// What state our SD Card can be in
+#[derive(defmt::Format, Debug, Copy, Clone, PartialEq, Eq)]
+enum CardState {
+	Unplugged,
+	Uninitialised,
+	#[allow(unused)]
+	Online,
+	#[allow(unused)]
+	Errored,
+}
+
 /// All the hardware we use on the Pico
 struct Hardware {
 	/// All the pins we use on the Raspberry Pi Pico
@@ -142,6 +153,8 @@ struct Hardware {
 	bootup_at: Duration,
 	/// A Timer
 	timer: hal::timer::Timer,
+	/// the state of our SD Card
+	card_state: CardState,
 }
 
 /// Flips between true and false so we always send a unique read request
@@ -421,6 +434,9 @@ fn main() -> ! {
 	// Did we start with an interrupt pending?
 	INTERRUPT_PENDING.store(nirq_io.is_low().unwrap(), Ordering::Relaxed);
 
+	// Check for interrupts on start-up (particularly the SD card being in)
+	hw.io_poll_interrupts(true);
+
 	critical_section::with(|cs| {
 		HARDWARE.borrow(cs).replace(Some(hw));
 		IRQ_PIN.borrow(cs).replace(Some(nirq_io))
@@ -694,6 +710,7 @@ impl Hardware {
 				rtc: external_rtc,
 				bootup_at: Duration::from_ticks(ticks_at_boot_us as u64),
 				timer,
+				card_state: CardState::Unplugged,
 			},
 			hal_pins.gpio20.into_pull_up_input(),
 		)
@@ -857,7 +874,11 @@ impl Hardware {
 		self.io_chip_write(mcp23s17::Register::GPPUB, 0xFF);
 
 		// Set up interrupts. We want the line to go low if anything on GPIOB is
-		// low.
+		// low (at least initially - we may flip the sense on the SD Card IRQ if
+		// we find a card is inserted).
+
+		// Set IPOL so all pins active low
+		self.io_chip_write(mcp23s17::Register::IPOLB, 0xFF);
 
 		// The INTCON register controls how the associated pin value is compared
 		// for the interrupt-on-change feature. All the bits are set, so the
@@ -873,20 +894,94 @@ impl Hardware {
 		// The default comparison value is configured in the DEFVAL register. If
 		// enabled (via GPINTEN and INTCON) to compare against the DEFVAL
 		// register, an opposite value on the associated pin will cause an
-		// interrupt to occur.
+		// interrupt to occur. This the logical value after the polarity switch
+		// in `IPOLB` has been applied.
 		self.io_chip_write(mcp23s17::Register::DEFVALB, 0x00);
 	}
 
 	/// If the interrupt flag was set by the IRQ handler, read the interrupt
 	/// bits from the MCP23S17.
-	fn io_poll_interrupts(&mut self) {
-		if INTERRUPT_PENDING.load(Ordering::Relaxed) {
-			// The IO chip reports 0 for pending, 1 for not pending.
-			self.interrupts_pending = self.io_read_interrupts() ^ 0xFF;
-			defmt::debug!("MCP23S17 IRQ pins: 0b{:08b}", self.interrupts_pending);
+	fn io_poll_interrupts(&mut self, force: bool) {
+		if INTERRUPT_PENDING.load(Ordering::Relaxed) || force {
+			// We use IOPOL to ensure a `1` bit means `Interrupt Pending`
+			self.interrupts_pending = self.io_read_interrupts();
+			let pol = self.io_chip_read(mcp23s17::Register::IPOLB);
+			defmt::debug!(
+				"MCP23S17 IRQ pins: 0b{:08b} (real 0b{:08b})",
+				self.interrupts_pending,
+				pol ^ self.interrupts_pending
+			);
 			// Change the debug LEDs so we can see the interrupts
 			self.irq_count = self.irq_count.wrapping_add(1);
 			self.set_debug_leds((self.irq_count & 0x0F) as u8);
+
+			for irq in 0..8 {
+				let irq_bit = 1 << irq;
+				if (self.interrupts_pending & irq_bit) != 0 {
+					self.io_handle_irq(irq);
+				}
+			}
+
+			// We sometimes get stuck in a loop, due to bad programming. The IO
+			// chip tells us we have an interrupt, but when we ask it which one,
+			// it appears to say actually, there's no interrupt. This puts us
+			// into an infinite loop, because the INTERRUPT_PENDING value isn't
+			// cleared. This logic tries to catch that loop before sixty
+			// bazillion lines of defmt are printed, causing the actual error to
+			// disappear out of the terminal buffer.
+			static BAD_IRQ_COUNT: AtomicU32 = AtomicU32::new(0);
+			if self.interrupts_pending == 0 && !force {
+				let count = BAD_IRQ_COUNT.load(Ordering::Relaxed) + 1;
+				BAD_IRQ_COUNT.store(count, Ordering::Relaxed);
+				if count > 5 {
+					panic!("Unexpected interrupts in bagging area.");
+				}
+			} else {
+				BAD_IRQ_COUNT.store(0, Ordering::Relaxed);
+			}
+		}
+	}
+
+	/// Handle an IRQ on a slot
+	fn io_handle_irq(&mut self, slot: u8) {
+		match slot {
+			1 => {
+				// Slot 1 interrupt, which is the SD Card. Flip the sense, so we
+				// get another interrupt when the card next changes state.
+				let was_inserted = self.io_flip_input_level(1);
+				defmt::info!(
+					"SD Card state change: Card {}",
+					if was_inserted { "inserted" } else { "removed" }
+				);
+
+				self.card_state = match (self.card_state, was_inserted) {
+					// Eject events
+					(CardState::Unplugged, false) => {
+						defmt::warn!("Spurious unplug event");
+						CardState::Unplugged
+					}
+					(CardState::Errored | CardState::Uninitialised, false) => {
+						defmt::info!("SD Card removed");
+						CardState::Unplugged
+					}
+					(CardState::Online, false) => {
+						defmt::warn!("Active SD Card removed!");
+						CardState::Unplugged
+					}
+					// Insert events
+					(CardState::Unplugged, true) => {
+						defmt::info!("SD Card inserted, pending activation");
+						CardState::Uninitialised
+					}
+					(_, true) => {
+						defmt::warn!("Unexpected card insertion!?");
+						CardState::Uninitialised
+					}
+				}
+			}
+			_ => {
+				defmt::debug!("IRQ on slot {}", slot);
+			}
 		}
 	}
 
@@ -895,6 +990,17 @@ impl Hardware {
 	fn io_read_interrupts(&mut self) -> u8 {
 		self.io_chip_read(mcp23s17::Register::GPIOB)
 	}
+
+	/// Flip which level is expected on an incoming interrupt pin.
+	///
+	/// Returns the old level
+	fn io_flip_input_level(&mut self, slot: u8) -> bool {
+		let mut mask = self.io_chip_read(mcp23s17::Register::IPOLB);
+		let slot_mask = 1 << slot;
+		let current_level = (mask & slot_mask) != 0;
+		mask ^= slot_mask;
+		self.io_chip_write(mcp23s17::Register::IPOLB, mask);
+		current_level
 	}
 
 	/// Send a request to the BMC (a register read or a register write) and get
@@ -1050,7 +1156,7 @@ impl Hardware {
 	/// We ask for 8 bytes of data. We get `1` byte of 'length', then `N` bytes of valid data, and `32 - (N + 1)` bytes of padding.
 	fn bmc_read_ps2_keyboard_fifo(&mut self, out_buffer: &mut [u8; 8]) -> Result<usize, ()> {
 		// Now is a good time to poll for interrupts.
-		self.io_poll_interrupts();
+		self.io_poll_interrupts(false);
 		if !self.is_irq_pending_on_slot(0) {
 			// No point asking, the interrupt isn't set.
 			return Ok(0);
