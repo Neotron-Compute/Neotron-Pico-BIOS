@@ -270,6 +270,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "embedded-sdmmc"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b4ae38d27afe8ffb1c31f82ebe4960f099ac55bbdc35e813a45cade676f2600"
+dependencies = [
+ "byteorder",
+ "defmt",
+ "embedded-hal",
+]
+
+[[package]]
 name = "ena"
 version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -534,6 +545,7 @@ dependencies = [
  "defmt-rtt",
  "ds1307",
  "embedded-hal",
+ "embedded-sdmmc",
  "fugit",
  "heapless",
  "mcp794xx",
