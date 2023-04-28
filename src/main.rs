@@ -1841,6 +1841,20 @@ extern "C" fn bus_interrupt_status() -> u32 {
 pub extern "C" fn block_dev_get_info(device: u8) -> common::Option<common::block_dev::DeviceInfo> {
 	match device {
 		0 => {
+			let mut lock = HARDWARE.lock();
+			let hw = lock.as_mut().unwrap();
+
+			let media_present = match hw.card_state {
+				CardState::Unplugged => false,
+				CardState::Errored => false,
+				CardState::Uninitialised => {
+					// Init the card here
+					true
+				}
+				CardState::Online => true,
+			};
+
+			// This is our on-board card slot
 			common::Option::Some(common::block_dev::DeviceInfo {
 				// This is the built-in SD card slot
 				name: common::types::ApiString::new("SdCard0"),
@@ -1854,7 +1868,7 @@ pub extern "C" fn block_dev_get_info(device: u8) -> common::Option<common::block
 				// But you can take the card out
 				removable: true,
 				// Pretend the card is out
-				media_present: true,
+				media_present,
 				// Don't care about this value when card is out
 				read_only: false,
 			})
