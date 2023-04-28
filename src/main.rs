@@ -46,6 +46,7 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 // -----------------------------------------------------------------------------
 
 pub mod mcp23s17;
+pub mod mutex;
 pub mod rtc;
 pub mod vga;
 
@@ -55,7 +56,6 @@ pub mod vga;
 
 // Standard Library Stuff
 use core::{
-	cell::RefCell,
 	convert::TryFrom,
 	fmt::Write,
 	sync::atomic::{AtomicBool, AtomicU32, Ordering},
@@ -63,7 +63,6 @@ use core::{
 
 // Third Party Stuff
 use cortex_m_rt::entry;
-use critical_section::Mutex;
 use defmt::info;
 use defmt_rtt as _;
 use ds1307::{Datelike, NaiveDateTime, Timelike};
@@ -90,6 +89,7 @@ use common::{
 	video::{Attr, TextBackgroundColour, TextForegroundColour},
 	MemoryRegion,
 };
+use mutex::NeoMutex;
 use neotron_bmc_commands::Command;
 use neotron_bmc_protocol::Receivable;
 use neotron_common_bios as common;
@@ -217,8 +217,7 @@ static USE_ALT: UseAlt = UseAlt::new();
 /// Our global hardware object.
 ///
 /// You need to grab this to do anything with the hardware.
-static HARDWARE: Mutex<core::cell::RefCell<Option<Hardware>>> =
-	Mutex::new(core::cell::RefCell::new(None));
+static HARDWARE: NeoMutex<Option<Hardware>> = NeoMutex::new(None);
 
 /// This is our Operating System. It must be compiled separately.
 ///
@@ -437,10 +436,18 @@ fn main() -> ! {
 	// Check for interrupts on start-up (particularly the SD card being in)
 	hw.io_poll_interrupts(true);
 
-	critical_section::with(|cs| {
-		HARDWARE.borrow(cs).replace(Some(hw));
-		IRQ_PIN.borrow(cs).replace(Some(nirq_io))
-	});
+	{
+		let mut lock = HARDWARE.lock();
+		lock.replace(hw);
+	}
+
+	{
+		// You can only do this before interrupts are enabled. Otherwise you may
+		// try and grab the mutex in an ISR whilst it's held in the main thread,
+		// and that causes a panic.
+		let mut lock = IRQ_PIN.lock();
+		lock.replace(nirq_io);
+	}
 
 	// Unmask the IO_BANK0 IRQ so that the NVIC interrupt controller
 	// will jump to the interrupt function when the interrupt occurs.
@@ -1239,15 +1246,15 @@ fn sign_on() {
 		TextBackgroundColour::DARK_RED,
 		false,
 	));
-	let bmc_ver = critical_section::with(|cs| {
-		let mut lock = HARDWARE.borrow_ref_mut(cs);
+	let bmc_ver = {
+		let mut lock = HARDWARE.lock();
 		let hw = lock.as_mut().unwrap();
 		let ver = hw.bmc_read_firmware_version();
 		if let Err(e) = hw.play_startup_tune() {
 			writeln!(&tc, "BMC error: {e:?}").unwrap();
 		}
 		ver
-	});
+	};
 
 	match bmc_ver {
 		Ok(string_bytes) => match core::str::from_utf8(&string_bytes) {
@@ -1290,11 +1297,9 @@ fn sign_on() {
 		}
 	}
 
-	critical_section::with(|cs| {
-		let mut lock = HARDWARE.borrow_ref_mut(cs);
-		let hw = lock.as_mut().unwrap();
-		hw.delay.delay_ms(5000);
-	});
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+	hw.delay.delay_ms(5000);
 }
 
 /// Reset the DMA Peripheral.
@@ -1388,13 +1393,13 @@ pub extern "C" fn serial_read(
 pub extern "C" fn time_clock_get() -> common::Time {
 	// We track real-time using the RP2040 1 MHz timer. We noted the wall-time at boot-up.
 
-	let ticks_since_epoch = critical_section::with(|cs| {
-		let mut lock = HARDWARE.borrow_ref_mut(cs);
+	let ticks_since_epoch = {
+		let mut lock = HARDWARE.lock();
 		let hw = lock.as_mut().unwrap();
 		// We can unwrap this because we set the day-of-week correctly on startup
 		let ticks_since_boot = hw.timer.get_counter().duration_since_epoch();
 		ticks_since_boot + hw.bootup_at
-	});
+	};
 
 	let nanos_since_epoch = ticks_since_epoch.to_nanos();
 
@@ -1414,48 +1419,46 @@ pub extern "C" fn time_clock_get() -> common::Time {
 /// fix). The BIOS should push the time out to the battery-backed Real
 /// Time Clock, if it has one.
 pub extern "C" fn time_clock_set(time: common::Time) {
-	critical_section::with(|cs| {
-		let mut lock = HARDWARE.borrow_ref_mut(cs);
-		let hw = lock.as_mut().unwrap();
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
 
-		// 1. How long have we been running, in 1 MHz ticks?
-		let ticks_since_boot = hw.timer.get_counter().duration_since_epoch();
+	// 1. How long have we been running, in 1 MHz ticks?
+	let ticks_since_boot = hw.timer.get_counter().duration_since_epoch();
 
-		// 2. What is the given time as 1 MHz ticks since the epoch?
-		let ticks_since_epoch = u64::from(time.secs) * 1_000_000 + u64::from(time.nsecs / 1000);
-		let ticks_since_epoch = Duration::from_ticks(ticks_since_epoch);
+	// 2. What is the given time as 1 MHz ticks since the epoch?
+	let ticks_since_epoch = u64::from(time.secs) * 1_000_000 + u64::from(time.nsecs / 1000);
+	let ticks_since_epoch = Duration::from_ticks(ticks_since_epoch);
 
-		// 3. Work backwards, and find the time it must have been when we booted up.
-		let ticks_at_boot = ticks_since_epoch
-			.checked_sub(ticks_since_boot)
-			.unwrap_or_else(|| Duration::from_ticks(0));
+	// 3. Work backwards, and find the time it must have been when we booted up.
+	let ticks_at_boot = ticks_since_epoch
+		.checked_sub(ticks_since_boot)
+		.unwrap_or_else(|| Duration::from_ticks(0));
 
-		// 4. Store that value
-		defmt::info!("Ticks at boot: {}", ticks_at_boot.ticks());
-		hw.bootup_at = ticks_at_boot;
+	// 4. Store that value
+	defmt::info!("Ticks at boot: {}", ticks_at_boot.ticks());
+	hw.bootup_at = ticks_at_boot;
 
-		// 5. Convert to calendar time
-		if let Some(new_time) = NaiveDateTime::from_timestamp_opt(
-			i64::from(time.secs) + SECONDS_BETWEEN_UNIX_AND_NEOTRON_EPOCH,
-			time.nsecs,
-		) {
-			// 6. Update the hardware RTC as well
-			match hw.rtc.set_time(hw.i2c.acquire_i2c(), new_time) {
-				Ok(_) => {
-					defmt::info!("Time set in RTC OK");
-				}
-				Err(rtc::Error::BusError(_)) => {
-					defmt::warn!("Failed to talk to RTC to set time");
-				}
-				Err(rtc::Error::DriverBug) => {
-					defmt::warn!("RTC driver failed");
-				}
-				Err(rtc::Error::NoRtcFound) => {
-					defmt::info!("Not setting time - no RTC found");
-				}
+	// 5. Convert to calendar time
+	if let Some(new_time) = NaiveDateTime::from_timestamp_opt(
+		i64::from(time.secs) + SECONDS_BETWEEN_UNIX_AND_NEOTRON_EPOCH,
+		time.nsecs,
+	) {
+		// 6. Update the hardware RTC as well
+		match hw.rtc.set_time(hw.i2c.acquire_i2c(), new_time) {
+			Ok(_) => {
+				defmt::info!("Time set in RTC OK");
+			}
+			Err(rtc::Error::BusError(_)) => {
+				defmt::warn!("Failed to talk to RTC to set time");
+			}
+			Err(rtc::Error::DriverBug) => {
+				defmt::warn!("RTC driver failed");
+			}
+			Err(rtc::Error::NoRtcFound) => {
+				defmt::info!("Not setting time - no RTC found");
 			}
 		}
-	});
+	}
 }
 
 /// Get the configuration data block.
@@ -1604,51 +1607,49 @@ pub extern "C" fn memory_get_region(region: u8) -> common::Option<common::Memory
 pub extern "C" fn hid_get_event() -> common::Result<common::Option<common::hid::HidEvent>> {
 	let mut buffer = [0u8; 8];
 
-	critical_section::with(|cs| {
-		let mut lock = HARDWARE.borrow_ref_mut(cs);
-		let hw = lock.as_mut().unwrap();
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
 
-		if let Some(ev) = hw.event_queue.pop_front() {
-			// Queued data available, so short-cut
-			return common::Result::Ok(common::Option::Some(ev));
-		}
+	if let Some(ev) = hw.event_queue.pop_front() {
+		// Queued data available, so short-cut
+		return common::Result::Ok(common::Option::Some(ev));
+	}
 
-		loop {
-			match hw.bmc_read_ps2_keyboard_fifo(&mut buffer) {
-				Ok(n) if n > 0 => {
-					let slice = if n >= 8 { &buffer } else { &buffer[0..n] };
-					defmt::info!("{} bytes in KB FIFO, got: {=[u8]:x}", n, &slice);
-					for b in slice.iter() {
-						match hw.keyboard.advance_state(*b) {
-							Ok(Some(key_event)) => {
-								convert_hid_event(key_event, &mut hw.event_queue);
-							}
-							Ok(None) => {
-								// Need more data
-							}
-							Err(_e) => {
-								defmt::warn!("Keyboard decode error!");
-							}
+	loop {
+		match hw.bmc_read_ps2_keyboard_fifo(&mut buffer) {
+			Ok(n) if n > 0 => {
+				let slice = if n >= 8 { &buffer } else { &buffer[0..n] };
+				defmt::info!("{} bytes in KB FIFO, got: {=[u8]:x}", n, &slice);
+				for b in slice.iter() {
+					match hw.keyboard.advance_state(*b) {
+						Ok(Some(key_event)) => {
+							convert_hid_event(key_event, &mut hw.event_queue);
+						}
+						Ok(None) => {
+							// Need more data
+						}
+						Err(_e) => {
+							defmt::warn!("Keyboard decode error!");
 						}
 					}
 				}
-				Ok(_) => {
-					// Stop reading, FIFO is empty.
-					break;
-				}
-				Err(e) => {
-					defmt::warn!("Read KB error: {:?}", e);
-				}
+			}
+			Ok(_) => {
+				// Stop reading, FIFO is empty.
+				break;
+			}
+			Err(e) => {
+				defmt::warn!("Read KB error: {:?}", e);
 			}
 		}
+	}
 
-		if let Some(ev) = hw.event_queue.pop_front() {
-			// Queued data available, so short-cut
-			common::Result::Ok(common::Option::Some(ev))
-		} else {
-			common::Result::Ok(common::Option::None)
-		}
-	})
+	if let Some(ev) = hw.event_queue.pop_front() {
+		// Queued data available, so short-cut
+		common::Result::Ok(common::Option::Some(ev))
+	} else {
+		common::Result::Ok(common::Option::None)
+	}
 }
 
 fn convert_hid_event(
@@ -1930,12 +1931,10 @@ extern "C" fn power_idle() {
 }
 
 extern "C" fn time_ticks_get() -> common::Ticks {
-	critical_section::with(|cs| {
-		let mut lock = HARDWARE.borrow_ref_mut(cs);
-		let hw = lock.as_mut().unwrap();
-		let now = hw.timer.get_counter();
-		common::Ticks(now.ticks())
-	})
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+	let now = hw.timer.get_counter();
+	common::Ticks(now.ticks())
 }
 
 /// We have a 1 MHz timer
@@ -1943,7 +1942,7 @@ extern "C" fn time_ticks_per_second() -> common::Ticks {
 	common::Ticks(1_000_000)
 }
 
-static IRQ_PIN: Mutex<RefCell<Option<IrqPin>>> = Mutex::new(RefCell::new(None));
+static IRQ_PIN: NeoMutex<Option<IrqPin>> = NeoMutex::new(None);
 
 /// Called when we get a SIO interrupt on the main bank of GPIO pins.
 ///
@@ -1957,9 +1956,8 @@ fn IO_IRQ_BANK0() {
 	// This is one-time lazy initialisation. We steal the variables given to us
 	// via `IRQ_PIN`.
 	if LOCAL_IRQ_PIN.is_none() {
-		critical_section::with(|cs| {
-			*LOCAL_IRQ_PIN = IRQ_PIN.borrow(cs).take();
-		});
+		let mut lock = IRQ_PIN.lock();
+		*LOCAL_IRQ_PIN = lock.take();
 	}
 	if let Some(pin) = LOCAL_IRQ_PIN {
 		let is_low = pin.is_low().unwrap();
