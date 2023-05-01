@@ -112,14 +112,21 @@ type I2cPins = (
 type SpiBus = hal::Spi<hal::spi::Enabled, pac::SPI0, 8>;
 
 /// What state our SD Card can be in
-#[derive(defmt::Format, Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(defmt::Format, Debug, Clone, PartialEq, Eq)]
 enum CardState {
 	Unplugged,
 	Uninitialised,
 	#[allow(unused)]
-	Online,
+	Online(CardInfo),
 	#[allow(unused)]
 	Errored,
+}
+
+/// Describes an SD card we've discovered
+#[derive(defmt::Format, Debug, Clone, PartialEq, Eq)]
+struct CardInfo {
+	/// Number of blocks on the SD card
+	num_blocks: u64,
 }
 
 /// All the hardware we use on the Pico
@@ -723,13 +730,6 @@ impl Hardware {
 		)
 	}
 
-	// i2c_sda: {
-	//
-	// },
-	// i2c_scl: {
-	//
-	// },
-
 	/// Perform some SPI operation with the I/O chip selected.
 	///
 	/// You are required to have called `self.release_cs_lines()` previously,
@@ -961,7 +961,7 @@ impl Hardware {
 					if was_inserted { "inserted" } else { "removed" }
 				);
 
-				self.card_state = match (self.card_state, was_inserted) {
+				self.card_state = match (&self.card_state, was_inserted) {
 					// Eject events
 					(CardState::Unplugged, false) => {
 						defmt::warn!("Spurious unplug event");
@@ -971,7 +971,7 @@ impl Hardware {
 						defmt::info!("SD Card removed");
 						CardState::Unplugged
 					}
-					(CardState::Online, false) => {
+					(CardState::Online(_), false) => {
 						defmt::warn!("Active SD Card removed!");
 						CardState::Unplugged
 					}
@@ -1188,6 +1188,77 @@ impl Hardware {
 			*dest = *src;
 		}
 		Ok(bytes_in_fifo as usize)
+	}
+
+	fn sdcard_poll(&mut self) {
+		match self.card_state {
+			CardState::Uninitialised => {
+				// Init the card here
+				use embedded_sdmmc::BlockDevice;
+				struct FakeSpi<'a>(&'a mut Hardware);
+				struct FakeCs();
+				static IS_CS_LOW: AtomicBool = AtomicBool::new(false);
+				impl<'a> embedded_hal::blocking::spi::Transfer<u8> for FakeSpi<'a> {
+					type Error = core::convert::Infallible;
+					fn transfer<'w>(
+						&mut self,
+						words: &'w mut [u8],
+					) -> Result<&'w [u8], Self::Error> {
+						if IS_CS_LOW.load(Ordering::SeqCst) {
+							defmt::info!("out: {:?}", words);
+							self.0.with_bus_cs(1, |spi, _buffer| {
+								spi.transfer(words).unwrap();
+							});
+							defmt::info!("in: {:?}", words);
+							Ok(words)
+						} else {
+							// Select a slot we don't use so the SD card won't be activated
+							defmt::info!("out: {:?}", words);
+							self.0.with_bus_cs(7, |spi, _buffer| {
+								spi.transfer(words).unwrap();
+							});
+							defmt::info!("in: {:?}", words);
+							Ok(words)
+						}
+					}
+				}
+				impl embedded_hal::digital::v2::OutputPin for FakeCs {
+					type Error = core::convert::Infallible;
+					fn set_low(&mut self) -> Result<(), Self::Error> {
+						IS_CS_LOW.store(true, Ordering::SeqCst);
+						Ok(())
+					}
+
+					fn set_high(&mut self) -> Result<(), Self::Error> {
+						IS_CS_LOW.store(true, Ordering::SeqCst);
+						Ok(())
+					}
+				}
+				// Downclock SPI to 100 kHz
+				// hw.spi_bus.set_baudrate(hw.clocks, todo!());
+				let spi = FakeSpi(self);
+				let cs = FakeCs();
+				let mut spi_interface = embedded_sdmmc::SdMmcSpi::new(spi, cs);
+				let num_blocks = match spi_interface.acquire() {
+					Ok(card) => {
+						defmt::info!("Found card size!");
+						card.num_blocks()
+					}
+					Err(e) => {
+						defmt::warn!("Failed to acquire SD card: {:?}", e);
+						Err(e)
+					}
+				};
+				if let Ok(num_blocks) = num_blocks {
+					self.card_state = CardState::Online(CardInfo {
+						num_blocks: num_blocks.0 as u64,
+					});
+				}
+				// Bring SPI clock back up again
+				// hw.spi_bus.set_baudrate(hw.clocks, todo!());
+			}
+			CardState::Unplugged | CardState::Errored | CardState::Online(_) => {}
+		}
 	}
 }
 
@@ -1844,93 +1915,32 @@ pub extern "C" fn block_dev_get_info(device: u8) -> common::Option<common::block
 			let mut lock = HARDWARE.lock();
 			let hw = lock.as_mut().unwrap();
 
-			let card_size = match hw.card_state {
-				CardState::Unplugged => None,
-				CardState::Errored => None,
-				CardState::Uninitialised => {
-					// Init the card here
-					use embedded_sdmmc::BlockDevice;
-					struct FakeSpi<'a>(&'a mut Hardware);
-					struct FakeCs();
-					static IS_CS_LOW: AtomicBool = AtomicBool::new(false);
-					impl<'a> embedded_hal::blocking::spi::Transfer<u8> for FakeSpi<'a> {
-						type Error = core::convert::Infallible;
-						fn transfer<'w>(
-							&mut self,
-							words: &'w mut [u8],
-						) -> Result<&'w [u8], Self::Error> {
-							if IS_CS_LOW.load(Ordering::SeqCst) {
-								defmt::info!("out: {:?}", words);
-								self.0.with_bus_cs(1, |spi, _buffer| {
-									spi.transfer(words).unwrap();
-								});
-								defmt::info!("in: {:?}", words);
-								Ok(words)
-							} else {
-								// Select a slot we don't use so the SD card won't be activated
-								defmt::info!("out: {:?}", words);
-								self.0.with_bus_cs(7, |spi, _buffer| {
-									spi.transfer(words).unwrap();
-								});
-								defmt::info!("in: {:?}", words);
-								Ok(words)
-							}
-						}
-					}
-					impl embedded_hal::digital::v2::OutputPin for FakeCs {
-						type Error = core::convert::Infallible;
-						fn set_low(&mut self) -> Result<(), Self::Error> {
-							IS_CS_LOW.store(true, Ordering::SeqCst);
-							Ok(())
-						}
+			hw.sdcard_poll();
 
-						fn set_high(&mut self) -> Result<(), Self::Error> {
-							IS_CS_LOW.store(true, Ordering::SeqCst);
-							Ok(())
-						}
-					}
-					// Downclock SPI to 100 kHz
-					// hw.spi_bus.set_baudrate(hw.clocks, todo!());
-					let spi = FakeSpi(hw);
-					let cs = FakeCs();
-					let mut spi_interface = embedded_sdmmc::SdMmcSpi::new(spi, cs);
-					let size = match spi_interface.acquire() {
-						Ok(card) => {
-							defmt::info!("Found card size!");
-							card.num_blocks()
-								.map(|block_count| block_count.0 as u64)
-								.ok()
-						}
-						Err(e) => {
-							defmt::warn!("Failed to acquire SD card: {:?}", e);
-							None
-						}
-					};
-					// Bring SPI clock back up again
-					// hw.spi_bus.set_baudrate(hw.clocks, todo!());
-					size
+			match &hw.card_state {
+				CardState::Unplugged | CardState::Uninitialised | CardState::Errored => {
+					common::Option::Some(common::block_dev::DeviceInfo {
+						name: common::types::ApiString::new("SdCard0"),
+						device_type: common::block_dev::DeviceType::SecureDigitalCard,
+						block_size: 0,
+						num_blocks: 0,
+						ejectable: false,
+						removable: true,
+						media_present: false,
+						read_only: false,
+					})
 				}
-				CardState::Online => None,
-			};
-
-			// This is our on-board card slot
-			common::Option::Some(common::block_dev::DeviceInfo {
-				// This is the built-in SD card slot
-				name: common::types::ApiString::new("SdCard0"),
-				device_type: common::block_dev::DeviceType::SecureDigitalCard,
-				// This is the standard for SD cards
-				block_size: 512,
-				// TODO: scan the card here
-				num_blocks: card_size.unwrap_or(0),
-				// No motorised eject
-				ejectable: false,
-				// But you can take the card out
-				removable: true,
-				// Pretend the card is out
-				media_present: card_size.is_some(),
-				// Don't care about this value when card is out
-				read_only: false,
-			})
+				CardState::Online(info) => common::Option::Some(common::block_dev::DeviceInfo {
+					name: common::types::ApiString::new("SdCard0"),
+					device_type: common::block_dev::DeviceType::SecureDigitalCard,
+					block_size: 512,
+					num_blocks: info.num_blocks,
+					ejectable: false,
+					removable: true,
+					media_present: true,
+					read_only: false,
+				}),
+			}
 		}
 		_ => {
 			// Nothing else supported by this BIOS
