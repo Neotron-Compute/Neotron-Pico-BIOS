@@ -18,16 +18,34 @@ jobs:
       - name: Add targets
         run: |
           rustup target add thumbv6m-none-eabi
+          apt-get -y update && apt-get -y install pkg-config libudev-dev
+
+      - name: Install tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: elf2uf2-rs
 
       - name: Build neotron-pico-bios
         run: |
           cargo build --release --verbose
+          mv ./target/thumbv6m-none-eabi/release/neotron-pico-bios ./target/thumbv6m-none-eabi/release/neotron-pico-bios.elf
+          elf2uf2-rs ./target/thumbv6m-none-eabi/release/neotron-pico-bios.elf ./target/thumbv6m-none-eabi/release/neotron-pico-bios.uf2
 
-      - name: Upload files to Release
-        if: github.event_name == 'push' && startswith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
+        if: ${{success()}}
         with:
-          files: |
-            ./target/thumbv6m-none-eabi/release/neotron-pico-bios
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: Artifacts
+          if-no-files-found: error
+          path: |
+            ./target/thumbv6m-none-eabi/release/neotron-pico-bios.elf
+            ./target/thumbv6m-none-eabi/release/neotron-pico-bios.uf2
+
+      - name: Create and Upload Release
+        if: github.event_name == 'push' && startswith(github.ref, 'refs/tags/')
+        id: create_release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: |
+            ./target/thumbv6m-none-eabi/release/neotron-pico-bios.elf
+            ./target/thumbv6m-none-eabi/release/neotron-pico-bios.uf2
