@@ -1,6 +1,6 @@
-This is Neotron OS version v0.3.1
+This is Neotron OS version v0.3.2
 
-Taken from https://github.com/Neotron-Compute/Neotron-OS/releases/tag/v0.3.1
+Taken from https://github.com/Neotron-Compute/Neotron-OS/releases/tag/v0.3.2
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
