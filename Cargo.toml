@@ -5,7 +5,7 @@ resolver = "2"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 name = "neotron-pico-bios"
-version = "0.4.1"
+version = "0.5.0"
 
 [dependencies]
 # Useful Cortex-M specific functions (e.g. SysTick)
@@ -15,13 +15,13 @@ rp-pico = { version = "0.6", default-features = false, features = [ "rt", "criti
 # Cortex-M run-time (or start-up) code
 cortex-m-rt = "0.7"
 # The BIOS to OS API
-neotron-common-bios = "0.7.0"
+neotron-common-bios = "0.8.0"
 # For the RP2040 bootloader
 rp2040-boot2 = "0.3.0"
 # For hardware abstraction traits
 embedded-hal ="0.2"
 # Gives us formatted PC-side logging
-defmt = "0.3"
+defmt = "=0.3.2"
 # Sends defmt logs to the SWD debugger
 defmt-rtt = "0.4"
 # Send panics to the debugger
@@ -32,14 +32,26 @@ pio = "0.2.1"
 pio-proc = "0.2"
 # Hardware locks for sharing data with interrupts
 critical-section = "1.0"
+# Commands for talking to a Neotron BMC. The tag is for the repo as a whole, of which the commands crate is a small part.
+neotron-bmc-commands = { version = "0.1.0", git = "https://github.com/neotron-compute/neotron-bmc", tag="v0.5.2" }
 # Protocol for talking to a Neotron BMC. The tag is for the repo as a whole, of which the protocol crate is a small part.
-neotron-bmc-protocol = { version = "0.1.0", git = "https://github.com/neotron-compute/neotron-bmc", tag="v0.4.0" }
+neotron-bmc-protocol = { version = "0.1.0", git = "https://github.com/neotron-compute/neotron-bmc", tag="v0.5.2", features = ["defmt"] }
 # Time and frequency related functions
 fugit = "0.3"
 # PS/2 scancode decoding
-pc-keyboard = "0.6"
+pc-keyboard = "0.7.0"
 # Useful queues and other structures
 heapless = "0.7"
+# The Dallas DS1307 RTC driver
+ds1307 = "0.5.0"
+# The Microchip MCP7940x RTC driver
+mcp794xx = "0.3.0"
+# I2C Bus Sharing
+shared-bus = "0.2"
+# Gets us compare-swap atomic operations
+atomic-polyfill = "1.0.2"
+# SD Card driver
+embedded-sdmmc = { version = "0.4", default-features = false, features = ["defmt-log"] }
 
 [[bin]]
 name = "neotron-pico-bios"
@@ -53,6 +65,10 @@ codegen-units = 1
 debug = true
 # better optimizations
 lto = true
+# Set the optimisation level to optimise for space. This also happens to be a
+# good choice for performance on the RP2040, where code executes from external
+# SPI Flash and has to be buffered in a small on-chip cache memory.
+opt-level = "s"
 
 [patch.crates-io]
 rp2040-boot2 = { version = "0.3.0", git = "https://github.com/rp-rs/rp2040-boot2" }

@@ -25,11 +25,13 @@ MEMORY {
     /*
      * This is the bottom of the four striped banks of SRAM in the RP2040.
      */
-    RAM_OS : ORIGIN = 0x20000000, LENGTH = 0x3C000
+    RAM_OS : ORIGIN = 0x20000000, LENGTH = 0x3A000
     /*
      * This is the top of the four striped banks of SRAM in the RP2040.
+     *
+     * We give ourselves six 4K pages [0x3A_000, 0x40_000]
      */
-    RAM : ORIGIN = 0x2003C000, LENGTH = 16K
+    RAM : ORIGIN = 0x2003A000, LENGTH = 24K
     /*
      * This is the fifth bank, a 4KB block. We use this for Core 0 Stack.
      */
