@@ -21,7 +21,7 @@ rp2040-boot2 = "0.3.0"
 # For hardware abstraction traits
 embedded-hal ="0.2"
 # Gives us formatted PC-side logging
-defmt = "0.3"
+defmt = "=0.3.2"
 # Sends defmt logs to the SWD debugger
 defmt-rtt = "0.4"
 # Send panics to the debugger
@@ -48,6 +48,10 @@ ds1307 = "0.5.0"
 mcp794xx = "0.3.0"
 # I2C Bus Sharing
 shared-bus = "0.2"
+# Gets us compare-swap atomic operations
+atomic-polyfill = "1.0.2"
+# SD Card driver
+embedded-sdmmc = { version = "0.4", default-features = false, features = ["defmt-log"] }
 
 [[bin]]
 name = "neotron-pico-bios"

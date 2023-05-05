@@ -1016,12 +1016,6 @@ pub fn init(
 	dma.multi_chan_trigger
 		.write(|w| unsafe { w.bits((1 << PIXEL_DMA_CHAN) | (1 << TIMING_DMA_CHAN)) });
 
-	debug!("DMA enabled");
-
-	// We now drop the dma object because the VGA IRQ will later unsafely
-	// conjure it out of thin air.
-	drop(dma);
-
 	debug!("DMA set-up complete");
 
 	timing_sm.start();
