@@ -37,7 +37,7 @@ const ADDRESS_0: u8 = 0;
 /// Perform a write on the MCP23S17
 ///
 /// Is of the format `0 1 0 0 A2 A1 A0 R/W`
-const WRITE_COMMAND: u8 = (CONTROL_PREFIX << 4) | (ADDRESS_0 << 1) | 0;
+const WRITE_COMMAND: u8 = (CONTROL_PREFIX << 4) | (ADDRESS_0 << 1);
 
 /// Perform a write on the MCP23S17
 ///
