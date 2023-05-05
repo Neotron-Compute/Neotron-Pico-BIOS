@@ -332,7 +332,11 @@ fn main() -> ! {
 	let mut watchdog = hal::watchdog::Watchdog::new(pp.WATCHDOG);
 
 	// VERSION has a trailing `\0` as that is what the BIOS/OS API requires.
-	info!("Neotron BIOS {} starting...", VERSION.trim_matches('\0'));
+	info!(
+		"Neotron BIOS v{} (git:{}) starting...",
+		env!("CARGO_PKG_VERSION"),
+		VERSION.trim_matches('\0')
+	);
 
 	// Run at 151.2 MHz SYS_PLL, 48 MHz, USB_PLL. This is important, we as clock
 	// the PIO at ÷ 6, to give 25.2 MHz (which is close enough to the 25.175
@@ -1308,7 +1312,13 @@ fn sign_on() {
 		TextBackgroundColour::BLUE,
 		false,
 	));
-	writeln!(&tc, "BIOS Version: {}", VERSION.trim_matches('\0')).unwrap();
+	writeln!(
+		&tc,
+		"BIOS: v{} (git:{})",
+		env!("CARGO_PKG_VERSION"),
+		VERSION.trim_matches('\0')
+	)
+	.unwrap();
 
 	tc.change_attr(Attr::new(
 		TextForegroundColour::WHITE,
@@ -1328,14 +1338,14 @@ fn sign_on() {
 	match bmc_ver {
 		Ok(string_bytes) => match core::str::from_utf8(&string_bytes) {
 			Ok(s) => {
-				writeln!(&tc, "BMC  Version: {}", s.trim_matches('\0')).unwrap();
+				writeln!(&tc, "BMC : {}", s.trim_matches('\0')).unwrap();
 			}
 			Err(_e) => {
-				writeln!(&tc, "BMC  Version: Unknown").unwrap();
+				writeln!(&tc, "BMC : Version Unknown").unwrap();
 			}
 		},
 		Err(_e) => {
-			writeln!(&tc, "BMC  Version: Error reading").unwrap();
+			writeln!(&tc, "BMC : Error reading version").unwrap();
 		}
 	}
 
