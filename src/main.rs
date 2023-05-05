@@ -1205,19 +1205,17 @@ impl Hardware {
 						words: &'w mut [u8],
 					) -> Result<&'w [u8], Self::Error> {
 						if IS_CS_LOW.load(Ordering::SeqCst) {
-							defmt::info!("out: {:?}", words);
+							defmt::trace!("SD out: {:?}", words);
 							self.0.with_bus_cs(1, |spi, _buffer| {
 								spi.transfer(words).unwrap();
 							});
-							defmt::info!("in: {:?}", words);
+							defmt::trace!("SD in: {:?}", words);
 							Ok(words)
 						} else {
 							// Select a slot we don't use so the SD card won't be activated
-							defmt::info!("out: {:?}", words);
 							self.0.with_bus_cs(7, |spi, _buffer| {
 								spi.transfer(words).unwrap();
 							});
-							defmt::info!("in: {:?}", words);
 							Ok(words)
 						}
 					}
