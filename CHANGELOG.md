@@ -1,9 +1,22 @@
 # Changelog
 
-## Unreleased Changes ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/develop) | [Changes](https://github.com/neotron-compute/neotron-pico-bios/compare/v0.3.0...develop))
+## Unreleased Changes ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/develop) | [Changes](https://github.com/neotron-compute/neotron-pico-bios/compare/v0.5.0...develop))
 
 * None
 
+## v0.5.0 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.5.0) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.5.0))
+
+* Full-colour 80 column text
+* Bump to 151.2 MHz clock speed (needed to get 80 column colour text working)
+* Reports video timing on Pi Pico LED
+* Shiny new colour start-up banner
+* Plays start-up tune
+* Updated keyboard driver
+* Added RTC support
+* Implement new kind of Mutex
+* Updated to OS 0.3.2
+* Supports initialising SD Cards and reporting card size
+ 
 ## v0.4.1 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.4.1) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.4.1))
 
 * Wait for interrupts from the BMC before reading PS/2 key codes

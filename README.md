@@ -49,8 +49,10 @@ The Neotron BIOS uses the [defmt](https://crates.io/crates/defmt) crate to provi
 
 3. On your PC, install [*probe-run*](https://github.com/knurling-rs/probe-run), the programming tool from [Ferrous System's](https://www.ferrous-systems.com) [Knurling Project](https://github.com/knurling).
 
-```console
-user@host ~ $ cargo install probe-run
+We are temporarily stuck at 0.3.6 as 0.3.7 is broken and 0.3.8 doesn't support the RP2040. A 0.3.9 should be along shortly, but the logging binary format has changed, and we currently pin ourselves to a 0.3.6 compatible version.
+
+```sh
+cargo install probe-run --version=0.3.6
 ```
 
 4. Power on your Neotron Pico.
