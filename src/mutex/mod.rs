@@ -30,7 +30,7 @@ impl<T> NeoMutex<T> {
 	/// Unlock it by dropping the returned object.
 	///
 	/// Panics if the mutex is already locked.
-	pub fn lock<'a>(&'a self) -> NeoMutexGuard<'a, T> {
+	pub fn lock(&self) -> NeoMutexGuard<T> {
 		let _ = self
 			.locked
 			.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
