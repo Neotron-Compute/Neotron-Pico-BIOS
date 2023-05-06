@@ -48,6 +48,7 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 pub mod mcp23s17;
 pub mod mutex;
 pub mod rtc;
+pub mod sdcard;
 pub mod vga;
 
 // -----------------------------------------------------------------------------
@@ -127,6 +128,8 @@ enum CardState {
 struct CardInfo {
 	/// Number of blocks on the SD card
 	num_blocks: u64,
+	/// Type of card
+	card_type: embedded_sdmmc::sdcard::CardType
 }
 
 /// All the hardware we use on the Pico
@@ -1197,63 +1200,21 @@ impl Hardware {
 	fn sdcard_poll(&mut self) {
 		match self.card_state {
 			CardState::Uninitialised => {
-				// Init the card here
-				use embedded_sdmmc::BlockDevice;
-				struct FakeSpi<'a>(&'a mut Hardware);
-				struct FakeCs();
-				static IS_CS_LOW: AtomicBool = AtomicBool::new(false);
-				impl<'a> embedded_hal::blocking::spi::Transfer<u8> for FakeSpi<'a> {
-					type Error = core::convert::Infallible;
-					fn transfer<'w>(
-						&mut self,
-						words: &'w mut [u8],
-					) -> Result<&'w [u8], Self::Error> {
-						if IS_CS_LOW.load(Ordering::SeqCst) {
-							defmt::trace!("SD out: {:?}", words);
-							self.0.with_bus_cs(1, |spi, _buffer| {
-								spi.transfer(words).unwrap();
-							});
-							defmt::trace!("SD in: {:?}", words);
-							Ok(words)
-						} else {
-							// Select a slot we don't use so the SD card won't be activated
-							self.0.with_bus_cs(7, |spi, _buffer| {
-								spi.transfer(words).unwrap();
-							});
-							Ok(words)
-						}
-					}
-				}
-				impl embedded_hal::digital::v2::OutputPin for FakeCs {
-					type Error = core::convert::Infallible;
-					fn set_low(&mut self) -> Result<(), Self::Error> {
-						IS_CS_LOW.store(true, Ordering::SeqCst);
-						Ok(())
-					}
-
-					fn set_high(&mut self) -> Result<(), Self::Error> {
-						IS_CS_LOW.store(true, Ordering::SeqCst);
-						Ok(())
-					}
-				}
 				// Downclock SPI to 100 kHz
 				// hw.spi_bus.set_baudrate(hw.clocks, todo!());
-				let spi = FakeSpi(self);
-				let cs = FakeCs();
-				let mut spi_interface = embedded_sdmmc::SdMmcSpi::new(spi, cs);
-				let num_blocks = match spi_interface.acquire() {
-					Ok(card) => {
-						defmt::info!("Found card size!");
-						card.num_blocks()
-					}
-					Err(e) => {
-						defmt::warn!("Failed to acquire SD card: {:?}", e);
-						Err(e)
-					}
-				};
-				if let Ok(num_blocks) = num_blocks {
+				use embedded_sdmmc::BlockDevice;
+				let spi = sdcard::FakeSpi(self);
+				let cs = sdcard::FakeCs();
+				let delayer = sdcard::FakeDelayer();
+				let sdcard = embedded_sdmmc::SdCard::new(spi, cs, delayer);
+				// Talk to the card to trigger a scan if its type
+				let num_blocks = sdcard.num_blocks();
+				let card_type = sdcard.get_card_type();
+				defmt::info!("Found card size {:?} blocks, type {:?}", num_blocks, card_type);
+				if let (Ok(num_blocks), Some(card_type)) = (num_blocks, card_type) {
 					self.card_state = CardState::Online(CardInfo {
 						num_blocks: num_blocks.0 as u64,
+						card_type
 					});
 				}
 				// Bring SPI clock back up again
@@ -1983,12 +1944,52 @@ pub extern "C" fn block_write(
 /// There are no requirements on the alignment of `data` but if it is
 /// aligned, the BIOS may be able to use a higher-performance code path.
 pub extern "C" fn block_read(
-	_device: u8,
-	_block: common::block_dev::BlockIdx,
-	_num_blocks: u8,
-	_data: common::ApiBuffer,
+	device: u8,
+	block: common::block_dev::BlockIdx,
+	num_blocks: u8,
+	data: common::ApiBuffer,
 ) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+	use embedded_sdmmc::BlockDevice;
+	if data.data_len != usize::from(num_blocks) * 512 {
+		return common::Result::Err(common::Error::UnsupportedConfiguration(0));
+	}
+	match device {
+		0 => {
+			let mut lock = HARDWARE.lock();
+			let hw = lock.as_mut().unwrap();
+			hw.sdcard_poll();
+			let info = match &hw.card_state {
+				CardState::Online(info) => {
+					info.clone()
+				}
+				_ => return common::Result::Err(common::Error::NoMediaFound)
+			};
+			let spi = sdcard::FakeSpi(hw);
+			let cs = sdcard::FakeCs();
+			let delayer = sdcard::FakeDelayer();
+			let sdcard = embedded_sdmmc::SdCard::new(spi, cs, delayer);
+			unsafe {
+				sdcard.mark_card_as_init(info.card_type);
+			}
+			let blocks = unsafe {
+				core::slice::from_raw_parts_mut(data.data as *mut embedded_sdmmc::Block, data.data_len / 512)
+			};
+			let start_block_idx = embedded_sdmmc::BlockIdx(block.0 as u32);
+			match sdcard.read(blocks, start_block_idx, "bios") {
+				Ok(_) => {
+					common::Result::Ok(())
+				}
+				Err(e) => {
+					defmt::warn!("SD error reading {}: {:?}", block.0, e);
+					common::Result::Err(common::Error::DeviceError(0))
+				}
+			}
+		}
+		_ => {
+			// Nothing else supported by this BIOS
+			common::Result::Err(common::Error::InvalidDevice)
+		}
+	}
 }
 
 /// Verify one or more sectors on a block device (that is read them and
