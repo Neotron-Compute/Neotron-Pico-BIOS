@@ -851,7 +851,8 @@ dependencies = [
 [[package]]
 name = "rp2040-boot2"
 version = "0.3.0"
-source = "git+https://github.com/rp-rs/rp2040-boot2#b46a77eb4406c4d06837345bdad2f906d483b73f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c92f344f63f950ee36cf4080050e4dce850839b9175da38f9d2ffb69b4dbb21"
 dependencies = [
  "crc-any",
 ]
