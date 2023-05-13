@@ -129,7 +129,7 @@ struct CardInfo {
 	/// Number of blocks on the SD card
 	num_blocks: u64,
 	/// Type of card
-	card_type: embedded_sdmmc::sdcard::CardType
+	card_type: embedded_sdmmc::sdcard::CardType,
 }
 
 /// All the hardware we use on the Pico
@@ -161,10 +161,12 @@ struct Hardware {
 	rtc: rtc::Rtc,
 	/// The time we started up at, in microseconds since the Neotron epoch
 	bootup_at: Duration,
-	/// A Timer
+	/// A 1 MHz Timer
 	timer: hal::timer::Timer,
 	/// the state of our SD Card
 	card_state: CardState,
+	/// Tracks all the clocks in the RP2040
+	clocks: ClocksManager,
 }
 
 /// Flips between true and false so we always send a unique read request
@@ -488,6 +490,12 @@ fn main() -> ! {
 }
 
 impl Hardware {
+	/// How fast can the I/O chip SPI CLK input go?
+	const CLOCK_IO: fugit::Rate<u32, 1, 1> = fugit::Rate::<u32, 1, 1>::Hz(10_000_000);
+
+	/// How fast can the BMC SPI CLK input go?
+	const CLOCK_BMC: fugit::Rate<u32, 1, 1> = fugit::Rate::<u32, 1, 1>::Hz(2_000_000);
+
 	/// How many nano seconds per clock cycle (at 126 MHz)?
 	const NS_PER_CLOCK_CYCLE: u32 = 1_000_000_000 / 126_000_000;
 
@@ -711,12 +719,12 @@ impl Hardware {
 				// We are in SPI MODE 0. This means we change the COPI pin on the
 				// CLK falling edge, and we sample the CIPO pin on the CLK rising
 				// edge.
-
-				// Set SPI up for 4 MHz clock, 8 data bits.
+				//
+				// SPI clock speed here is irrelevant - we change it depending on the device.
 				spi_bus: hal::Spi::new(spi).init(
 					resets,
 					clocks.peripheral_clock.freq(),
-					100_000.Hz(),
+					2_000_000.Hz(),
 					&embedded_hal::spi::MODE_0,
 				),
 				delay,
@@ -732,6 +740,7 @@ impl Hardware {
 				bootup_at: Duration::from_ticks(ticks_at_boot_us as u64),
 				timer,
 				card_state: CardState::Unplugged,
+				clocks,
 			},
 			hal_pins.gpio20.into_pull_up_input(),
 		)
@@ -746,6 +755,9 @@ impl Hardware {
 	where
 		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>) -> T,
 	{
+		self.spi_bus
+			.set_baudrate(self.clocks.peripheral_clock.freq(), Self::CLOCK_IO);
+
 		// Select MCP23S17
 		self.pins.nspi_cs_io.set_low().unwrap();
 		// Setup time
@@ -827,7 +839,7 @@ impl Hardware {
 	///
 	/// Activates a specific chip-select line, runs the closure (passing in the
 	/// SPI bus object), then de-activates the CS pin.
-	fn with_bus_cs<F>(&mut self, cs: u8, func: F)
+	fn with_bus_cs<F>(&mut self, cs: u8, clock_speed: fugit::Rate<u32, 1, 1>, func: F)
 	where
 		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>, &mut [u8]),
 	{
@@ -845,6 +857,9 @@ impl Hardware {
 
 		// Setup time
 		cortex_m::asm::delay(Self::CS_BUS_SETUP_CPU_CLOCKS);
+
+		self.spi_bus
+			.set_baudrate(self.clocks.peripheral_clock.freq(), clock_speed);
 
 		// Call function
 		func(&mut self.spi_bus, &mut self.bmc_buffer);
@@ -1052,7 +1067,7 @@ impl Hardware {
 			let expected_response_len = buffer.as_ref().map(|b| b.len()).unwrap_or(0) + 2;
 			defmt::debug!("req: {=[u8; 4]:02x}", req_bytes);
 			let mut latency = 0;
-			self.with_bus_cs(0, |spi, borrowed_buffer| {
+			self.with_bus_cs(0, Self::CLOCK_BMC, |spi, borrowed_buffer| {
 				// Send the request
 				spi.write(&req_bytes).unwrap();
 				for retry in 0..MAX_LATENCY {
@@ -1200,25 +1215,26 @@ impl Hardware {
 	fn sdcard_poll(&mut self) {
 		match self.card_state {
 			CardState::Uninitialised => {
-				// Downclock SPI to 100 kHz
-				// hw.spi_bus.set_baudrate(hw.clocks, todo!());
 				use embedded_sdmmc::BlockDevice;
-				let spi = sdcard::FakeSpi(self);
+				// Downclock SPI to initialisation speed
+				let spi = sdcard::FakeSpi(self, true);
 				let cs = sdcard::FakeCs();
 				let delayer = sdcard::FakeDelayer();
 				let sdcard = embedded_sdmmc::SdCard::new(spi, cs, delayer);
 				// Talk to the card to trigger a scan if its type
 				let num_blocks = sdcard.num_blocks();
 				let card_type = sdcard.get_card_type();
-				defmt::info!("Found card size {:?} blocks, type {:?}", num_blocks, card_type);
+				defmt::info!(
+					"Found card size {:?} blocks, type {:?}",
+					num_blocks,
+					card_type
+				);
 				if let (Ok(num_blocks), Some(card_type)) = (num_blocks, card_type) {
 					self.card_state = CardState::Online(CardInfo {
 						num_blocks: num_blocks.0 as u64,
-						card_type
+						card_type,
 					});
 				}
-				// Bring SPI clock back up again
-				// hw.spi_bus.set_baudrate(hw.clocks, todo!());
 			}
 			CardState::Unplugged | CardState::Errored | CardState::Online(_) => {}
 		}
@@ -1884,7 +1900,9 @@ pub extern "C" fn block_dev_get_info(device: u8) -> common::Option<common::block
 			let mut lock = HARDWARE.lock();
 			let hw = lock.as_mut().unwrap();
 
+			hw.set_hdd_led(true);
 			hw.sdcard_poll();
+			hw.set_hdd_led(false);
 
 			match &hw.card_state {
 				CardState::Unplugged | CardState::Uninitialised | CardState::Errored => {
@@ -1953,18 +1971,18 @@ pub extern "C" fn block_read(
 	if data.data_len != usize::from(num_blocks) * 512 {
 		return common::Result::Err(common::Error::UnsupportedConfiguration(0));
 	}
-	match device {
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+	hw.set_hdd_led(true);
+	let result = match device {
 		0 => {
-			let mut lock = HARDWARE.lock();
-			let hw = lock.as_mut().unwrap();
 			hw.sdcard_poll();
 			let info = match &hw.card_state {
-				CardState::Online(info) => {
-					info.clone()
-				}
-				_ => return common::Result::Err(common::Error::NoMediaFound)
+				CardState::Online(info) => info.clone(),
+				_ => return common::Result::Err(common::Error::NoMediaFound),
 			};
-			let spi = sdcard::FakeSpi(hw);
+			// Run card at full speed
+			let spi = sdcard::FakeSpi(hw, false);
 			let cs = sdcard::FakeCs();
 			let delayer = sdcard::FakeDelayer();
 			let sdcard = embedded_sdmmc::SdCard::new(spi, cs, delayer);
@@ -1972,13 +1990,14 @@ pub extern "C" fn block_read(
 				sdcard.mark_card_as_init(info.card_type);
 			}
 			let blocks = unsafe {
-				core::slice::from_raw_parts_mut(data.data as *mut embedded_sdmmc::Block, data.data_len / 512)
+				core::slice::from_raw_parts_mut(
+					data.data as *mut embedded_sdmmc::Block,
+					data.data_len / 512,
+				)
 			};
 			let start_block_idx = embedded_sdmmc::BlockIdx(block.0 as u32);
 			match sdcard.read(blocks, start_block_idx, "bios") {
-				Ok(_) => {
-					common::Result::Ok(())
-				}
+				Ok(_) => common::Result::Ok(()),
 				Err(e) => {
 					defmt::warn!("SD error reading {}: {:?}", block.0, e);
 					common::Result::Err(common::Error::DeviceError(0))
@@ -1989,7 +2008,9 @@ pub extern "C" fn block_read(
 			// Nothing else supported by this BIOS
 			common::Result::Err(common::Error::InvalidDevice)
 		}
-	}
+	};
+	hw.set_hdd_led(false);
+	result
 }
 
 /// Verify one or more sectors on a block device (that is read them and
