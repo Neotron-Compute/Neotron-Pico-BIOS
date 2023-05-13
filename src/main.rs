@@ -1975,41 +1975,44 @@ pub extern "C" fn block_read(
 	let mut lock = HARDWARE.lock();
 	let hw = lock.as_mut().unwrap();
 	hw.set_hdd_led(true);
-	let result = match device {
-		0 => {
-			hw.sdcard_poll();
-			let info = match &hw.card_state {
-				CardState::Online(info) => info.clone(),
-				_ => return common::Result::Err(common::Error::NoMediaFound),
-			};
-			// Run card at full speed
-			let spi = sdcard::FakeSpi(hw, false);
-			let cs = sdcard::FakeCs();
-			let delayer = sdcard::FakeDelayer();
-			let sdcard = embedded_sdmmc::SdCard::new(spi, cs, delayer);
-			unsafe {
-				sdcard.mark_card_as_init(info.card_type);
-			}
-			let blocks = unsafe {
-				core::slice::from_raw_parts_mut(
-					data.data as *mut embedded_sdmmc::Block,
-					data.data_len / 512,
-				)
-			};
-			let start_block_idx = embedded_sdmmc::BlockIdx(block.0 as u32);
-			match sdcard.read(blocks, start_block_idx, "bios") {
-				Ok(_) => common::Result::Ok(()),
-				Err(e) => {
-					defmt::warn!("SD error reading {}: {:?}", block.0, e);
-					common::Result::Err(common::Error::DeviceError(0))
+	let mut inner = || {
+		match device {
+			0 => {
+				hw.sdcard_poll();
+				let info = match &hw.card_state {
+					CardState::Online(info) => info.clone(),
+					_ => return common::Result::Err(common::Error::NoMediaFound),
+				};
+				// Run card at full speed
+				let spi = sdcard::FakeSpi(hw, false);
+				let cs = sdcard::FakeCs();
+				let delayer = sdcard::FakeDelayer();
+				let sdcard = embedded_sdmmc::SdCard::new(spi, cs, delayer);
+				unsafe {
+					sdcard.mark_card_as_init(info.card_type);
+				}
+				let blocks = unsafe {
+					core::slice::from_raw_parts_mut(
+						data.data as *mut embedded_sdmmc::Block,
+						data.data_len / 512,
+					)
+				};
+				let start_block_idx = embedded_sdmmc::BlockIdx(block.0 as u32);
+				match sdcard.read(blocks, start_block_idx, "bios") {
+					Ok(_) => common::Result::Ok(()),
+					Err(e) => {
+						defmt::warn!("SD error reading {}: {:?}", block.0, e);
+						common::Result::Err(common::Error::DeviceError(0))
+					}
 				}
 			}
-		}
-		_ => {
-			// Nothing else supported by this BIOS
-			common::Result::Err(common::Error::InvalidDevice)
+			_ => {
+				// Nothing else supported by this BIOS
+				common::Result::Err(common::Error::InvalidDevice)
+			}
 		}
 	};
+	let result = inner();
 	hw.set_hdd_led(false);
 	result
 }
