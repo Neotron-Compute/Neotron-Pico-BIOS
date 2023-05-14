@@ -30,22 +30,25 @@ fn main() {
 	println!("cargo:rerun-if-changed=memory.x");
 
 	// Generate a file containing the firmware version
-	let version_output = std::process::Command::new("git")
+	let mut output;
+	if let Ok(version_output) = std::process::Command::new("git")
 		.current_dir(env::var_os("CARGO_MANIFEST_DIR").unwrap())
 		.args(["describe", "--tags", "--dirty"])
 		.output()
-		.expect("running git-describe");
+	{
+		println!(
+			"Version is {:?}",
+			std::str::from_utf8(&version_output.stdout)
+		);
+		println!("Error is {:?}", std::str::from_utf8(&version_output.stderr));
+		assert!(version_output.status.success());
 
-	println!(
-		"Version is {:?}",
-		std::str::from_utf8(&version_output.stdout)
-	);
-	println!("Error is {:?}", std::str::from_utf8(&version_output.stderr));
-	assert!(version_output.status.success());
-
-	// Remove the trailing newline
-	let mut output = version_output.stdout;
-	output.pop();
+		// Remove the trailing newline
+		output = version_output.stdout;
+		output.pop();
+	} else {
+		output = String::from(env!("CARGO_PKG_VERSION")).into_bytes();
+	}
 
 	// Add a null
 	output.push(0);
