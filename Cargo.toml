@@ -5,13 +5,13 @@ resolver = "2"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 name = "neotron-pico-bios"
-version = "0.5.0"
+version = "0.5.1"
 
 [dependencies]
 # Useful Cortex-M specific functions (e.g. SysTick)
 cortex-m = "0.7"
 # The Raspberry Pi Pico HAL
-rp-pico = { version = "0.6", default-features = false, features = [ "rt", "critical-section-impl", "rom-func-cache" ] }
+rp-pico = { version = "0.7", default-features = false, features = [ "rt", "critical-section-impl", "rom-func-cache" ] }
 # Cortex-M run-time (or start-up) code
 cortex-m-rt = "0.7"
 # The BIOS to OS API
@@ -51,7 +51,7 @@ shared-bus = "0.2"
 # Gets us compare-swap atomic operations
 atomic-polyfill = "1.0.2"
 # SD Card driver
-embedded-sdmmc = { version = "0.4", default-features = false, features = ["defmt-log"] }
+embedded-sdmmc = { version = "0.5", default-features = false, features = ["defmt-log"] }
 
 [[bin]]
 name = "neotron-pico-bios"
@@ -69,6 +69,3 @@ lto = true
 # good choice for performance on the RP2040, where code executes from external
 # SPI Flash and has to be buffered in a small on-chip cache memory.
 opt-level = "s"
-
-[patch.crates-io]
-rp2040-boot2 = { version = "0.3.0", git = "https://github.com/rp-rs/rp2040-boot2" }
