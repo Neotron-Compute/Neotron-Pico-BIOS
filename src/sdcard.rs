@@ -22,7 +22,7 @@ impl<'a> embedded_hal::blocking::spi::Transfer<u8> for FakeSpi<'a> {
 	type Error = core::convert::Infallible;
 	fn transfer<'w>(&mut self, words: &'w mut [u8]) -> Result<&'w [u8], Self::Error> {
 		let result = if IS_CS_LOW.load(Ordering::SeqCst) {
-			defmt::debug!("SD out: {:02x}", words);
+			defmt::debug!("SD > {:02x}", words);
 			self.0.with_bus_cs(
 				1,
 				if self.1 {
@@ -34,7 +34,7 @@ impl<'a> embedded_hal::blocking::spi::Transfer<u8> for FakeSpi<'a> {
 					spi.transfer(words).unwrap();
 				},
 			);
-			defmt::debug!("SD: {:02x}", words);
+			defmt::debug!("SD < {:02x}", words);
 			words
 		} else {
 			// Select a slot we don't use so the SD card won't be activated
@@ -44,6 +44,32 @@ impl<'a> embedded_hal::blocking::spi::Transfer<u8> for FakeSpi<'a> {
 			words
 		};
 		Ok(result)
+	}
+}
+
+impl<'a> embedded_hal::blocking::spi::Write<u8> for FakeSpi<'a> {
+	type Error = core::convert::Infallible;
+	fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
+		if IS_CS_LOW.load(Ordering::SeqCst) {
+			defmt::debug!("SD > {:02x}", words);
+			self.0.with_bus_cs(
+				1,
+				if self.1 {
+					CLOCK_SD_CARD_INIT
+				} else {
+					CLOCK_SD_CARD
+				},
+				|spi, _buffer| {
+					spi.write(words).unwrap();
+				},
+			);
+		} else {
+			// Select a slot we don't use so the SD card won't be activated
+			self.0.with_bus_cs(7, CLOCK_SD_CARD_INIT, |spi, _buffer| {
+				spi.write(words).unwrap();
+			});
+		}
+		Ok(())
 	}
 }
 

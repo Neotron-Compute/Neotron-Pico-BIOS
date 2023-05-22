@@ -1221,7 +1221,8 @@ impl Hardware {
 				let spi = sdcard::FakeSpi(self, true);
 				let cs = sdcard::FakeCs();
 				let delayer = sdcard::FakeDelayer();
-				let sdcard = embedded_sdmmc::SdCard::new(spi, cs, delayer);
+				let options = embedded_sdmmc::sdcard::AcquireOpts { use_crc: true };
+				let sdcard = embedded_sdmmc::SdCard::new_with_options(spi, cs, delayer, options);
 				// Talk to the card to trigger a scan if its type
 				let num_blocks = sdcard.num_blocks();
 				let card_type = sdcard.get_card_type();
@@ -1987,7 +1988,8 @@ pub extern "C" fn block_read(
 				let spi = sdcard::FakeSpi(hw, false);
 				let cs = sdcard::FakeCs();
 				let delayer = sdcard::FakeDelayer();
-				let sdcard = embedded_sdmmc::SdCard::new(spi, cs, delayer);
+				let options = embedded_sdmmc::sdcard::AcquireOpts { use_crc: true };
+				let sdcard = embedded_sdmmc::SdCard::new_with_options(spi, cs, delayer, options);
 				unsafe {
 					sdcard.mark_card_as_init(info.card_type);
 				}
