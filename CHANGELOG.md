@@ -4,6 +4,13 @@
 
 * None
 
+## v0.5.1 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.5.1) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.5.1))
+
+* Implement SD Card block read/write
+* SPI bus clock changes depending on which device is being accessed
+* Updated to OS 0.3.3
+* Running `git` in `build.rs` is now optional
+
 ## v0.5.0 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.5.0) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.5.0))
 
 * Full-colour 80 column text
