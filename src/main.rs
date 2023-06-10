@@ -2087,6 +2087,41 @@ fn IO_IRQ_BANK0() {
 	cortex_m::asm::sev();
 }
 
+/// Called when the CPU Hard Faults.
+///
+/// This probably means something panicked, and the Rust code was compiled to
+/// abort-on-panic. Or someone jumped to a bad address.
+///
+/// Hopefully the debug output we print will of be some use. Think of it as our
+/// Blue Screen of Death, or Guru Meditation Error.
+#[cortex_m_rt::exception]
+unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
+	// TODO: check we're actually in text mode
+	let tc = vga::TextConsole::new();
+	tc.set_text_buffer(unsafe { &mut vga::GLYPH_ATTR_ARRAY });
+	for _col in 0..vga::MAX_TEXT_ROWS {
+		let _ = writeln!(&tc, "");
+	}
+	tc.move_to(0, 0);
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::DARK_RED,
+		false,
+	));
+	let _ = writeln!(&tc, "+------------------------------+");
+	let _ = writeln!(&tc, "| System Hardfault             |");
+	let _ = writeln!(&tc, "| pc: 0x{:08x}               |", frame.pc());
+	let _ = writeln!(&tc, "| lr: 0x{:08x}               |", frame.lr());
+	let _ = writeln!(&tc, "| r0: 0x{:08x}               |", frame.r0());
+	let _ = writeln!(&tc, "| r1: 0x{:08x}               |", frame.r1());
+	let _ = writeln!(&tc, "| r2: 0x{:08x}               |", frame.r2());
+	let _ = writeln!(&tc, "| r3: 0x{:08x}               |", frame.r3());
+	let _ = writeln!(&tc, "+------------------------------+");
+	loop {
+		cortex_m::asm::wfi();
+	}
+}
+
 // -----------------------------------------------------------------------------
 // End of file
 // -----------------------------------------------------------------------------
