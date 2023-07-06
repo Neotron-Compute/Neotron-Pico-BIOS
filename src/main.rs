@@ -249,6 +249,9 @@ pub static OS_IMAGE: [u8; include_bytes!("thumbv6m-none-eabi-flash1002-libneotro
 /// is currently active (low).
 static INTERRUPT_PENDING: AtomicBool = AtomicBool::new(false);
 
+/// Stack for Core 1
+static mut CORE1_STACK: [usize; 256] = [0; 256];
+
 /// The table of API calls we provide the OS
 static API_CALLS: common::Api = common::Api {
 	api_version_get,
@@ -311,6 +314,12 @@ extern "C" {
 	static mut _ram_os_len: u32;
 }
 
+/// What we paint Core 0's stack with
+const CORE0_STACK_PAINT_WORD: usize = 0xBBBB_BBBB;
+
+/// What we paint Core 1's stack with
+const CORE1_STACK_PAINT_WORD: usize = 0xCCCC_CCCC;
+
 // -----------------------------------------------------------------------------
 // Functions
 // -----------------------------------------------------------------------------
@@ -332,6 +341,30 @@ fn main() -> ! {
 
 	// Reset the spinlocks.
 	pp.SIO.spinlock[31].reset();
+
+	{
+		// Paint the stack
+		extern "C" {
+			static mut __sheap: usize;
+			static mut _stack_start: usize;
+		}
+		let stack_len = unsafe {
+			(&_stack_start as *const usize as usize) - (&__sheap as *const usize as usize)
+		};
+		// But not the top 64 words, because we're using the stack right now!
+		let stack = unsafe {
+			core::slice::from_raw_parts_mut(
+				&mut __sheap as *mut usize,
+				(stack_len / core::mem::size_of::<usize>()) - 256,
+			)
+		};
+		info!("Painting {:?}", stack.as_ptr_range());
+		for b in stack.iter_mut() {
+			*b = CORE0_STACK_PAINT_WORD;
+		}
+	}
+
+	check_stacks();
 
 	// Needed by the clock setup
 	let mut watchdog = hal::watchdog::Watchdog::new(pp.WATCHDOG);
@@ -1897,6 +1930,7 @@ extern "C" fn bus_interrupt_status() -> u32 {
 /// media is indicated with a boolean field in the
 /// `block_dev::DeviceInfo` structure.
 pub extern "C" fn block_dev_get_info(device: u8) -> common::Option<common::block_dev::DeviceInfo> {
+	check_stacks();
 	match device {
 		0 => {
 			let mut lock = HARDWARE.lock();
@@ -1970,6 +2004,7 @@ pub extern "C" fn block_read(
 	data: common::ApiBuffer,
 ) -> common::Result<()> {
 	use embedded_sdmmc::BlockDevice;
+	check_stacks();
 	if data.data_len != usize::from(num_blocks) * 512 {
 		return common::Result::Err(common::Error::UnsupportedConfiguration(0));
 	}
@@ -2085,6 +2120,53 @@ fn IO_IRQ_BANK0() {
 		pin.clear_interrupt(hal::gpio::Interrupt::EdgeHigh);
 	}
 	cortex_m::asm::sev();
+}
+
+/// Measure how much stack space remains unused.
+#[cfg(feature = "check-stack")]
+fn check_stacks() {
+	extern "C" {
+		static mut __sheap: usize;
+		static mut _stack_start: usize;
+	}
+	let stack_len =
+		unsafe { (&_stack_start as *const usize as usize) - (&__sheap as *const usize as usize) };
+	check_stack(
+		unsafe { &__sheap as *const usize },
+		stack_len,
+		CORE0_STACK_PAINT_WORD,
+	);
+	check_stack(
+		unsafe { CORE1_STACK.as_ptr() },
+		unsafe { CORE1_STACK.len() * core::mem::size_of::<usize>() },
+		CORE1_STACK_PAINT_WORD,
+	);
+}
+
+/// Dummy stack checker that does nothing
+#[cfg(not(feature = "check-stack"))]
+fn check_stacks() {}
+
+/// Check an individual stack to see how much has been used
+#[cfg(feature = "check-stack")]
+fn check_stack(start: *const usize, stack_len_bytes: usize, check_word: usize) {
+	let mut p: *const usize = start;
+	let mut free_bytes = 0;
+	loop {
+		let value = unsafe { p.read_volatile() };
+		if value != check_word {
+			break;
+		}
+		// Safety: We must hit a used stack value somewhere!
+		p = unsafe { p.offset(1) };
+		free_bytes += core::mem::size_of::<usize>();
+	}
+	defmt::debug!(
+		"Stack free at 0x{:08x}: {} bytes used of {} bytes",
+		start,
+		stack_len_bytes - free_bytes,
+		stack_len_bytes
+	);
 }
 
 /// Called when the CPU Hard Faults.

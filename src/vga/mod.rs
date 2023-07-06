@@ -1027,21 +1027,16 @@ pub fn init(
 	// cannot be reconfigured at a later time, but they do keep on running
 	// as-is.
 
-	let core1_stack: &'static mut [usize] = unsafe {
-		extern "C" {
-			static mut _core1_stack_bottom: usize;
-			static mut _core1_stack_len: usize;
+	unsafe {
+		for b in super::CORE1_STACK.iter_mut() {
+			*b = super::CORE1_STACK_PAINT_WORD;
 		}
-		core::slice::from_raw_parts_mut(
-			&mut _core1_stack_bottom as *mut _,
-			&mut _core1_stack_len as *const _ as usize / 4,
-		)
-	};
+	}
 
 	debug!(
 		"Core 1 stack: {:08x}, {} bytes",
-		core1_stack.as_ptr(),
-		core1_stack.len()
+		unsafe { super::CORE1_STACK.as_ptr() },
+		unsafe { super::CORE1_STACK.len() * core::mem::size_of::<usize>() }
 	);
 
 	// No-one else is looking at this right now.
@@ -1049,7 +1044,13 @@ pub fn init(
 		TEXT_COLOUR_LOOKUP.init(&VIDEO_PALETTE);
 	}
 
-	multicore_launch_core1_with_stack(core1_main, core1_stack, ppb, fifo, psm);
+	multicore_launch_core1_with_stack(
+		core1_main,
+		unsafe { &mut super::CORE1_STACK },
+		ppb,
+		fifo,
+		psm,
+	);
 
 	debug!("Core 1 running");
 }

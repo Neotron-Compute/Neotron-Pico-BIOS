@@ -25,36 +25,14 @@ MEMORY {
     /*
      * This is the bottom of the four striped banks of SRAM in the RP2040.
      */
-    RAM_OS : ORIGIN = 0x20000000, LENGTH = 0x3A000
+    RAM_OS : ORIGIN = 0x20000000, LENGTH = 232K
     /*
-     * This is the top of the four striped banks of SRAM in the RP2040.
+     * This is the top of the four striped banks of SRAM in the RP2040, plus SRAM_BANK4 and SRAM_BANK5.
      *
-     * We give ourselves six 4K pages [0x3A_000, 0x40_000]
+     * We give ourselves eight 4K pages [0x3A_000..0x41_FFF]
      */
-    RAM : ORIGIN = 0x2003A000, LENGTH = 24K
-    /*
-     * This is the fifth bank, a 4KB block. We use this for Core 0 Stack.
-     */
-    RAM_CORE0_STACK : ORIGIN = 0x20040000, LENGTH = 4K
-    /*
-     * This is the sixth bank, a 4KB block. We use this for Core 1 Stack.
-     */
-    RAM_CORE1_STACK : ORIGIN = 0x20041000, LENGTH = 4K
+    RAM : ORIGIN = 0x2003A000, LENGTH = 32K
 }
-
-/*
- * This is where the call stack for Core 0 will be located. The stack is of
- * the full descending type. You may want to use this variable to locate the
- * call stack and static variables in different memory regions. Below is
- * shown the default value
- */
-_stack_start = ORIGIN(RAM_CORE0_STACK) + LENGTH(RAM_CORE0_STACK);
-
-/*
- * This is where the call stack for Core 1 will be located.
- */
-_core1_stack_bottom = ORIGIN(RAM_CORE1_STACK);
-_core1_stack_len = LENGTH(RAM_CORE1_STACK);
 
 /*
  * Export some symbols to tell the BIOS where it might find the OS.
