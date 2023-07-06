@@ -249,6 +249,9 @@ pub static OS_IMAGE: [u8; include_bytes!("thumbv6m-none-eabi-flash1002-libneotro
 /// is currently active (low).
 static INTERRUPT_PENDING: AtomicBool = AtomicBool::new(false);
 
+/// Stack for Core 1
+static mut CORE1_STACK: [usize; 256] = [0; 256];
+
 /// The table of API calls we provide the OS
 static API_CALLS: common::Api = common::Api {
 	api_version_get,
@@ -342,14 +345,17 @@ fn main() -> ! {
 	{
 		// Paint the stack
 		extern "C" {
-			static mut _stack_bottom: usize;
-			static mut _stack_len: usize;
+			static mut __sheap: usize;
+			static mut _stack_start: usize;
 		}
+		let stack_len = unsafe {
+			(&_stack_start as *const usize as usize) - (&__sheap as *const usize as usize)
+		};
 		// But not the top 64 words, because we're using the stack right now!
 		let stack = unsafe {
 			core::slice::from_raw_parts_mut(
-				&mut _stack_bottom as *mut usize,
-				(&mut _stack_len as *const _ as usize / core::mem::size_of::<usize>()) - 256,
+				&mut __sheap as *mut usize,
+				(stack_len / core::mem::size_of::<usize>()) - 256,
 			)
 		};
 		info!("Painting {:?}", stack.as_ptr_range());
@@ -2120,17 +2126,21 @@ fn IO_IRQ_BANK0() {
 #[cfg(feature = "check-stack")]
 fn check_stacks() {
 	extern "C" {
-		static _stack_bottom: usize;
-		static _stack_len: usize;
-		static _core1_stack_bottom: usize;
-		static _core1_stack_len: usize;
+		static mut __sheap: usize;
+		static mut _stack_start: usize;
 	}
-	let p = unsafe { &_stack_bottom as *const usize };
-	let total_bytes = unsafe { &_stack_len as *const usize as usize };
-	check_stack(p, total_bytes, CORE0_STACK_PAINT_WORD);
-	let p = unsafe { &_core1_stack_bottom as *const usize };
-	let total_bytes = unsafe { &_core1_stack_len as *const usize as usize };
-	check_stack(p, total_bytes, CORE1_STACK_PAINT_WORD);
+	let stack_len =
+		unsafe { (&_stack_start as *const usize as usize) - (&__sheap as *const usize as usize) };
+	check_stack(
+		unsafe { &__sheap as *const usize },
+		stack_len,
+		CORE0_STACK_PAINT_WORD,
+	);
+	check_stack(
+		unsafe { CORE1_STACK.as_ptr() },
+		unsafe { CORE1_STACK.len() * core::mem::size_of::<usize>() },
+		CORE1_STACK_PAINT_WORD,
+	);
 }
 
 /// Dummy stack checker that does nothing
