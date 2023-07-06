@@ -11,7 +11,11 @@ version = "0.5.1"
 # Useful Cortex-M specific functions (e.g. SysTick)
 cortex-m = "0.7"
 # The Raspberry Pi Pico HAL
-rp-pico = { version = "0.7", default-features = false, features = [ "rt", "critical-section-impl", "rom-func-cache" ] }
+rp-pico = { version = "0.7", default-features = false, features = [
+    "rt",
+    "critical-section-impl",
+    "rom-func-cache"
+] }
 # Cortex-M run-time (or start-up) code
 cortex-m-rt = "0.7"
 # The BIOS to OS API
@@ -19,7 +23,7 @@ neotron-common-bios = "0.8.0"
 # For the RP2040 bootloader
 rp2040-boot2 = "0.3.0"
 # For hardware abstraction traits
-embedded-hal ="0.2"
+embedded-hal = "0.2"
 # Gives us formatted PC-side logging
 defmt = "=0.3.2"
 # Sends defmt logs to the SWD debugger
@@ -33,9 +37,11 @@ pio-proc = "0.2"
 # Hardware locks for sharing data with interrupts
 critical-section = "1.0"
 # Commands for talking to a Neotron BMC. The tag is for the repo as a whole, of which the commands crate is a small part.
-neotron-bmc-commands = { version = "0.1.0", git = "https://github.com/neotron-compute/neotron-bmc", tag="v0.5.2" }
+neotron-bmc-commands = { version = "0.1.0", git = "https://github.com/neotron-compute/neotron-bmc", tag = "v0.5.2" }
 # Protocol for talking to a Neotron BMC. The tag is for the repo as a whole, of which the protocol crate is a small part.
-neotron-bmc-protocol = { version = "0.1.0", git = "https://github.com/neotron-compute/neotron-bmc", tag="v0.5.2", features = ["defmt"] }
+neotron-bmc-protocol = { version = "0.1.0", git = "https://github.com/neotron-compute/neotron-bmc", tag = "v0.5.2", features = [
+    "defmt"
+] }
 # Time and frequency related functions
 fugit = "0.3"
 # PS/2 scancode decoding
@@ -51,7 +57,9 @@ shared-bus = "0.2"
 # Gets us compare-swap atomic operations
 atomic-polyfill = "1.0.2"
 # SD Card driver
-embedded-sdmmc = { version = "0.5", default-features = false, features = ["defmt-log"] }
+embedded-sdmmc = { version = "0.5", default-features = false, features = [
+    "defmt-log"
+] }
 
 [[bin]]
 name = "neotron-pico-bios"
