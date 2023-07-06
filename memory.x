@@ -25,30 +25,33 @@ MEMORY {
     /*
      * This is the bottom of the four striped banks of SRAM in the RP2040.
      */
-    RAM_OS : ORIGIN = 0x20000000, LENGTH = 0x3A000
+    RAM_OS : ORIGIN = 0x20000000, LENGTH = 0x39000
     /*
      * This is the top of the four striped banks of SRAM in the RP2040.
      *
-     * We give ourselves six 4K pages [0x3A_000, 0x40_000]
+     * We give ourselves size 4K pages [0x39_000..0x3E_FFF]
      */
-    RAM : ORIGIN = 0x2003A000, LENGTH = 24K
+    RAM : ORIGIN = 0x20039000, LENGTH = 24K
     /*
-     * This is the fifth bank, a 4KB block. We use this for Core 0 Stack.
+     * This 4K from the top of striped RAM, plus the fifth bank - another a 4KB
+     * block. We use this for Core 0 Stack. We tried 4K but it wasn't enough.
      */
-    RAM_CORE0_STACK : ORIGIN = 0x20040000, LENGTH = 4K
+    RAM_CORE0_STACK : ORIGIN = 0x2003F000, LENGTH = 8K
     /*
      * This is the sixth bank, a 4KB block. We use this for Core 1 Stack.
+     * As of 0.5.1 Pico BIOS uses about 316 bytes of this but we give it the
+     * full 4K so it can have uncontended access to this SRAM bank.
      */
     RAM_CORE1_STACK : ORIGIN = 0x20041000, LENGTH = 4K
 }
 
 /*
  * This is where the call stack for Core 0 will be located. The stack is of
- * the full descending type. You may want to use this variable to locate the
- * call stack and static variables in different memory regions. Below is
- * shown the default value
+ * the full descending type.
  */
 _stack_start = ORIGIN(RAM_CORE0_STACK) + LENGTH(RAM_CORE0_STACK);
+_stack_bottom = ORIGIN(RAM_CORE0_STACK);
+_stack_len = LENGTH(RAM_CORE0_STACK);
 
 /*
  * This is where the call stack for Core 1 will be located.

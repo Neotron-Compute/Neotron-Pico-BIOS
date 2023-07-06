@@ -1034,9 +1034,13 @@ pub fn init(
 		}
 		core::slice::from_raw_parts_mut(
 			&mut _core1_stack_bottom as *mut _,
-			&mut _core1_stack_len as *const _ as usize / 4,
+			&mut _core1_stack_len as *const _ as usize / core::mem::size_of::<usize>(),
 		)
 	};
+
+	for b in core1_stack.iter_mut() {
+		*b = super::CORE1_STACK_PAINT_WORD;
+	}
 
 	debug!(
 		"Core 1 stack: {:08x}, {} bytes",
