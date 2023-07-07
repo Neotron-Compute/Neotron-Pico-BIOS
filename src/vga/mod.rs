@@ -145,7 +145,7 @@ pub struct RGBPair(u32);
 /// Represents a glyph in the current font.
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Eq)]
-pub struct Glyph(u8);
+pub struct Glyph(pub u8);
 
 /// Represents a glyph/attribute pair. This is what out text console is made
 /// out of. They work in exactly the same way as IBM PC VGA.
@@ -193,14 +193,14 @@ pub const MAX_TEXT_ROWS: usize = MAX_NUM_LINES / 8;
 static CORE1_START_FLAG: AtomicBool = AtomicBool::new(false);
 
 /// Stores our timing data which we DMA into the timing PIO State Machine
-static mut TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x400();
+static mut TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x480();
 
 /// Stores our current video mode, or the mode we change into on the next frame.
 ///
 /// We boot in 80x50 mode.
 static VIDEO_MODE: AtomicModeWrapper = AtomicModeWrapper::new(crate::common::video::Mode::new(
-	crate::common::video::Timing::T640x400,
-	crate::common::video::Format::Text8x8,
+	crate::common::video::Timing::T640x480,
+	crate::common::video::Format::Text8x16,
 ));
 
 /// Tracks which scan-line we are currently on (for timing purposes => it goes 0..`TIMING_BUFFER.back_porch_ends_at`)
@@ -305,7 +305,7 @@ pub mod colours {
 ///
 /// Note, the first eight entries should match
 /// [`neotron_common_bios::video::TextBackgroundColour`] and the first 16 entries
-/// should meatch [`neotron_common_bios::video::TextForegroundColour`].
+/// should match [`neotron_common_bios::video::TextForegroundColour`].
 pub static VIDEO_PALETTE: [AtomicU16; 256] = [
 	// Index 000: 0x000 (Black)
 	AtomicU16::new(RGBColour::from_12bit(0x0, 0x0, 0x0).0),
