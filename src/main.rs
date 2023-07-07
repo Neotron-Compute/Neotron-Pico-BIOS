@@ -86,14 +86,14 @@ use rp_pico::{
 };
 
 // Other Neotron Crates
-use common::{
-	video::{Attr, TextBackgroundColour, TextForegroundColour},
-	MemoryRegion,
-};
 use mutex::NeoMutex;
 use neotron_bmc_commands::Command;
 use neotron_bmc_protocol::Receivable;
-use neotron_common_bios as common;
+use neotron_common_bios::{
+	self as common,
+	video::{Attr, TextBackgroundColour, TextForegroundColour},
+	MemoryRegion, Option as COption, Result as CResult,
+};
 
 // -----------------------------------------------------------------------------
 // Types
@@ -147,7 +147,7 @@ struct Hardware {
 	/// Our keyboard decoder
 	keyboard: pc_keyboard::ScancodeSet2,
 	/// Our queue of HID events
-	event_queue: heapless::Deque<neotron_common_bios::hid::HidEvent, 16>,
+	event_queue: heapless::Deque<common::hid::HidEvent, 16>,
 	/// A place to send/receive bytes to/from the BMC
 	bmc_buffer: [u8; 64],
 	/// Our last interrupt read from the IO chip. It's inverted, so a bit set
@@ -510,7 +510,7 @@ fn main() -> ! {
 	}
 
 	// Empty the keyboard FIFO
-	while let common::Result::Ok(common::Option::Some(_x)) = hid_get_event() {
+	while let CResult::Ok(COption::Some(_x)) = hid_get_event() {
 		// Spin
 	}
 
@@ -1430,17 +1430,14 @@ pub extern "C" fn bios_version_get() -> common::ApiString<'static> {
 /// that is an Operating System level design feature. These APIs just
 /// reflect the raw hardware, in a similar manner to the registers exposed
 /// by a memory-mapped UART peripheral.
-pub extern "C" fn serial_get_info(_device: u8) -> common::Option<common::serial::DeviceInfo> {
-	common::Option::None
+pub extern "C" fn serial_get_info(_device: u8) -> COption<common::serial::DeviceInfo> {
+	COption::None
 }
 
 /// Set the options for a given serial device. An error is returned if the
 /// options are invalid for that serial device.
-pub extern "C" fn serial_configure(
-	_device: u8,
-	_config: common::serial::Config,
-) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+pub extern "C" fn serial_configure(_device: u8, _config: common::serial::Config) -> CResult<()> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
 /// Write bytes to a serial port. There is no sense of 'opening' or
@@ -1451,9 +1448,9 @@ pub extern "C" fn serial_configure(
 pub extern "C" fn serial_write(
 	_device: u8,
 	_data: common::ApiByteSlice,
-	_timeout: common::Option<common::Timeout>,
-) -> common::Result<usize> {
-	common::Result::Err(common::Error::Unimplemented)
+	_timeout: COption<common::Timeout>,
+) -> CResult<usize> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
 /// Read bytes from a serial port. There is no sense of 'opening' or
@@ -1464,9 +1461,9 @@ pub extern "C" fn serial_write(
 pub extern "C" fn serial_read(
 	_device: u8,
 	_data: common::ApiBuffer,
-	_timeout: common::Option<common::Timeout>,
-) -> common::Result<usize> {
-	common::Result::Err(common::Error::Unimplemented)
+	_timeout: COption<common::Timeout>,
+) -> CResult<usize> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
 /// Get the current wall time.
@@ -1557,15 +1554,15 @@ pub extern "C" fn time_clock_set(time: common::Time) {
 /// Configuration data is, to the BIOS, just a block of bytes of a given
 /// length. How it stores them is up to the BIOS - it could be EEPROM, or
 /// battery-backed SRAM.
-pub extern "C" fn configuration_get(_buffer: common::ApiBuffer) -> common::Result<usize> {
-	common::Result::Err(common::Error::Unimplemented)
+pub extern "C" fn configuration_get(_buffer: common::ApiBuffer) -> CResult<usize> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
 /// Set the configuration data block.
 ///
 /// See `configuration_get`.
-pub extern "C" fn configuration_set(_buffer: common::ApiByteSlice) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+pub extern "C" fn configuration_set(_buffer: common::ApiByteSlice) -> CResult<()> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
 /// Does this Neotron BIOS support this video mode?
@@ -1582,11 +1579,11 @@ pub extern "C" fn video_is_valid_mode(mode: common::video::Mode) -> bool {
 /// `video_get_framebuffer` will return `null`. You must then supply a
 /// pointer to a block of size `Mode::frame_size_bytes()` to
 /// `video_set_framebuffer` before any video will appear.
-pub extern "C" fn video_set_mode(mode: common::video::Mode) -> common::Result<()> {
+pub extern "C" fn video_set_mode(mode: common::video::Mode) -> CResult<()> {
 	if vga::set_video_mode(mode) {
-		common::Result::Ok(())
+		CResult::Ok(())
 	} else {
-		common::Result::Err(common::Error::UnsupportedConfiguration(0))
+		CResult::Err(common::Error::UnsupportedConfiguration(0))
 	}
 }
 
@@ -1627,8 +1624,8 @@ pub extern "C" fn video_get_framebuffer() -> *mut u8 {
 ///
 /// The pointer must point to enough video memory to handle the current video
 /// mode, and any future video mode you set.
-pub unsafe extern "C" fn video_set_framebuffer(_buffer: *const u8) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+pub unsafe extern "C" fn video_set_framebuffer(_buffer: *const u8) -> CResult<()> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
 /// Find out whether the given video mode needs more VRAM than we currently have.
@@ -1656,17 +1653,17 @@ pub extern "C" fn video_mode_needs_vram(_mode: common::video::Mode) -> bool {
 /// (other than Region 0), so faster memory should be listed first.
 ///
 /// If the region number given is invalid, the function returns `(null, 0)`.
-pub extern "C" fn memory_get_region(region: u8) -> common::Option<common::MemoryRegion> {
+pub extern "C" fn memory_get_region(region: u8) -> COption<common::MemoryRegion> {
 	match region {
 		0 => {
 			// Application Region
-			common::Option::Some(MemoryRegion {
+			COption::Some(MemoryRegion {
 				start: unsafe { &mut _ram_os_start as *mut u32 } as *mut u8,
 				length: unsafe { &mut _ram_os_len as *const u32 } as usize,
 				kind: common::MemoryKind::Ram,
 			})
 		}
-		_ => common::Option::None,
+		_ => COption::None,
 	}
 }
 
@@ -1695,7 +1692,7 @@ pub extern "C" fn memory_get_region(region: u8) -> common::Option<common::Memory
 /// a single KeyCode enum. Plus, Scan Code Set 2 is a pain, because most of the
 /// 'extended' keys they added on the IBM PC/AT actually generate two bytes, not
 /// one. It's much nicer when your Scan Codes always have one byte per key.
-pub extern "C" fn hid_get_event() -> common::Result<common::Option<common::hid::HidEvent>> {
+pub extern "C" fn hid_get_event() -> CResult<COption<common::hid::HidEvent>> {
 	let mut buffer = [0u8; 8];
 
 	let mut lock = HARDWARE.lock();
@@ -1703,7 +1700,7 @@ pub extern "C" fn hid_get_event() -> common::Result<common::Option<common::hid::
 
 	if let Some(ev) = hw.event_queue.pop_front() {
 		// Queued data available, so short-cut
-		return common::Result::Ok(common::Option::Some(ev));
+		return CResult::Ok(COption::Some(ev));
 	}
 
 	loop {
@@ -1737,9 +1734,9 @@ pub extern "C" fn hid_get_event() -> common::Result<common::Option<common::hid::
 
 	if let Some(ev) = hw.event_queue.pop_front() {
 		// Queued data available, so short-cut
-		common::Result::Ok(common::Option::Some(ev))
+		CResult::Ok(COption::Some(ev))
 	} else {
-		common::Result::Ok(common::Option::None)
+		CResult::Ok(COption::None)
 	}
 }
 
@@ -1770,8 +1767,8 @@ fn convert_hid_event(
 }
 
 /// Control the keyboard LEDs.
-pub extern "C" fn hid_set_leds(_leds: common::hid::KeyboardLeds) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+pub extern "C" fn hid_set_leds(_leds: common::hid::KeyboardLeds) -> CResult<()> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
 /// Wait for the next occurence of the specified video scan-line.
@@ -1811,11 +1808,11 @@ pub extern "C" fn video_wait_for_line(line: u16) {
 }
 
 /// Read the RGB palette.
-extern "C" fn video_get_palette(index: u8) -> common::Option<common::video::RGBColour> {
+extern "C" fn video_get_palette(index: u8) -> COption<common::video::RGBColour> {
 	let raw_u16 = vga::VIDEO_PALETTE[index as usize].load(Ordering::Relaxed);
 	let our_colour = vga::RGBColour(raw_u16);
 	// Convert from our 12-bit colour type to the public 24-bit colour type
-	common::Option::Some(our_colour.into())
+	COption::Some(our_colour.into())
 }
 
 /// Update the RGB palette.
@@ -1838,8 +1835,8 @@ unsafe extern "C" fn video_set_whole_palette(
 	}
 }
 
-extern "C" fn i2c_bus_get_info(_i2c_bus: u8) -> common::Option<common::i2c::BusInfo> {
-	common::Option::None
+extern "C" fn i2c_bus_get_info(_i2c_bus: u8) -> COption<common::i2c::BusInfo> {
+	COption::None
 }
 
 extern "C" fn i2c_write_read(
@@ -1848,70 +1845,70 @@ extern "C" fn i2c_write_read(
 	_tx: common::ApiByteSlice,
 	_tx2: common::ApiByteSlice,
 	_rx: common::ApiBuffer,
-) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+) -> CResult<()> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
 extern "C" fn audio_mixer_channel_get_info(
 	_audio_mixer_id: u8,
-) -> common::Option<common::audio::MixerChannelInfo> {
-	common::Option::None
+) -> COption<common::audio::MixerChannelInfo> {
+	COption::None
 }
 
-extern "C" fn audio_mixer_channel_set_level(_audio_mixer_id: u8, _level: u8) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+extern "C" fn audio_mixer_channel_set_level(_audio_mixer_id: u8, _level: u8) -> CResult<()> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
-extern "C" fn audio_output_set_config(_config: common::audio::Config) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+extern "C" fn audio_output_set_config(_config: common::audio::Config) -> CResult<()> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
-extern "C" fn audio_output_get_config() -> common::Result<common::audio::Config> {
-	common::Result::Err(common::Error::Unimplemented)
+extern "C" fn audio_output_get_config() -> CResult<common::audio::Config> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
-unsafe extern "C" fn audio_output_data(_samples: common::ApiByteSlice) -> common::Result<usize> {
-	common::Result::Err(common::Error::Unimplemented)
+unsafe extern "C" fn audio_output_data(_samples: common::ApiByteSlice) -> CResult<usize> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
-extern "C" fn audio_output_get_space() -> common::Result<usize> {
-	common::Result::Ok(0)
+extern "C" fn audio_output_get_space() -> CResult<usize> {
+	CResult::Ok(0)
 }
 
-extern "C" fn audio_input_set_config(_config: common::audio::Config) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+extern "C" fn audio_input_set_config(_config: common::audio::Config) -> CResult<()> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
-extern "C" fn audio_input_get_config() -> common::Result<common::audio::Config> {
-	common::Result::Err(common::Error::Unimplemented)
+extern "C" fn audio_input_get_config() -> CResult<common::audio::Config> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
-extern "C" fn audio_input_data(_samples: common::ApiBuffer) -> common::Result<usize> {
-	common::Result::Err(common::Error::Unimplemented)
+extern "C" fn audio_input_data(_samples: common::ApiBuffer) -> CResult<usize> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
-extern "C" fn audio_input_get_count() -> common::Result<usize> {
-	common::Result::Ok(0)
+extern "C" fn audio_input_get_count() -> CResult<usize> {
+	CResult::Ok(0)
 }
 
-extern "C" fn bus_select(_periperal_id: common::Option<u8>) {
+extern "C" fn bus_select(_periperal_id: COption<u8>) {
 	// Do nothing
 }
 
-extern "C" fn bus_get_info(_periperal_id: u8) -> common::Option<common::bus::PeripheralInfo> {
-	common::Option::None
+extern "C" fn bus_get_info(_periperal_id: u8) -> COption<common::bus::PeripheralInfo> {
+	COption::None
 }
 
 extern "C" fn bus_write_read(
 	_tx: common::ApiByteSlice,
 	_tx2: common::ApiByteSlice,
 	_rx: common::ApiBuffer,
-) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+) -> CResult<()> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
-extern "C" fn bus_exchange(_buffer: common::ApiBuffer) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+extern "C" fn bus_exchange(_buffer: common::ApiBuffer) -> CResult<()> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
 extern "C" fn bus_interrupt_status() -> u32 {
@@ -1929,7 +1926,7 @@ extern "C" fn bus_interrupt_status() -> u32 {
 /// The set of devices is not expected to change at run-time - removal of
 /// media is indicated with a boolean field in the
 /// `block_dev::DeviceInfo` structure.
-pub extern "C" fn block_dev_get_info(device: u8) -> common::Option<common::block_dev::DeviceInfo> {
+pub extern "C" fn block_dev_get_info(device: u8) -> COption<common::block_dev::DeviceInfo> {
 	check_stacks();
 	match device {
 		0 => {
@@ -1942,7 +1939,7 @@ pub extern "C" fn block_dev_get_info(device: u8) -> common::Option<common::block
 
 			match &hw.card_state {
 				CardState::Unplugged | CardState::Uninitialised | CardState::Errored => {
-					common::Option::Some(common::block_dev::DeviceInfo {
+					COption::Some(common::block_dev::DeviceInfo {
 						name: common::types::ApiString::new("SdCard0"),
 						device_type: common::block_dev::DeviceType::SecureDigitalCard,
 						block_size: 0,
@@ -1953,7 +1950,7 @@ pub extern "C" fn block_dev_get_info(device: u8) -> common::Option<common::block
 						read_only: false,
 					})
 				}
-				CardState::Online(info) => common::Option::Some(common::block_dev::DeviceInfo {
+				CardState::Online(info) => COption::Some(common::block_dev::DeviceInfo {
 					name: common::types::ApiString::new("SdCard0"),
 					device_type: common::block_dev::DeviceType::SecureDigitalCard,
 					block_size: 512,
@@ -1967,7 +1964,7 @@ pub extern "C" fn block_dev_get_info(device: u8) -> common::Option<common::block
 		}
 		_ => {
 			// Nothing else supported by this BIOS
-			common::Option::None
+			COption::None
 		}
 	}
 }
@@ -1985,8 +1982,8 @@ pub extern "C" fn block_write(
 	_block: common::block_dev::BlockIdx,
 	_num_blocks: u8,
 	_data: common::ApiByteSlice,
-) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+) -> CResult<()> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
 /// Read one or more sectors to a block device.
@@ -2002,11 +1999,11 @@ pub extern "C" fn block_read(
 	block: common::block_dev::BlockIdx,
 	num_blocks: u8,
 	data: common::ApiBuffer,
-) -> common::Result<()> {
+) -> CResult<()> {
 	use embedded_sdmmc::BlockDevice;
 	check_stacks();
 	if data.data_len != usize::from(num_blocks) * 512 {
-		return common::Result::Err(common::Error::UnsupportedConfiguration(0));
+		return CResult::Err(common::Error::UnsupportedConfiguration(0));
 	}
 	let mut lock = HARDWARE.lock();
 	let hw = lock.as_mut().unwrap();
@@ -2017,7 +2014,7 @@ pub extern "C" fn block_read(
 				hw.sdcard_poll();
 				let info = match &hw.card_state {
 					CardState::Online(info) => info.clone(),
-					_ => return common::Result::Err(common::Error::NoMediaFound),
+					_ => return CResult::Err(common::Error::NoMediaFound),
 				};
 				// Run card at full speed
 				let spi = sdcard::FakeSpi(hw, false);
@@ -2036,16 +2033,16 @@ pub extern "C" fn block_read(
 				};
 				let start_block_idx = embedded_sdmmc::BlockIdx(block.0 as u32);
 				match sdcard.read(blocks, start_block_idx, "bios") {
-					Ok(_) => common::Result::Ok(()),
+					Ok(_) => CResult::Ok(()),
 					Err(e) => {
 						defmt::warn!("SD error reading {}: {:?}", block.0, e);
-						common::Result::Err(common::Error::DeviceError(0))
+						CResult::Err(common::Error::DeviceError(0))
 					}
 				}
 			}
 			_ => {
 				// Nothing else supported by this BIOS
-				common::Result::Err(common::Error::InvalidDevice)
+				CResult::Err(common::Error::InvalidDevice)
 			}
 		}
 	};
@@ -2068,12 +2065,12 @@ pub extern "C" fn block_verify(
 	_block: common::block_dev::BlockIdx,
 	_num_blocks: u8,
 	_data: common::ApiByteSlice,
-) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+) -> CResult<()> {
+	CResult::Err(common::Error::Unimplemented)
 }
 
-extern "C" fn block_dev_eject(_dev_id: u8) -> common::Result<()> {
-	common::Result::Ok(())
+extern "C" fn block_dev_eject(_dev_id: u8) -> CResult<()> {
+	CResult::Ok(())
 }
 
 /// Sleep the CPU until the next interrupt.

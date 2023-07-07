@@ -305,7 +305,7 @@ pub mod colours {
 ///
 /// Note, the first eight entries should match
 /// [`neotron_common_bios::video::TextBackgroundColour`] and the first 16 entries
-/// should meatch [`neotron_common_bios::video::TextForegroundColour`].
+/// should match [`neotron_common_bios::video::TextForegroundColour`].
 pub static VIDEO_PALETTE: [AtomicU16; 256] = [
 	// Index 000: 0x000 (Black)
 	AtomicU16::new(RGBColour::from_12bit(0x0, 0x0, 0x0).0),
