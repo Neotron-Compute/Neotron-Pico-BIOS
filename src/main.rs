@@ -73,7 +73,7 @@ use embedded_hal::{
 };
 use fugit::RateExtU32;
 use panic_probe as _;
-use pc_keyboard::ScancodeSet;
+use pc_keyboard::{KeyCode, ScancodeSet};
 use rp_pico::{
 	self,
 	hal::{
@@ -91,6 +91,7 @@ use neotron_bmc_commands::Command;
 use neotron_bmc_protocol::Receivable;
 use neotron_common_bios::{
 	self as common,
+	hid::HidEvent,
 	video::{Attr, TextBackgroundColour, TextForegroundColour},
 	Error as CError, MemoryRegion, Option as COption, Result as CResult,
 };
@@ -1293,61 +1294,65 @@ impl Hardware {
 }
 
 fn sign_on() {
-	static LOGO_TEXT: &str = "\
+	static LOGO_ANSI_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/logo.bytes"));
+	static COPYRIGHT_TEXT: &str = "\
 		\n\
-		╔═════════════════════════════════════════════════════════════════════════════╗\n\
-		║             ▒▒▒   ▒ ▒▒▒▒▒▒ ▒▒▒▒▒▒ ▒▒▒▒▒▒ ▒▒▒▒▒  ▒▒▒▒▒▒ ▒▒▒   ▒              ║\n\
-		║             ▒ ▒▒  ▒ ▒      ▒    ▒   ▒▒   ▒    ▒ ▒    ▒ ▒ ▒▒  ▒              ║\n\
-		║             ▒ ▒▒  ▒ ▒      ▒    ▒   ▒▒   ▒    ▒ ▒    ▒ ▒ ▒▒  ▒              ║\n\
-		║             ▒  ▒▒ ▒ ▒▒▒▒▒  ▒    ▒   ▒▒   ▒▒▒▒▒  ▒    ▒ ▒  ▒▒ ▒              ║\n\
-		║             ▒   ▒▒▒ ▒      ▒    ▒   ▒▒   ▒   ▒  ▒    ▒ ▒   ▒▒▒              ║\n\
-		║             ▒   ▒▒▒ ▒      ▒    ▒   ▒▒   ▒   ▒  ▒    ▒ ▒   ▒▒▒              ║\n\
-		║             ▒    ▒▒ ▒▒▒▒▒▒ ▒▒▒▒▒▒   ▒▒   ▒    ▒ ▒▒▒▒▒▒ ▒    ▒▒              ║\n\
-		╚═════════════════════════════════════════════════════════════════════════════╝\n";
-
-	static LICENCE_TEXT: &str = "\
+		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2023\n\
+		This program is free software under GPL v3 (or later)\n\
+		You are entitled to the Complete and Corresponding Source for this BIOS\n\
 		\n\
-		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2022\n\
-		This program is free software under GPL v3 (or later)\n";
+		BIOS: \n\
+		BMC : \n\
+		\n\
+		Press ESC to pause...";
 
 	// Create a new temporary console for some boot-up messages
 	let tc = vga::TextConsole::new();
 	tc.set_text_buffer(unsafe { &mut vga::GLYPH_ATTR_ARRAY });
+
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::BLUE,
+		false,
+	));
 
 	// A crude way to clear the screen
 	for _col in 0..vga::MAX_TEXT_ROWS {
 		writeln!(&tc, " ").unwrap();
 	}
 
+	// Draw the logo
 	tc.move_to(0, 0);
-
-	tc.change_attr(Attr::new(
-		TextForegroundColour::BRIGHT_YELLOW,
-		TextBackgroundColour::BLUE,
-		false,
-	));
-	write!(&tc, "{LOGO_TEXT}").unwrap();
+	for pair in LOGO_ANSI_BYTES.chunks(2) {
+		tc.change_attr(Attr(pair[0]));
+		tc.write_font_glyph(vga::Glyph(pair[1]));
+	}
 
 	tc.change_attr(Attr::new(
 		TextForegroundColour::WHITE,
+		TextBackgroundColour::BLUE,
+		false,
+	));
+
+	write!(&tc, "{}", COPYRIGHT_TEXT).unwrap();
+
+	// Draw the BIOS version
+	tc.change_attr(Attr::new(
+		TextForegroundColour::BRIGHT_YELLOW,
 		TextBackgroundColour::BLACK,
 		false,
 	));
-	write!(&tc, "{LICENCE_TEXT}").unwrap();
-
-	tc.change_attr(Attr::new(
-		TextForegroundColour::WHITE,
-		TextBackgroundColour::BLUE,
-		false,
-	));
-	writeln!(
+	tc.move_to(12, 6);
+	write!(
 		&tc,
-		"BIOS: v{} (git:{})",
+		"v{} (git:{})",
 		env!("CARGO_PKG_VERSION"),
 		VERSION.trim_matches('\0')
 	)
 	.unwrap();
 
+	// Draw the BMC version
+	tc.move_to(13, 6);
 	tc.change_attr(Attr::new(
 		TextForegroundColour::WHITE,
 		TextBackgroundColour::DARK_RED,
@@ -1357,56 +1362,58 @@ fn sign_on() {
 		let mut lock = HARDWARE.lock();
 		let hw = lock.as_mut().unwrap();
 		let ver = hw.bmc_read_firmware_version();
-		if let Err(e) = hw.play_startup_tune() {
-			writeln!(&tc, "BMC error: {e:?}").unwrap();
-		}
+		let _ = hw.play_startup_tune();
 		ver
 	};
-
 	match bmc_ver {
 		Ok(string_bytes) => match core::str::from_utf8(&string_bytes) {
 			Ok(s) => {
-				writeln!(&tc, "BMC : {}", s.trim_matches('\0')).unwrap();
+				write!(&tc, "{}", s.trim_matches('\0')).unwrap();
 			}
 			Err(_e) => {
-				writeln!(&tc, "BMC : Version Unknown").unwrap();
+				write!(&tc, "Version Unknown").unwrap();
 			}
 		},
 		Err(_e) => {
-			writeln!(&tc, "BMC : Error reading version").unwrap();
+			write!(&tc, "Error reading version").unwrap();
 		}
 	}
 
 	tc.change_attr(Attr::new(
 		TextForegroundColour::WHITE,
-		TextBackgroundColour::BLACK,
+		TextBackgroundColour::BLUE,
 		false,
 	));
-	writeln!(&tc).unwrap();
-	writeln!(&tc).unwrap();
 
-	// Do a colour test
-	for bg in 0..=7 {
-		for fg in 0..=15 {
-			if fg != bg {
-				tc.change_attr(
-					// Safety: The loop above ensures bg and fg stay within bounds (0..=7 and 0..=15)
-					unsafe {
-						Attr::new(
-							TextForegroundColour::new_unchecked(fg),
-							TextBackgroundColour::new_unchecked(bg),
-							false,
-						)
-					},
-				);
-				write!(&tc, "ABCabc123#!").unwrap();
+	// This is in 100ms units
+	let mut countdown = 15;
+	loop {
+		{
+			let mut lock = HARDWARE.lock();
+			let hw = lock.as_mut().unwrap();
+			hw.delay.delay_ms(100);
+		}
+
+		tc.move_to(15, 0);
+		match hid_get_event() {
+			CResult::Ok(COption::Some(HidEvent::KeyPress(KeyCode::Escape))) => {
+				write!(&tc, "Paused - Press SPACE to continue...").unwrap();
+				countdown = 0;
+			}
+			CResult::Ok(COption::Some(HidEvent::KeyPress(KeyCode::Spacebar))) => {
+				write!(&tc, "Unpaused                           ").unwrap();
+				countdown = 10;
+			}
+			_ => {
+				// ignore
 			}
 		}
+		if countdown == 1 {
+			break;
+		} else if countdown > 1 {
+			countdown -= 1;
+		}
 	}
-
-	let mut lock = HARDWARE.lock();
-	let hw = lock.as_mut().unwrap();
-	hw.delay.delay_ms(5000);
 }
 
 /// Reset the DMA Peripheral.
