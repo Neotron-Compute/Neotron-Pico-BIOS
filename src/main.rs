@@ -1170,24 +1170,40 @@ impl Hardware {
 	fn play_startup_tune(&mut self) -> Result<(), ()> {
 		// (delay (ms), command, data)
 		let seq: &[(u16, Command, u8)] = &[
+			// NB: Due to a BMC bug, this sets the high period
 			(0, Command::SpeakerPeriodLow, 137),
+			// NB: Due to a BMC bug, this sets the low period
 			(0, Command::SpeakerPeriodHigh, 0),
 			(0, Command::SpeakerDutyCycle, 127),
-			(0, Command::SpeakerDuration, 7),
-			(0, Command::SpeakerPeriodLow, 116),
+			// This triggers the beep to occur
 			(70, Command::SpeakerDuration, 7),
+			// NB: Due to a BMC bug, this sets the high period
+			(0, Command::SpeakerPeriodLow, 116),
+			// This triggers the beep to occur
+			(70, Command::SpeakerDuration, 7),
+			// NB: Due to a BMC bug, this sets the high period
 			(0, Command::SpeakerPeriodLow, 97),
+			// This triggers the beep to occur
 			(70, Command::SpeakerDuration, 7),
 		];
 
 		for (delay, reg, val) in seq {
+			if self
+				.bmc_do_request(
+					neotron_bmc_protocol::Request::new_short_write(
+						USE_ALT.get(),
+						(*reg).into(),
+						*val,
+					),
+					None,
+				)
+				.is_err()
+			{
+				defmt::error!("Failed to play note");
+			}
 			if *delay > 0 {
 				self.delay.delay_ms(*delay as u32);
 			}
-			self.bmc_do_request(
-				neotron_bmc_protocol::Request::new_short_write(USE_ALT.get(), (*reg).into(), *val),
-				None,
-			)?;
 		}
 		Ok(())
 	}
