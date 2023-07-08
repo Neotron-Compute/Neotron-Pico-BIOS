@@ -14,7 +14,7 @@
 // -----------------------------------------------------------------------------
 // Licence Statement
 // -----------------------------------------------------------------------------
-// Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2021
+// Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2023
 //
 // This program is free software: you can redistribute it and/or modify it under
 // the terms of the GNU General Public License as published by the Free Software
@@ -45,11 +45,13 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 // Sub-modules
 // -----------------------------------------------------------------------------
 
-pub mod mcp23s17;
-pub mod mutex;
-pub mod rtc;
-pub mod sdcard;
-pub mod vga;
+mod console;
+mod mcp23s17;
+mod multicore;
+mod mutex;
+mod rtc;
+mod sdcard;
+mod vga;
 
 // -----------------------------------------------------------------------------
 // Imports
@@ -305,7 +307,7 @@ static API_CALLS: common::Api = common::Api {
 	power_idle,
 };
 
-/// Seconds between the Neotron Epoch (2000-011-011T00:00:00) and the UNIX Epoch (1970-01-01T00:00:00).
+/// Seconds between the Neotron Epoch (2000-01-01T00:00:00) and the UNIX Epoch (1970-01-01T00:00:00).
 const SECONDS_BETWEEN_UNIX_AND_NEOTRON_EPOCH: i64 = 946684800;
 
 extern "C" {
@@ -1307,7 +1309,7 @@ fn sign_on() {
 		Press ESC to pause...";
 
 	// Create a new temporary console for some boot-up messages
-	let tc = vga::TextConsole::new();
+	let tc = console::TextConsole::new();
 	tc.set_text_buffer(unsafe { &mut vga::GLYPH_ATTR_ARRAY });
 
 	tc.change_attr(Attr::new(
@@ -1325,7 +1327,7 @@ fn sign_on() {
 	tc.move_to(0, 0);
 	for pair in LOGO_ANSI_BYTES.chunks(2) {
 		tc.change_attr(Attr(pair[0]));
-		tc.write_font_glyph(vga::Glyph(pair[1]));
+		tc.write_font_glyph(neotron_common_bios::video::Glyph(pair[1]));
 	}
 
 	tc.change_attr(Attr::new(
@@ -2199,7 +2201,7 @@ fn check_stack(start: *const usize, stack_len_bytes: usize, check_word: usize) {
 #[cortex_m_rt::exception]
 unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
 	// TODO: check we're actually in text mode
-	let tc = vga::TextConsole::new();
+	let tc = console::TextConsole::new();
 	tc.set_text_buffer(unsafe { &mut vga::GLYPH_ATTR_ARRAY });
 	for _col in 0..vga::MAX_TEXT_ROWS {
 		let _ = writeln!(&tc, "");
