@@ -192,30 +192,37 @@ pub const MAX_TEXT_ROWS: usize = MAX_NUM_LINES / 8;
 /// Used to signal when Core 1 has started
 static CORE1_START_FLAG: AtomicBool = AtomicBool::new(false);
 
-/// Stores our timing data which we DMA into the timing PIO State Machine
+/// Stores our timing data which we DMA into the timing PIO State Machine.
+///
+/// Default value must match [`RenderEngine::new`]
 static mut TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x480();
 
 /// Stores our current video mode, or the mode we change into on the next frame.
 ///
-/// We boot in 80x50 mode.
+/// We boot in 80x30 mode.
 static VIDEO_MODE: AtomicModeWrapper = AtomicModeWrapper::new(crate::common::video::Mode::new(
 	crate::common::video::Timing::T640x480,
 	crate::common::video::Format::Text8x16,
 ));
 
-/// Tracks which scan-line we are currently on (for timing purposes => it goes 0..`TIMING_BUFFER.back_porch_ends_at`)
+/// Tracks which scan-line will be shown next.
+///
+/// This is for timing purposes, therefore it goes from
+/// `0..TIMING_BUFFER.back_porch_ends_at`.
 ///
 /// Set by the PIO IRQ.
-static CURRENT_TIMING_LINE: AtomicU16 = AtomicU16::new(0);
+static NEXT_TIMING_LINE: AtomicU16 = AtomicU16::new(0);
 
-/// Tracks which scan-line we are currently on (for pixel purposes => it goes
-/// 1..NUM_LINES-1, and is 0 during the vertical blanking interval).
+/// Tracks which scan-line we are currently drawing.
+///
+/// This is for pixel drawing purposes, therefore it goes from
+/// `0..num_visible_lines`, or `u16::MAX` when nothing should be drawn right
+/// now.
+///
+/// We draw one ahead of the one being played out.
 ///
 /// Set by the PIO IRQ.
-static CURRENT_DISPLAY_LINE: AtomicU16 = AtomicU16::new(0);
-
-/// Set to `true` when DMA of previous line is complete and next line is scheduled.
-static DMA_READY: AtomicBool = AtomicBool::new(false);
+static CURRENT_DISPLAY_LINE: AtomicU16 = AtomicU16::new(u16::MAX);
 
 /// DMA channel for the timing FIFO
 const TIMING_DMA_CHAN: usize = 0;
@@ -956,6 +963,8 @@ pub fn init(
 			.build(sm1);
 	pixel_sm.set_pindirs((2..=13).map(|x| (x, rp_pico::hal::pio::PinDir::Output)));
 
+	pio.irq1().enable_sm_interrupt(1);
+
 	// Read from the timing buffer and write to the timing FIFO. We get an
 	// IRQ when the transfer is complete (i.e. when line has been fully
 	// loaded).
@@ -1007,10 +1016,6 @@ pub fn init(
 	dma.ch[PIXEL_DMA_CHAN]
 		.ch_trans_count
 		.write(|w| unsafe { w.bits(PIXEL_DATA_BUFFER_EVEN.pixels.len() as u32 + 1) });
-	dma.inte0.write(|w| unsafe {
-		w.inte0()
-			.bits((1 << PIXEL_DMA_CHAN) | (1 << TIMING_DMA_CHAN))
-	});
 
 	// Enable the DMA
 	dma.multi_chan_trigger
@@ -1198,7 +1203,7 @@ pub fn test_video_mode(mode: crate::common::video::Mode) -> bool {
 
 /// Get the current scan line.
 pub fn get_scan_line() -> u16 {
-	CURRENT_TIMING_LINE.load(Ordering::Relaxed)
+	CURRENT_DISPLAY_LINE.load(Ordering::Relaxed)
 }
 
 /// Get how many visible lines there currently are
@@ -1231,121 +1236,111 @@ unsafe extern "C" fn core1_main() -> u32 {
 	// Enable the interrupts (DMA has to first be set by Core 0)
 	cortex_m::interrupt::enable();
 	// We are on Core 1, so these interrupts will run on Core 1
-	crate::pac::NVIC::unpend(crate::pac::Interrupt::DMA_IRQ_0);
-	crate::pac::NVIC::unmask(crate::pac::Interrupt::DMA_IRQ_0);
+	crate::pac::NVIC::unpend(crate::pac::Interrupt::PIO0_IRQ_1);
+	crate::pac::NVIC::unmask(crate::pac::Interrupt::PIO0_IRQ_1);
 
 	loop {
 		// Wait for a free DMA buffer
-		while !DMA_READY.load(Ordering::Relaxed) {
+		let this_line = loop {
+			let attempt = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
+			if attempt != u16::MAX {
+				break attempt;
+			}
 			cortex_m::asm::wfe();
-		}
-		DMA_READY.store(false, Ordering::Relaxed);
-		let this_line = CURRENT_DISPLAY_LINE.load(Ordering::SeqCst);
+		};
+		CURRENT_DISPLAY_LINE.store(u16::MAX, Ordering::Relaxed);
 
 		if this_line == 0 {
 			video.frame_start();
-		} else {
-			unsafe {
-				// Turn on LED
-				gpio_out_set.write(1 << 25);
-			}
+		}
 
-			// This function currently consumes about 70% CPU (or rather, 90% CPU
-			// on each of visible lines, and 0% CPU on the other lines)
-			video.draw_next_line(this_line);
+		unsafe {
+			// Turn on LED
+			gpio_out_set.write(1 << 25);
+		}
 
-			unsafe {
-				// Turn off LED
-				gpio_out_clr.write(1 << 25);
-			}
+		// This function currently consumes about 70% CPU (or rather, 90% CPU
+		// on each of visible lines, and 0% CPU on the other lines)
+		video.draw_next_line(this_line);
+
+		unsafe {
+			// Turn off LED
+			gpio_out_clr.write(1 << 25);
 		}
 	}
 }
 
-/// Call this function whenever the DMA reports that it has completed a transfer.
+/// This function is called whenever the Timing PIO starts a scan-line.
 ///
-/// We use this as a prompt to either start a transfer or more Timing words,
-/// or a transfer or more pixel words.
+/// Timing wise, we should be at the start of the back-porch.
 ///
 /// # Safety
 ///
-/// Only call this from the DMA IRQ handler.
+/// Only call this from the PIO IRQ handler.
 #[link_section = ".data"]
 #[interrupt]
-unsafe fn DMA_IRQ_0() {
+unsafe fn PIO0_IRQ_1() {
+	let pio = unsafe { &*crate::pac::PIO0::ptr() };
 	let dma = unsafe { &*crate::pac::DMA::ptr() };
 
-	let status = dma.ints0.read().bits();
+	// Clear the interrupt
+	pio.irq.write_with_zero(|w| w.irq().bits(1 << 1));
 
-	// Check if this is a DMA interrupt for the sync DMA channel
-	let timing_dma_chan_irq = (status & (1 << TIMING_DMA_CHAN)) != 0;
+	// This is now the line we are currently playing
+	let current_timing_line = NEXT_TIMING_LINE.load(Ordering::Relaxed);
+	// This is the line we should cue up to play next
+	let next_timing_line = if current_timing_line == TIMING_BUFFER.back_porch_ends_at {
+		// Wrap around
+		0
+	} else {
+		// Keep going
+		current_timing_line + 1
+	};
 
-	// Check if this is a DMA interrupt for the line DMA channel
-	let pixel_dma_chan_irq = (status & (1 << PIXEL_DMA_CHAN)) != 0;
-
-	if timing_dma_chan_irq {
-		// clear timing_dma_chan bit in DMA interrupt bitfield
-		dma.ints0.write(|w| w.bits(1 << TIMING_DMA_CHAN));
-
-		let old_timing_line = CURRENT_TIMING_LINE.load(Ordering::Relaxed);
-		let next_timing_line = if old_timing_line == TIMING_BUFFER.back_porch_ends_at {
-			// Wrap around
-			0
-		} else {
-			// Keep going
-			old_timing_line + 1
-		};
-		CURRENT_TIMING_LINE.store(next_timing_line, Ordering::Relaxed);
-
-		let buffer = if next_timing_line <= TIMING_BUFFER.visible_lines_ends_at {
-			// Visible lines
-			&TIMING_BUFFER.visible_line
-		} else if next_timing_line <= TIMING_BUFFER.front_porch_end_at {
-			// VGA front porch before VGA sync pulse
-			&TIMING_BUFFER.vblank_porch_buffer
-		} else if next_timing_line <= TIMING_BUFFER.sync_pulse_ends_at {
-			// Sync pulse
-			&TIMING_BUFFER.vblank_sync_buffer
-		} else {
-			// VGA back porch following VGA sync pulse.
-			// Resync pixels with timing here.
-			CURRENT_DISPLAY_LINE.store(0, Ordering::Relaxed);
-			&TIMING_BUFFER.vblank_porch_buffer
-		};
-		dma.ch[TIMING_DMA_CHAN]
-			.ch_al3_read_addr_trig
-			.write(|w| w.bits(buffer as *const _ as usize as u32))
-	}
-
-	if pixel_dma_chan_irq {
-		dma.ints0.write(|w| w.bits(1 << PIXEL_DMA_CHAN));
-
-		// A pixel DMA transfer is now complete. This only fires on visible lines.
-
-		let mut next_display_line = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed) + 1;
-		if next_display_line > TIMING_BUFFER.visible_lines_ends_at {
-			next_display_line = 0;
-		};
-
-		// Set the DMA load address according to which line we are on. We use
-		// the 'trigger' alias to restart the DMA at the same time as we
-		// write the new read address. The DMA had stopped because the
-		// previous line was transferred completely.
-		if (next_display_line & 1) == 1 {
-			// Play the odd line
+	// Are we in the visible portion *right* now? If so, copy some pixels into
+	// the Pixel SM FIFO using DMA. Hopefully the main thread has them ready for
+	// us (though we're playing them, ready or not).
+	if current_timing_line <= TIMING_BUFFER.visible_lines_ends_at {
+		if (current_timing_line & 1) == 1 {
+			// Load the odd line into the Pixel SM FIFO for immediate playback
 			dma.ch[PIXEL_DMA_CHAN]
 				.ch_al3_read_addr_trig
 				.write(|w| w.bits(PIXEL_DATA_BUFFER_ODD.as_ptr()))
 		} else {
-			// Play the even line
+			// Load the even line into the Pixel SM FIFO for immediate playback
 			dma.ch[PIXEL_DMA_CHAN]
 				.ch_al3_read_addr_trig
 				.write(|w| w.bits(PIXEL_DATA_BUFFER_EVEN.as_ptr()))
 		}
-
-		CURRENT_DISPLAY_LINE.store(next_display_line, Ordering::Relaxed);
-		DMA_READY.store(true, Ordering::Relaxed);
+		// The data will start pouring into the FIFO, but the output is corked until
+		// the timing SM generates the second interrupt, just before the visible
+		// portion.
 	}
+
+	// Work out what sort of sync pulses we need on the *next* scan-line, and
+	// also tell the main thread what to draw ready for the *next* scan-line.
+	let buffer = if next_timing_line <= TIMING_BUFFER.visible_lines_ends_at {
+		// A visible line is *up next* so start drawing it *right now*.
+		CURRENT_DISPLAY_LINE.store(next_timing_line, Ordering::Relaxed);
+		&TIMING_BUFFER.visible_line
+	} else if next_timing_line <= TIMING_BUFFER.front_porch_end_at {
+		// VGA front porch before VGA sync pulse
+		&TIMING_BUFFER.vblank_porch_buffer
+	} else if next_timing_line <= TIMING_BUFFER.sync_pulse_ends_at {
+		// Sync pulse
+		&TIMING_BUFFER.vblank_sync_buffer
+	} else {
+		// VGA back porch following VGA sync pulse.
+		&TIMING_BUFFER.vblank_porch_buffer
+	};
+	// Start transferring the next block of timing info into the FIFO, ready for
+	// the next line. We will be back in this interrupt once it starts actually
+	// playing.
+	dma.ch[TIMING_DMA_CHAN]
+		.ch_al3_read_addr_trig
+		.write(|w| w.bits(buffer as *const _ as usize as u32));
+
+	NEXT_TIMING_LINE.store(next_timing_line, Ordering::SeqCst);
 }
 
 impl RenderEngine {
@@ -1355,12 +1350,12 @@ impl RenderEngine {
 			frame_count: 0,
 			// Should match the default value of TIMING_BUFFER and VIDEO_MODE
 			current_video_mode: crate::common::video::Mode::new(
-				crate::common::video::Timing::T640x400,
-				crate::common::video::Format::Text8x8,
+				crate::common::video::Timing::T640x480,
+				crate::common::video::Format::Text8x16,
 			),
 			// Should match the mode above
 			num_text_cols: 80,
-			num_text_rows: 50,
+			num_text_rows: 30,
 		}
 	}
 
@@ -1391,16 +1386,17 @@ impl RenderEngine {
 	/// Draw a line of pixels into the relevant pixel buffer (either
 	/// [`PIXEL_DATA_BUFFER_ODD`] or [`PIXEL_DATA_BUFFER_EVEN`]).
 	///
-	/// The `current_line_num` goes from `1..=NUM_LINES`.
+	/// The `current_line_num` goes from `0..NUM_LINES`.
 	#[link_section = ".data"]
 	pub fn draw_next_line(&mut self, current_line_num: u16) {
-		// new line - pick a buffer to draw into (not the one that is currently
-		// rendering)! This is the opposite of the logic in the IRQ.
+		// Pick a buffer to render into based on the line number we are drawing.
+		// It's safe to write to this buffer because it's the the other one that
+		// is currently being DMA'd out to the Pixel SM.
 		let scan_line_buffer = unsafe {
 			if (current_line_num & 1) == 0 {
-				&mut PIXEL_DATA_BUFFER_ODD
-			} else {
 				&mut PIXEL_DATA_BUFFER_EVEN
+			} else {
+				&mut PIXEL_DATA_BUFFER_ODD
 			}
 		};
 
@@ -1421,7 +1417,7 @@ impl RenderEngine {
 	/// [`PIXEL_DATA_BUFFER_ODD`] or [`PIXEL_DATA_BUFFER_EVEN`]) using the 8x16
 	/// font.
 	///
-	/// The `current_line_num` goes from `1..=NUM_LINES`.
+	/// The `current_line_num` goes from `0..NUM_LINES`.
 	#[link_section = ".data"]
 	pub fn draw_next_line_text<const GLYPH_HEIGHT: usize>(
 		&mut self,
@@ -1430,8 +1426,8 @@ impl RenderEngine {
 		current_line_num: u16,
 	) {
 		// Convert our position in scan-lines to a text row, and a line within each glyph on that row
-		let text_row = (current_line_num - 1) as usize / GLYPH_HEIGHT;
-		let font_row = (current_line_num - 1) as usize % GLYPH_HEIGHT;
+		let text_row = current_line_num as usize / GLYPH_HEIGHT;
+		let font_row = current_line_num as usize % GLYPH_HEIGHT;
 
 		if text_row < self.num_text_rows {
 			// Note (unsafe): We could stash the char array inside `self`
@@ -1820,14 +1816,14 @@ impl ScanlineTimingBuffer {
 					timings.0 * Self::CLOCKS_PER_PIXEL,
 					hsync.disabled(),
 					vsync.disabled(),
-					false,
+					Some(1),
 				),
 				// Sync pulse (as per the spec)
 				Self::make_timing(
 					timings.1 * Self::CLOCKS_PER_PIXEL,
 					hsync.enabled(),
 					vsync.disabled(),
-					false,
+					None,
 				),
 				// Back porch. Adjusted by a few clocks to account for interrupt +
 				// PIO SM start latency.
@@ -1835,7 +1831,7 @@ impl ScanlineTimingBuffer {
 					(timings.2 * Self::CLOCKS_PER_PIXEL) - 5,
 					hsync.disabled(),
 					vsync.disabled(),
-					false,
+					None,
 				),
 				// Visible portion. It also triggers the IRQ to start pixels
 				// moving. Adjusted to compensate for changes made to previous
@@ -1844,7 +1840,7 @@ impl ScanlineTimingBuffer {
 					(timings.3 * Self::CLOCKS_PER_PIXEL) + 5,
 					hsync.disabled(),
 					vsync.disabled(),
-					true,
+					Some(0),
 				),
 			],
 		}
@@ -1863,28 +1859,28 @@ impl ScanlineTimingBuffer {
 					timings.0 * Self::CLOCKS_PER_PIXEL,
 					hsync.disabled(),
 					vsync.disabled(),
-					false,
+					Some(1),
 				),
 				// Sync pulse (as per the spec)
 				Self::make_timing(
 					timings.1 * Self::CLOCKS_PER_PIXEL,
 					hsync.enabled(),
 					vsync.disabled(),
-					false,
+					None,
 				),
 				// Back porch.
 				Self::make_timing(
 					timings.2 * Self::CLOCKS_PER_PIXEL,
 					hsync.disabled(),
 					vsync.disabled(),
-					false,
+					None,
 				),
 				// Visible portion.
 				Self::make_timing(
 					timings.3 * Self::CLOCKS_PER_PIXEL,
 					hsync.disabled(),
 					vsync.disabled(),
-					false,
+					None,
 				),
 			],
 		}
@@ -1903,28 +1899,28 @@ impl ScanlineTimingBuffer {
 					timings.0 * Self::CLOCKS_PER_PIXEL,
 					hsync.disabled(),
 					vsync.enabled(),
-					false,
+					Some(1),
 				),
 				// Sync pulse (as per the spec)
 				Self::make_timing(
 					timings.1 * Self::CLOCKS_PER_PIXEL,
 					hsync.enabled(),
 					vsync.enabled(),
-					false,
+					None,
 				),
 				// Back porch.
 				Self::make_timing(
 					timings.2 * Self::CLOCKS_PER_PIXEL,
 					hsync.disabled(),
 					vsync.enabled(),
-					false,
+					None,
 				),
 				// Visible portion.
 				Self::make_timing(
 					timings.3 * Self::CLOCKS_PER_PIXEL,
 					hsync.disabled(),
 					vsync.enabled(),
-					false,
+					None,
 				),
 			],
 		}
@@ -1938,13 +1934,13 @@ impl ScanlineTimingBuffer {
 	/// * `raise_irq` - true the timing statemachine should raise an IRQ at the start of this period
 	///
 	/// Returns a 32-bit value you can post to the Timing FIFO.
-	const fn make_timing(period: u32, hsync: bool, vsync: bool, raise_irq: bool) -> u32 {
-		let command = if raise_irq {
+	const fn make_timing(period: u32, hsync: bool, vsync: bool, raise_irq: Option<u8>) -> u32 {
+		let command = if let Some(irq_index) = raise_irq {
 			// This command sets IRQ 0
 			pio::InstructionOperands::IRQ {
 				clear: false,
 				wait: false,
-				index: 0,
+				index: irq_index,
 				relative: false,
 			}
 			.encode()
