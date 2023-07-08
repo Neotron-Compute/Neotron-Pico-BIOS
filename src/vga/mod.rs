@@ -211,18 +211,12 @@ static VIDEO_MODE: AtomicModeWrapper = AtomicModeWrapper::new(crate::common::vid
 /// `0..TIMING_BUFFER.back_porch_ends_at`.
 ///
 /// Set by the PIO IRQ.
-static NEXT_TIMING_LINE: AtomicU16 = AtomicU16::new(0);
+static NEXT_SCAN_LINE: AtomicU16 = AtomicU16::new(0);
 
-/// Tracks which scan-line we are currently drawing.
-///
-/// This is for pixel drawing purposes, therefore it goes from
-/// `0..num_visible_lines`, or `u16::MAX` when nothing should be drawn right
-/// now.
-///
-/// We draw one ahead of the one being played out.
+/// Indicates that we should draw the current scan-line given by [`NEXT_SCAN_LINE`].
 ///
 /// Set by the PIO IRQ.
-static CURRENT_DISPLAY_LINE: AtomicU16 = AtomicU16::new(u16::MAX);
+static DRAW_THIS_LINE: AtomicBool = AtomicBool::new(false);
 
 /// DMA channel for the timing FIFO
 const TIMING_DMA_CHAN: usize = 0;
@@ -1203,7 +1197,7 @@ pub fn test_video_mode(mode: crate::common::video::Mode) -> bool {
 
 /// Get the current scan line.
 pub fn get_scan_line() -> u16 {
-	CURRENT_DISPLAY_LINE.load(Ordering::Relaxed)
+	NEXT_SCAN_LINE.load(Ordering::Relaxed)
 }
 
 /// Get how many visible lines there currently are
@@ -1240,15 +1234,14 @@ unsafe extern "C" fn core1_main() -> u32 {
 	crate::pac::NVIC::unmask(crate::pac::Interrupt::PIO0_IRQ_1);
 
 	loop {
-		// Wait for a free DMA buffer
-		let this_line = loop {
-			let attempt = CURRENT_DISPLAY_LINE.load(Ordering::Relaxed);
-			if attempt != u16::MAX {
-				break attempt;
-			}
+		// Wait for a free DMA buffer. Can't do a compare-and-swap on ARMv6-M :/
+		while !DRAW_THIS_LINE.load(Ordering::Acquire) {
 			cortex_m::asm::wfe();
-		};
-		CURRENT_DISPLAY_LINE.store(u16::MAX, Ordering::Relaxed);
+		}
+		DRAW_THIS_LINE.store(false, Ordering::Relaxed);
+
+		// The one we draw *now* is the one that is *shown* next
+		let this_line = NEXT_SCAN_LINE.load(Ordering::Relaxed);
 
 		if this_line == 0 {
 			video.frame_start();
@@ -1287,7 +1280,7 @@ unsafe fn PIO0_IRQ_1() {
 	pio.irq.write_with_zero(|w| w.irq().bits(1 << 1));
 
 	// This is now the line we are currently playing
-	let current_timing_line = NEXT_TIMING_LINE.load(Ordering::Relaxed);
+	let current_timing_line = NEXT_SCAN_LINE.load(Ordering::Relaxed);
 	// This is the line we should cue up to play next
 	let next_timing_line = if current_timing_line == TIMING_BUFFER.back_porch_ends_at {
 		// Wrap around
@@ -1317,11 +1310,14 @@ unsafe fn PIO0_IRQ_1() {
 		// portion.
 	}
 
+	// Set this before we set the `DRAW_THIS_LINE` flag.
+	NEXT_SCAN_LINE.store(next_timing_line, Ordering::Relaxed);
+
 	// Work out what sort of sync pulses we need on the *next* scan-line, and
 	// also tell the main thread what to draw ready for the *next* scan-line.
 	let buffer = if next_timing_line <= TIMING_BUFFER.visible_lines_ends_at {
 		// A visible line is *up next* so start drawing it *right now*.
-		CURRENT_DISPLAY_LINE.store(next_timing_line, Ordering::Relaxed);
+		DRAW_THIS_LINE.store(true, Ordering::Release);
 		&TIMING_BUFFER.visible_line
 	} else if next_timing_line <= TIMING_BUFFER.front_porch_end_at {
 		// VGA front porch before VGA sync pulse
@@ -1339,8 +1335,6 @@ unsafe fn PIO0_IRQ_1() {
 	dma.ch[TIMING_DMA_CHAN]
 		.ch_al3_read_addr_trig
 		.write(|w| w.bits(buffer as *const _ as usize as u32));
-
-	NEXT_TIMING_LINE.store(next_timing_line, Ordering::SeqCst);
 }
 
 impl RenderEngine {
