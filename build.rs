@@ -14,6 +14,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use neotron_common_bios::video::{Attr, TextBackgroundColour, TextForegroundColour};
+use vte::Parser;
 
 fn main() {
 	// Put `memory.x` in our output directory and ensure it's
@@ -59,201 +60,158 @@ fn main() {
 	std::fs::write(out.join("version.txt"), output).expect("writing version file");
 
 	let logo = std::fs::read_to_string("src/logo.ansi").expect("Can't open logo file");
-	let mut output = Vec::new();
-	let mut iter = logo.chars();
-	let mut attr = Attr::new(
-		TextForegroundColour::WHITE,
+	let mut statemachine = Parser::new();
+
+	let mut performer = NeotronOutput::new();
+
+	for byte in logo.bytes() {
+		statemachine.advance(&mut performer, byte);
+	}
+
+	std::fs::write(out.join("logo.bytes"), performer.output).expect("writing logo file");
+}
+
+struct NeotronOutput {
+	output: Vec<u8>,
+	attr: Attr,
+	bright: bool,
+}
+
+impl NeotronOutput {
+	const DEFAULT_ATTR: Attr = Attr::new(
+		TextForegroundColour::GREY,
 		TextBackgroundColour::BLACK,
 		false,
 	);
-	let mut width = 0;
-	loop {
-		let Some(ch) = iter.next() else {
-			break;
-		};
-		if ch == '\u{001b}' {
-			// ANSI escape
-			if iter.next() == Some('[') {
-				// CSI
-				let mut bright = false;
-				let mut accumulator = 0;
-				loop {
-					let next_ch = iter.next();
-					match (next_ch, accumulator) {
-						// Bright
-						(Some(';' | 'm'), 1) => {
-							bright = true;
-							accumulator = 0;
-						}
-						// Background
-						(Some(';' | 'm'), 40) => {
-							attr.set_bg(TextBackgroundColour::BLACK);
-							accumulator = 0;
-						}
-						(Some(';' | 'm'), 41) => {
-							attr.set_bg(TextBackgroundColour::DARK_RED);
-							accumulator = 0;
-						}
-						(Some(';' | 'm'), 42) => {
-							attr.set_bg(TextBackgroundColour::DARK_GREEN);
-							accumulator = 0;
-						}
-						(Some(';' | 'm'), 43) => {
-							attr.set_bg(TextBackgroundColour::YELLOW);
-							accumulator = 0;
-						}
-						(Some(';' | 'm'), 44) => {
-							attr.set_bg(TextBackgroundColour::BLUE);
-							accumulator = 0;
-						}
-						(Some(';' | 'm'), 45) => {
-							attr.set_bg(TextBackgroundColour::DARK_MAGENTA);
-							accumulator = 0;
-						}
-						(Some(';' | 'm'), 46) => {
-							attr.set_bg(TextBackgroundColour::DARK_CYAN);
-							accumulator = 0;
-						}
-						(Some(';' | 'm'), 49) => {
-							// Default
-							attr.set_bg(TextBackgroundColour::BLACK);
-							accumulator = 0;
-						}
-						// Foreground
-						(Some(';' | 'm'), 30) => {
-							attr.set_fg(TextForegroundColour::BLACK);
-							accumulator = 0;
-						}
-						(Some(';' | 'm'), 31) => {
-							attr.set_fg(TextForegroundColour::DARK_RED);
-							accumulator = 0;
-						}
-						(Some(';' | 'm'), 32) => {
-							attr.set_fg(TextForegroundColour::DARK_GREEN);
-							accumulator = 0;
-						}
-						(Some(';' | 'm'), 33) => {
-							attr.set_fg(TextForegroundColour::YELLOW);
-							accumulator = 0;
-						}
-						(Some(';' | 'm'), 34) => {
-							attr.set_fg(TextForegroundColour::BLUE);
-							accumulator = 0;
-						}
-						(Some(';' | 'm'), 35) => {
-							attr.set_fg(TextForegroundColour::DARK_MAGENTA);
-							accumulator = 0;
-						}
-						(Some(';' | 'm'), 36) => {
-							attr.set_fg(TextForegroundColour::DARK_CYAN);
-							accumulator = 0;
-						}
-						(Some(';' | 'm'), 37) => {
-							attr.set_fg(TextForegroundColour::GREY);
-							accumulator = 0;
-						}
 
-						(Some(';' | 'm'), 0) => {
-							attr.set_fg(TextForegroundColour::GREY);
-							attr.set_bg(TextBackgroundColour::BLACK);
-							bright = false;
-							accumulator = 0;
-						}
+	fn new() -> NeotronOutput {
+		NeotronOutput {
+			output: Vec::new(),
+			attr: Self::DEFAULT_ATTR,
+			bright: false,
+		}
+	}
+}
 
-						(Some('0'), _) => {
-							accumulator *= 10;
-						}
-						(Some('1'), _) => {
-							accumulator *= 10;
-							accumulator += 1;
-						}
-						(Some('2'), _) => {
-							accumulator *= 10;
-							accumulator += 2;
-						}
-						(Some('3'), _) => {
-							accumulator *= 10;
-							accumulator += 3;
-						}
-						(Some('4'), _) => {
-							accumulator *= 10;
-							accumulator += 4;
-						}
-						(Some('5'), _) => {
-							accumulator *= 10;
-							accumulator += 5;
-						}
-						(Some('6'), _) => {
-							accumulator *= 10;
-							accumulator += 6;
-						}
-						(Some('7'), _) => {
-							accumulator *= 10;
-							accumulator += 7;
-						}
-						(Some('8'), _) => {
-							accumulator *= 10;
-							accumulator += 8;
-						}
-						(Some('9'), _) => {
-							accumulator *= 10;
-							accumulator += 9;
-						}
-						(code, acc) => {
-							panic!(
-								"Invalid ANSI sequence detected: code={:?}, acc={:?}",
-								code, acc
-							);
-						}
+impl vte::Perform for NeotronOutput {
+	/// Draw a character to the screen and update states.
+	fn print(&mut self, c: char) {
+		self.output.push(self.attr.as_u8());
+		self.output.push(map_char_to_glyph(c));
+	}
+
+	/// A final character has arrived for a CSI sequence
+	///
+	/// The `ignore` flag indicates that either more than two intermediates arrived
+	/// or the number of parameters exceeded the maximum supported length,
+	/// and subsequent characters were ignored.
+	fn csi_dispatch(
+		&mut self,
+		params: &vte::Params,
+		_intermediates: &[u8],
+		ignore: bool,
+		action: char,
+	) {
+		if !ignore && action == 'm' {
+			// Colour change
+			for param in params.iter() {
+				if param.len() != 1 {
+					panic!("Only want single value params, got {:?}", param);
+				}
+				match param[0] {
+					1 => {
+						self.bright = true;
 					}
-					if next_ch == Some('m') {
-						// sequence is finished
-						if bright {
-							match attr.fg() {
-								TextForegroundColour::DARK_RED => {
-									attr.set_fg(TextForegroundColour::BRIGHT_RED);
-								}
-								TextForegroundColour::DARK_GREEN => {
-									attr.set_fg(TextForegroundColour::BRIGHT_GREEN);
-								}
-								TextForegroundColour::YELLOW => {
-									attr.set_fg(TextForegroundColour::BRIGHT_YELLOW);
-								}
-								TextForegroundColour::BLUE => {
-									attr.set_fg(TextForegroundColour::BRIGHT_BLUE);
-								}
-								TextForegroundColour::DARK_MAGENTA => {
-									attr.set_fg(TextForegroundColour::BRIGHT_MAGENTA);
-								}
-								TextForegroundColour::DARK_CYAN => {
-									attr.set_fg(TextForegroundColour::BRIGHT_CYAN);
-								}
-								TextForegroundColour::GREY => {
-									attr.set_fg(TextForegroundColour::WHITE);
-								}
-								_ => {
-									// Do nothing
-								}
-							}
-						}
-						break;
+					// Background
+					40 => {
+						self.attr.set_bg(TextBackgroundColour::BLACK);
+					}
+					41 => {
+						self.attr.set_bg(TextBackgroundColour::DARK_RED);
+					}
+					42 => {
+						self.attr.set_bg(TextBackgroundColour::DARK_GREEN);
+					}
+					43 => {
+						self.attr.set_bg(TextBackgroundColour::YELLOW);
+					}
+					44 => {
+						self.attr.set_bg(TextBackgroundColour::BLUE);
+					}
+					45 => {
+						self.attr.set_bg(TextBackgroundColour::DARK_MAGENTA);
+					}
+					46 => {
+						self.attr.set_bg(TextBackgroundColour::DARK_CYAN);
+					}
+					49 => {
+						// Default
+						self.attr.set_bg(TextBackgroundColour::BLACK);
+					}
+					// Foreground
+					30 => {
+						self.attr.set_fg(TextForegroundColour::BLACK);
+					}
+					31 => {
+						self.attr.set_fg(TextForegroundColour::DARK_RED);
+					}
+					32 => {
+						self.attr.set_fg(TextForegroundColour::DARK_GREEN);
+					}
+					33 => {
+						self.attr.set_fg(TextForegroundColour::YELLOW);
+					}
+					34 => {
+						self.attr.set_fg(TextForegroundColour::BLUE);
+					}
+					35 => {
+						self.attr.set_fg(TextForegroundColour::DARK_MAGENTA);
+					}
+					36 => {
+						self.attr.set_fg(TextForegroundColour::DARK_CYAN);
+					}
+					37 => {
+						self.attr.set_fg(TextForegroundColour::GREY);
+					}
+					0 => {
+						self.attr = Self::DEFAULT_ATTR;
+						self.bright = false;
+					}
+					p => {
+						panic!("Unsupported ANSI CSI parameter {}", p);
 					}
 				}
 			}
-		} else if ch == '\n' {
-			if width < 80 {
-				// Only emit a new-line if we are not at the end of the line already
-				output.push(attr.as_u8());
-				output.push(b'\n');
+			if self.bright {
+				match self.attr.fg() {
+					TextForegroundColour::DARK_RED => {
+						self.attr.set_fg(TextForegroundColour::BRIGHT_RED);
+					}
+					TextForegroundColour::DARK_GREEN => {
+						self.attr.set_fg(TextForegroundColour::BRIGHT_GREEN);
+					}
+					TextForegroundColour::YELLOW => {
+						self.attr.set_fg(TextForegroundColour::BRIGHT_YELLOW);
+					}
+					TextForegroundColour::BLUE => {
+						self.attr.set_fg(TextForegroundColour::BRIGHT_BLUE);
+					}
+					TextForegroundColour::DARK_MAGENTA => {
+						self.attr.set_fg(TextForegroundColour::BRIGHT_MAGENTA);
+					}
+					TextForegroundColour::DARK_CYAN => {
+						self.attr.set_fg(TextForegroundColour::BRIGHT_CYAN);
+					}
+					TextForegroundColour::GREY => {
+						self.attr.set_fg(TextForegroundColour::WHITE);
+					}
+					_ => {
+						// Do nothing
+					}
+				}
 			}
-			width = 0;
-		} else {
-			width += 1;
-			output.push(attr.as_u8());
-			output.push(map_char_to_glyph(ch));
-		};
+		}
 	}
-	std::fs::write(out.join("logo.bytes"), output).expect("writing logo file");
 }
 
 /// Convert a Unicode Scalar Value to a font glyph.
@@ -394,6 +352,6 @@ fn map_char_to_glyph(input: char) -> u8 {
 		'\u{2592}' => 177, // ▒
 		'\u{2593}' => 178, // ▓
 		'\u{25A0}' => 254, // ■
-		_ => b'?',
+		c => panic!("Unsupported UTF-8 character U+{:04}", c as u32),
 	}
 }

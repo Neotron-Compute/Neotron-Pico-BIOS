@@ -61,6 +61,7 @@ embedded-sdmmc = { version = "0.5", default-features = false, features = [
 
 [build-dependencies]
 neotron-common-bios = "0.8.0"
+vte = "0.11"
 
 [[bin]]
 name = "neotron-pico-bios"
