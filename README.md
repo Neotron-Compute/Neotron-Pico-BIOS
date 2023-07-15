@@ -116,7 +116,7 @@ See [CHANGELOG.md](./CHANGELOG.md)
 
 ## Licence
 
-    Neotron-Pico-BIOS Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2021
+    Neotron-Pico-BIOS Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2023
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by

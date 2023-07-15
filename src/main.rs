@@ -14,7 +14,7 @@
 // -----------------------------------------------------------------------------
 // Licence Statement
 // -----------------------------------------------------------------------------
-// Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2021
+// Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2023
 //
 // This program is free software: you can redistribute it and/or modify it under
 // the terms of the GNU General Public License as published by the Free Software
@@ -45,11 +45,13 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 // Sub-modules
 // -----------------------------------------------------------------------------
 
-pub mod mcp23s17;
-pub mod mutex;
-pub mod rtc;
-pub mod sdcard;
-pub mod vga;
+mod console;
+mod mcp23s17;
+mod multicore;
+mod mutex;
+mod rtc;
+mod sdcard;
+mod vga;
 
 // -----------------------------------------------------------------------------
 // Imports
@@ -73,7 +75,7 @@ use embedded_hal::{
 };
 use fugit::RateExtU32;
 use panic_probe as _;
-use pc_keyboard::ScancodeSet;
+use pc_keyboard::{KeyCode, ScancodeSet};
 use rp_pico::{
 	self,
 	hal::{
@@ -86,14 +88,15 @@ use rp_pico::{
 };
 
 // Other Neotron Crates
-use common::{
-	video::{Attr, TextBackgroundColour, TextForegroundColour},
-	MemoryRegion,
-};
 use mutex::NeoMutex;
 use neotron_bmc_commands::Command;
 use neotron_bmc_protocol::Receivable;
-use neotron_common_bios as common;
+use neotron_common_bios::{
+	self as common,
+	hid::HidEvent,
+	video::{Attr, TextBackgroundColour, TextForegroundColour},
+	ApiResult, Error as CError, FfiBuffer, FfiByteSlice, FfiOption, FfiString, MemoryRegion,
+};
 
 // -----------------------------------------------------------------------------
 // Types
@@ -147,7 +150,7 @@ struct Hardware {
 	/// Our keyboard decoder
 	keyboard: pc_keyboard::ScancodeSet2,
 	/// Our queue of HID events
-	event_queue: heapless::Deque<neotron_common_bios::hid::HidEvent, 16>,
+	event_queue: heapless::Deque<common::hid::HidEvent, 16>,
 	/// A place to send/receive bytes to/from the BMC
 	bmc_buffer: [u8; 64],
 	/// Our last interrupt read from the IO chip. It's inverted, so a bit set
@@ -249,6 +252,9 @@ pub static OS_IMAGE: [u8; include_bytes!("thumbv6m-none-eabi-flash1002-libneotro
 /// is currently active (low).
 static INTERRUPT_PENDING: AtomicBool = AtomicBool::new(false);
 
+/// Stack for Core 1
+static mut CORE1_STACK: [usize; 256] = [0; 256];
+
 /// The table of API calls we provide the OS
 static API_CALLS: common::Api = common::Api {
 	api_version_get,
@@ -301,7 +307,7 @@ static API_CALLS: common::Api = common::Api {
 	power_idle,
 };
 
-/// Seconds between the Neotron Epoch (2000-011-011T00:00:00) and the UNIX Epoch (1970-01-01T00:00:00).
+/// Seconds between the Neotron Epoch (2000-01-01T00:00:00) and the UNIX Epoch (1970-01-01T00:00:00).
 const SECONDS_BETWEEN_UNIX_AND_NEOTRON_EPOCH: i64 = 946684800;
 
 extern "C" {
@@ -310,6 +316,12 @@ extern "C" {
 	static mut _ram_os_start: u32;
 	static mut _ram_os_len: u32;
 }
+
+/// What we paint Core 0's stack with
+const CORE0_STACK_PAINT_WORD: usize = 0xBBBB_BBBB;
+
+/// What we paint Core 1's stack with
+const CORE1_STACK_PAINT_WORD: usize = 0xCCCC_CCCC;
 
 // -----------------------------------------------------------------------------
 // Functions
@@ -332,6 +344,30 @@ fn main() -> ! {
 
 	// Reset the spinlocks.
 	pp.SIO.spinlock[31].reset();
+
+	{
+		// Paint the stack
+		extern "C" {
+			static mut __sheap: usize;
+			static mut _stack_start: usize;
+		}
+		let stack_len = unsafe {
+			(&_stack_start as *const usize as usize) - (&__sheap as *const usize as usize)
+		};
+		// But not the top 64 words, because we're using the stack right now!
+		let stack = unsafe {
+			core::slice::from_raw_parts_mut(
+				&mut __sheap as *mut usize,
+				(stack_len / core::mem::size_of::<usize>()) - 256,
+			)
+		};
+		info!("Painting {:?}", stack.as_ptr_range());
+		for b in stack.iter_mut() {
+			*b = CORE0_STACK_PAINT_WORD;
+		}
+	}
+
+	check_stacks();
 
 	// Needed by the clock setup
 	let mut watchdog = hal::watchdog::Watchdog::new(pp.WATCHDOG);
@@ -477,7 +513,7 @@ fn main() -> ! {
 	}
 
 	// Empty the keyboard FIFO
-	while let common::Result::Ok(common::Option::Some(_x)) = hid_get_event() {
+	while let ApiResult::Ok(FfiOption::Some(_x)) = hid_get_event() {
 		// Spin
 	}
 
@@ -1140,21 +1176,33 @@ impl Hardware {
 			(0, Command::SpeakerPeriodLow, 137),
 			(0, Command::SpeakerPeriodHigh, 0),
 			(0, Command::SpeakerDutyCycle, 127),
-			(0, Command::SpeakerDuration, 7),
+			// This triggers the beep to occur
+			(70, Command::SpeakerDuration, 7),
 			(0, Command::SpeakerPeriodLow, 116),
+			// This triggers the beep to occur
 			(70, Command::SpeakerDuration, 7),
 			(0, Command::SpeakerPeriodLow, 97),
+			// This triggers the beep to occur
 			(70, Command::SpeakerDuration, 7),
 		];
 
 		for (delay, reg, val) in seq {
+			if self
+				.bmc_do_request(
+					neotron_bmc_protocol::Request::new_short_write(
+						USE_ALT.get(),
+						(*reg).into(),
+						*val,
+					),
+					None,
+				)
+				.is_err()
+			{
+				defmt::error!("Failed to play note");
+			}
 			if *delay > 0 {
 				self.delay.delay_ms(*delay as u32);
 			}
-			self.bmc_do_request(
-				neotron_bmc_protocol::Request::new_short_write(USE_ALT.get(), (*reg).into(), *val),
-				None,
-			)?;
 		}
 		Ok(())
 	}
@@ -1244,61 +1292,65 @@ impl Hardware {
 }
 
 fn sign_on() {
-	static LOGO_TEXT: &str = "\
+	static LOGO_ANSI_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/logo.bytes"));
+	static COPYRIGHT_TEXT: &str = "\
 		\n\
-		╔═════════════════════════════════════════════════════════════════════════════╗\n\
-		║             ▒▒▒   ▒ ▒▒▒▒▒▒ ▒▒▒▒▒▒ ▒▒▒▒▒▒ ▒▒▒▒▒  ▒▒▒▒▒▒ ▒▒▒   ▒              ║\n\
-		║             ▒ ▒▒  ▒ ▒      ▒    ▒   ▒▒   ▒    ▒ ▒    ▒ ▒ ▒▒  ▒              ║\n\
-		║             ▒ ▒▒  ▒ ▒      ▒    ▒   ▒▒   ▒    ▒ ▒    ▒ ▒ ▒▒  ▒              ║\n\
-		║             ▒  ▒▒ ▒ ▒▒▒▒▒  ▒    ▒   ▒▒   ▒▒▒▒▒  ▒    ▒ ▒  ▒▒ ▒              ║\n\
-		║             ▒   ▒▒▒ ▒      ▒    ▒   ▒▒   ▒   ▒  ▒    ▒ ▒   ▒▒▒              ║\n\
-		║             ▒   ▒▒▒ ▒      ▒    ▒   ▒▒   ▒   ▒  ▒    ▒ ▒   ▒▒▒              ║\n\
-		║             ▒    ▒▒ ▒▒▒▒▒▒ ▒▒▒▒▒▒   ▒▒   ▒    ▒ ▒▒▒▒▒▒ ▒    ▒▒              ║\n\
-		╚═════════════════════════════════════════════════════════════════════════════╝\n";
-
-	static LICENCE_TEXT: &str = "\
+		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2023\n\
+		This program is free software under GPL v3 (or later)\n\
+		You are entitled to the Complete and Corresponding Source for this BIOS\n\
 		\n\
-		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2022\n\
-		This program is free software under GPL v3 (or later)\n";
+		BIOS: \n\
+		BMC : \n\
+		\n\
+		Press ESC to pause...";
 
 	// Create a new temporary console for some boot-up messages
-	let tc = vga::TextConsole::new();
+	let tc = console::TextConsole::new();
 	tc.set_text_buffer(unsafe { &mut vga::GLYPH_ATTR_ARRAY });
+
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::BLUE,
+		false,
+	));
 
 	// A crude way to clear the screen
 	for _col in 0..vga::MAX_TEXT_ROWS {
 		writeln!(&tc, " ").unwrap();
 	}
 
+	// Draw the logo
 	tc.move_to(0, 0);
-
-	tc.change_attr(Attr::new(
-		TextForegroundColour::BRIGHT_YELLOW,
-		TextBackgroundColour::BLUE,
-		false,
-	));
-	write!(&tc, "{LOGO_TEXT}").unwrap();
+	for pair in LOGO_ANSI_BYTES.chunks(2) {
+		tc.change_attr(Attr(pair[0]));
+		tc.write_font_glyph(neotron_common_bios::video::Glyph(pair[1]));
+	}
 
 	tc.change_attr(Attr::new(
 		TextForegroundColour::WHITE,
+		TextBackgroundColour::BLUE,
+		false,
+	));
+
+	write!(&tc, "{}", COPYRIGHT_TEXT).unwrap();
+
+	// Draw the BIOS version
+	tc.change_attr(Attr::new(
+		TextForegroundColour::BRIGHT_YELLOW,
 		TextBackgroundColour::BLACK,
 		false,
 	));
-	write!(&tc, "{LICENCE_TEXT}").unwrap();
-
-	tc.change_attr(Attr::new(
-		TextForegroundColour::WHITE,
-		TextBackgroundColour::BLUE,
-		false,
-	));
-	writeln!(
+	tc.move_to(12, 6);
+	write!(
 		&tc,
-		"BIOS: v{} (git:{})",
+		"v{} (git:{})",
 		env!("CARGO_PKG_VERSION"),
 		VERSION.trim_matches('\0')
 	)
 	.unwrap();
 
+	// Draw the BMC version
+	tc.move_to(13, 6);
 	tc.change_attr(Attr::new(
 		TextForegroundColour::WHITE,
 		TextBackgroundColour::DARK_RED,
@@ -1308,56 +1360,58 @@ fn sign_on() {
 		let mut lock = HARDWARE.lock();
 		let hw = lock.as_mut().unwrap();
 		let ver = hw.bmc_read_firmware_version();
-		if let Err(e) = hw.play_startup_tune() {
-			writeln!(&tc, "BMC error: {e:?}").unwrap();
-		}
+		let _ = hw.play_startup_tune();
 		ver
 	};
-
 	match bmc_ver {
 		Ok(string_bytes) => match core::str::from_utf8(&string_bytes) {
 			Ok(s) => {
-				writeln!(&tc, "BMC : {}", s.trim_matches('\0')).unwrap();
+				write!(&tc, "{}", s.trim_matches('\0')).unwrap();
 			}
 			Err(_e) => {
-				writeln!(&tc, "BMC : Version Unknown").unwrap();
+				write!(&tc, "Version Unknown").unwrap();
 			}
 		},
 		Err(_e) => {
-			writeln!(&tc, "BMC : Error reading version").unwrap();
+			write!(&tc, "Error reading version").unwrap();
 		}
 	}
 
 	tc.change_attr(Attr::new(
 		TextForegroundColour::WHITE,
-		TextBackgroundColour::BLACK,
+		TextBackgroundColour::BLUE,
 		false,
 	));
-	writeln!(&tc).unwrap();
-	writeln!(&tc).unwrap();
 
-	// Do a colour test
-	for bg in 0..=7 {
-		for fg in 0..=15 {
-			if fg != bg {
-				tc.change_attr(
-					// Safety: The loop above ensures bg and fg stay within bounds (0..=7 and 0..=15)
-					unsafe {
-						Attr::new(
-							TextForegroundColour::new_unchecked(fg),
-							TextBackgroundColour::new_unchecked(bg),
-							false,
-						)
-					},
-				);
-				write!(&tc, "ABCabc123#!").unwrap();
+	// This is in 100ms units
+	let mut countdown = 15;
+	loop {
+		{
+			let mut lock = HARDWARE.lock();
+			let hw = lock.as_mut().unwrap();
+			hw.delay.delay_ms(100);
+		}
+
+		tc.move_to(15, 0);
+		match hid_get_event() {
+			ApiResult::Ok(FfiOption::Some(HidEvent::KeyPress(KeyCode::Escape))) => {
+				write!(&tc, "Paused - Press SPACE to continue...").unwrap();
+				countdown = 0;
+			}
+			ApiResult::Ok(FfiOption::Some(HidEvent::KeyPress(KeyCode::Spacebar))) => {
+				write!(&tc, "Unpaused                           ").unwrap();
+				countdown = 10;
+			}
+			_ => {
+				// ignore
 			}
 		}
+		if countdown == 1 {
+			break;
+		} else if countdown > 1 {
+			countdown -= 1;
+		}
 	}
-
-	let mut lock = HARDWARE.lock();
-	let hw = lock.as_mut().unwrap();
-	hw.delay.delay_ms(5000);
 }
 
 /// Reset the DMA Peripheral.
@@ -1381,8 +1435,8 @@ pub extern "C" fn api_version_get() -> common::Version {
 /// also pass the length (excluding the null) to make it easy to construct
 /// a Rust string. It is unspecified as to whether the string is located
 /// in Flash ROM or RAM (but it's likely to be Flash ROM).
-pub extern "C" fn bios_version_get() -> common::ApiString<'static> {
-	common::ApiString::new(VERSION)
+pub extern "C" fn bios_version_get() -> FfiString<'static> {
+	FfiString::new(VERSION)
 }
 
 /// Get information about the Serial ports in the system.
@@ -1397,17 +1451,14 @@ pub extern "C" fn bios_version_get() -> common::ApiString<'static> {
 /// that is an Operating System level design feature. These APIs just
 /// reflect the raw hardware, in a similar manner to the registers exposed
 /// by a memory-mapped UART peripheral.
-pub extern "C" fn serial_get_info(_device: u8) -> common::Option<common::serial::DeviceInfo> {
-	common::Option::None
+pub extern "C" fn serial_get_info(_device: u8) -> FfiOption<common::serial::DeviceInfo> {
+	FfiOption::None
 }
 
 /// Set the options for a given serial device. An error is returned if the
 /// options are invalid for that serial device.
-pub extern "C" fn serial_configure(
-	_device: u8,
-	_config: common::serial::Config,
-) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+pub extern "C" fn serial_configure(_device: u8, _config: common::serial::Config) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Write bytes to a serial port. There is no sense of 'opening' or
@@ -1417,10 +1468,10 @@ pub extern "C" fn serial_configure(
 /// only the first `n` bytes were.
 pub extern "C" fn serial_write(
 	_device: u8,
-	_data: common::ApiByteSlice,
-	_timeout: common::Option<common::Timeout>,
-) -> common::Result<usize> {
-	common::Result::Err(common::Error::Unimplemented)
+	_data: FfiByteSlice,
+	_timeout: FfiOption<common::Timeout>,
+) -> ApiResult<usize> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Read bytes from a serial port. There is no sense of 'opening' or
@@ -1430,10 +1481,10 @@ pub extern "C" fn serial_write(
 ///  first `n` bytes were filled in.
 pub extern "C" fn serial_read(
 	_device: u8,
-	_data: common::ApiBuffer,
-	_timeout: common::Option<common::Timeout>,
-) -> common::Result<usize> {
-	common::Result::Err(common::Error::Unimplemented)
+	_data: FfiBuffer,
+	_timeout: FfiOption<common::Timeout>,
+) -> ApiResult<usize> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Get the current wall time.
@@ -1524,15 +1575,15 @@ pub extern "C" fn time_clock_set(time: common::Time) {
 /// Configuration data is, to the BIOS, just a block of bytes of a given
 /// length. How it stores them is up to the BIOS - it could be EEPROM, or
 /// battery-backed SRAM.
-pub extern "C" fn configuration_get(_buffer: common::ApiBuffer) -> common::Result<usize> {
-	common::Result::Err(common::Error::Unimplemented)
+pub extern "C" fn configuration_get(_buffer: FfiBuffer) -> ApiResult<usize> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Set the configuration data block.
 ///
 /// See `configuration_get`.
-pub extern "C" fn configuration_set(_buffer: common::ApiByteSlice) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+pub extern "C" fn configuration_set(_buffer: FfiByteSlice) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Does this Neotron BIOS support this video mode?
@@ -1549,11 +1600,11 @@ pub extern "C" fn video_is_valid_mode(mode: common::video::Mode) -> bool {
 /// `video_get_framebuffer` will return `null`. You must then supply a
 /// pointer to a block of size `Mode::frame_size_bytes()` to
 /// `video_set_framebuffer` before any video will appear.
-pub extern "C" fn video_set_mode(mode: common::video::Mode) -> common::Result<()> {
+pub extern "C" fn video_set_mode(mode: common::video::Mode) -> ApiResult<()> {
 	if vga::set_video_mode(mode) {
-		common::Result::Ok(())
+		ApiResult::Ok(())
 	} else {
-		common::Result::Err(common::Error::UnsupportedConfiguration(0))
+		ApiResult::Err(CError::UnsupportedConfiguration(0))
 	}
 }
 
@@ -1594,8 +1645,8 @@ pub extern "C" fn video_get_framebuffer() -> *mut u8 {
 ///
 /// The pointer must point to enough video memory to handle the current video
 /// mode, and any future video mode you set.
-pub unsafe extern "C" fn video_set_framebuffer(_buffer: *const u8) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+pub unsafe extern "C" fn video_set_framebuffer(_buffer: *const u8) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Find out whether the given video mode needs more VRAM than we currently have.
@@ -1623,17 +1674,17 @@ pub extern "C" fn video_mode_needs_vram(_mode: common::video::Mode) -> bool {
 /// (other than Region 0), so faster memory should be listed first.
 ///
 /// If the region number given is invalid, the function returns `(null, 0)`.
-pub extern "C" fn memory_get_region(region: u8) -> common::Option<common::MemoryRegion> {
+pub extern "C" fn memory_get_region(region: u8) -> FfiOption<common::MemoryRegion> {
 	match region {
 		0 => {
 			// Application Region
-			common::Option::Some(MemoryRegion {
+			FfiOption::Some(MemoryRegion {
 				start: unsafe { &mut _ram_os_start as *mut u32 } as *mut u8,
 				length: unsafe { &mut _ram_os_len as *const u32 } as usize,
 				kind: common::MemoryKind::Ram,
 			})
 		}
-		_ => common::Option::None,
+		_ => FfiOption::None,
 	}
 }
 
@@ -1662,7 +1713,7 @@ pub extern "C" fn memory_get_region(region: u8) -> common::Option<common::Memory
 /// a single KeyCode enum. Plus, Scan Code Set 2 is a pain, because most of the
 /// 'extended' keys they added on the IBM PC/AT actually generate two bytes, not
 /// one. It's much nicer when your Scan Codes always have one byte per key.
-pub extern "C" fn hid_get_event() -> common::Result<common::Option<common::hid::HidEvent>> {
+pub extern "C" fn hid_get_event() -> ApiResult<FfiOption<common::hid::HidEvent>> {
 	let mut buffer = [0u8; 8];
 
 	let mut lock = HARDWARE.lock();
@@ -1670,7 +1721,7 @@ pub extern "C" fn hid_get_event() -> common::Result<common::Option<common::hid::
 
 	if let Some(ev) = hw.event_queue.pop_front() {
 		// Queued data available, so short-cut
-		return common::Result::Ok(common::Option::Some(ev));
+		return ApiResult::Ok(FfiOption::Some(ev));
 	}
 
 	loop {
@@ -1704,9 +1755,9 @@ pub extern "C" fn hid_get_event() -> common::Result<common::Option<common::hid::
 
 	if let Some(ev) = hw.event_queue.pop_front() {
 		// Queued data available, so short-cut
-		common::Result::Ok(common::Option::Some(ev))
+		ApiResult::Ok(FfiOption::Some(ev))
 	} else {
-		common::Result::Ok(common::Option::None)
+		ApiResult::Ok(FfiOption::None)
 	}
 }
 
@@ -1737,8 +1788,8 @@ fn convert_hid_event(
 }
 
 /// Control the keyboard LEDs.
-pub extern "C" fn hid_set_leds(_leds: common::hid::KeyboardLeds) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+pub extern "C" fn hid_set_leds(_leds: common::hid::KeyboardLeds) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Wait for the next occurence of the specified video scan-line.
@@ -1778,11 +1829,11 @@ pub extern "C" fn video_wait_for_line(line: u16) {
 }
 
 /// Read the RGB palette.
-extern "C" fn video_get_palette(index: u8) -> common::Option<common::video::RGBColour> {
+extern "C" fn video_get_palette(index: u8) -> FfiOption<common::video::RGBColour> {
 	let raw_u16 = vga::VIDEO_PALETTE[index as usize].load(Ordering::Relaxed);
 	let our_colour = vga::RGBColour(raw_u16);
 	// Convert from our 12-bit colour type to the public 24-bit colour type
-	common::Option::Some(our_colour.into())
+	FfiOption::Some(our_colour.into())
 }
 
 /// Update the RGB palette.
@@ -1805,80 +1856,80 @@ unsafe extern "C" fn video_set_whole_palette(
 	}
 }
 
-extern "C" fn i2c_bus_get_info(_i2c_bus: u8) -> common::Option<common::i2c::BusInfo> {
-	common::Option::None
+extern "C" fn i2c_bus_get_info(_i2c_bus: u8) -> FfiOption<common::i2c::BusInfo> {
+	FfiOption::None
 }
 
 extern "C" fn i2c_write_read(
 	_i2c_bus: u8,
 	_i2c_device_address: u8,
-	_tx: common::ApiByteSlice,
-	_tx2: common::ApiByteSlice,
-	_rx: common::ApiBuffer,
-) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+	_tx: FfiByteSlice,
+	_tx2: FfiByteSlice,
+	_rx: FfiBuffer,
+) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 extern "C" fn audio_mixer_channel_get_info(
 	_audio_mixer_id: u8,
-) -> common::Option<common::audio::MixerChannelInfo> {
-	common::Option::None
+) -> FfiOption<common::audio::MixerChannelInfo> {
+	FfiOption::None
 }
 
-extern "C" fn audio_mixer_channel_set_level(_audio_mixer_id: u8, _level: u8) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+extern "C" fn audio_mixer_channel_set_level(_audio_mixer_id: u8, _level: u8) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn audio_output_set_config(_config: common::audio::Config) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+extern "C" fn audio_output_set_config(_config: common::audio::Config) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn audio_output_get_config() -> common::Result<common::audio::Config> {
-	common::Result::Err(common::Error::Unimplemented)
+extern "C" fn audio_output_get_config() -> ApiResult<common::audio::Config> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-unsafe extern "C" fn audio_output_data(_samples: common::ApiByteSlice) -> common::Result<usize> {
-	common::Result::Err(common::Error::Unimplemented)
+unsafe extern "C" fn audio_output_data(_samples: FfiByteSlice) -> ApiResult<usize> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn audio_output_get_space() -> common::Result<usize> {
-	common::Result::Ok(0)
+extern "C" fn audio_output_get_space() -> ApiResult<usize> {
+	ApiResult::Ok(0)
 }
 
-extern "C" fn audio_input_set_config(_config: common::audio::Config) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+extern "C" fn audio_input_set_config(_config: common::audio::Config) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn audio_input_get_config() -> common::Result<common::audio::Config> {
-	common::Result::Err(common::Error::Unimplemented)
+extern "C" fn audio_input_get_config() -> ApiResult<common::audio::Config> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn audio_input_data(_samples: common::ApiBuffer) -> common::Result<usize> {
-	common::Result::Err(common::Error::Unimplemented)
+extern "C" fn audio_input_data(_samples: FfiBuffer) -> ApiResult<usize> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn audio_input_get_count() -> common::Result<usize> {
-	common::Result::Ok(0)
+extern "C" fn audio_input_get_count() -> ApiResult<usize> {
+	ApiResult::Ok(0)
 }
 
-extern "C" fn bus_select(_periperal_id: common::Option<u8>) {
+extern "C" fn bus_select(_periperal_id: FfiOption<u8>) {
 	// Do nothing
 }
 
-extern "C" fn bus_get_info(_periperal_id: u8) -> common::Option<common::bus::PeripheralInfo> {
-	common::Option::None
+extern "C" fn bus_get_info(_periperal_id: u8) -> FfiOption<common::bus::PeripheralInfo> {
+	FfiOption::None
 }
 
 extern "C" fn bus_write_read(
-	_tx: common::ApiByteSlice,
-	_tx2: common::ApiByteSlice,
-	_rx: common::ApiBuffer,
-) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+	_tx: FfiByteSlice,
+	_tx2: FfiByteSlice,
+	_rx: FfiBuffer,
+) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn bus_exchange(_buffer: common::ApiBuffer) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+extern "C" fn bus_exchange(_buffer: FfiBuffer) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 extern "C" fn bus_interrupt_status() -> u32 {
@@ -1896,7 +1947,8 @@ extern "C" fn bus_interrupt_status() -> u32 {
 /// The set of devices is not expected to change at run-time - removal of
 /// media is indicated with a boolean field in the
 /// `block_dev::DeviceInfo` structure.
-pub extern "C" fn block_dev_get_info(device: u8) -> common::Option<common::block_dev::DeviceInfo> {
+pub extern "C" fn block_dev_get_info(device: u8) -> FfiOption<common::block_dev::DeviceInfo> {
+	check_stacks();
 	match device {
 		0 => {
 			let mut lock = HARDWARE.lock();
@@ -1908,8 +1960,8 @@ pub extern "C" fn block_dev_get_info(device: u8) -> common::Option<common::block
 
 			match &hw.card_state {
 				CardState::Unplugged | CardState::Uninitialised | CardState::Errored => {
-					common::Option::Some(common::block_dev::DeviceInfo {
-						name: common::types::ApiString::new("SdCard0"),
+					FfiOption::Some(common::block_dev::DeviceInfo {
+						name: FfiString::new("SdCard0"),
 						device_type: common::block_dev::DeviceType::SecureDigitalCard,
 						block_size: 0,
 						num_blocks: 0,
@@ -1919,8 +1971,8 @@ pub extern "C" fn block_dev_get_info(device: u8) -> common::Option<common::block
 						read_only: false,
 					})
 				}
-				CardState::Online(info) => common::Option::Some(common::block_dev::DeviceInfo {
-					name: common::types::ApiString::new("SdCard0"),
+				CardState::Online(info) => FfiOption::Some(common::block_dev::DeviceInfo {
+					name: FfiString::new("SdCard0"),
 					device_type: common::block_dev::DeviceType::SecureDigitalCard,
 					block_size: 512,
 					num_blocks: info.num_blocks,
@@ -1933,7 +1985,7 @@ pub extern "C" fn block_dev_get_info(device: u8) -> common::Option<common::block
 		}
 		_ => {
 			// Nothing else supported by this BIOS
-			common::Option::None
+			FfiOption::None
 		}
 	}
 }
@@ -1950,9 +2002,9 @@ pub extern "C" fn block_write(
 	_device: u8,
 	_block: common::block_dev::BlockIdx,
 	_num_blocks: u8,
-	_data: common::ApiByteSlice,
-) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+	_data: FfiByteSlice,
+) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Read one or more sectors to a block device.
@@ -1967,11 +2019,12 @@ pub extern "C" fn block_read(
 	device: u8,
 	block: common::block_dev::BlockIdx,
 	num_blocks: u8,
-	data: common::ApiBuffer,
-) -> common::Result<()> {
+	data: FfiBuffer,
+) -> ApiResult<()> {
 	use embedded_sdmmc::BlockDevice;
+	check_stacks();
 	if data.data_len != usize::from(num_blocks) * 512 {
-		return common::Result::Err(common::Error::UnsupportedConfiguration(0));
+		return ApiResult::Err(CError::UnsupportedConfiguration(0));
 	}
 	let mut lock = HARDWARE.lock();
 	let hw = lock.as_mut().unwrap();
@@ -1982,7 +2035,7 @@ pub extern "C" fn block_read(
 				hw.sdcard_poll();
 				let info = match &hw.card_state {
 					CardState::Online(info) => info.clone(),
-					_ => return common::Result::Err(common::Error::NoMediaFound),
+					_ => return ApiResult::Err(CError::NoMediaFound),
 				};
 				// Run card at full speed
 				let spi = sdcard::FakeSpi(hw, false);
@@ -2001,16 +2054,16 @@ pub extern "C" fn block_read(
 				};
 				let start_block_idx = embedded_sdmmc::BlockIdx(block.0 as u32);
 				match sdcard.read(blocks, start_block_idx, "bios") {
-					Ok(_) => common::Result::Ok(()),
+					Ok(_) => ApiResult::Ok(()),
 					Err(e) => {
 						defmt::warn!("SD error reading {}: {:?}", block.0, e);
-						common::Result::Err(common::Error::DeviceError(0))
+						ApiResult::Err(CError::DeviceError(0))
 					}
 				}
 			}
 			_ => {
 				// Nothing else supported by this BIOS
-				common::Result::Err(common::Error::InvalidDevice)
+				ApiResult::Err(CError::InvalidDevice)
 			}
 		}
 	};
@@ -2032,13 +2085,13 @@ pub extern "C" fn block_verify(
 	_device: u8,
 	_block: common::block_dev::BlockIdx,
 	_num_blocks: u8,
-	_data: common::ApiByteSlice,
-) -> common::Result<()> {
-	common::Result::Err(common::Error::Unimplemented)
+	_data: FfiByteSlice,
+) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn block_dev_eject(_dev_id: u8) -> common::Result<()> {
-	common::Result::Ok(())
+extern "C" fn block_dev_eject(_dev_id: u8) -> ApiResult<()> {
+	ApiResult::Ok(())
 }
 
 /// Sleep the CPU until the next interrupt.
@@ -2085,6 +2138,88 @@ fn IO_IRQ_BANK0() {
 		pin.clear_interrupt(hal::gpio::Interrupt::EdgeHigh);
 	}
 	cortex_m::asm::sev();
+}
+
+/// Measure how much stack space remains unused.
+#[cfg(feature = "check-stack")]
+fn check_stacks() {
+	extern "C" {
+		static mut __sheap: usize;
+		static mut _stack_start: usize;
+	}
+	let stack_len =
+		unsafe { (&_stack_start as *const usize as usize) - (&__sheap as *const usize as usize) };
+	check_stack(
+		unsafe { &__sheap as *const usize },
+		stack_len,
+		CORE0_STACK_PAINT_WORD,
+	);
+	check_stack(
+		unsafe { CORE1_STACK.as_ptr() },
+		unsafe { CORE1_STACK.len() * core::mem::size_of::<usize>() },
+		CORE1_STACK_PAINT_WORD,
+	);
+}
+
+/// Dummy stack checker that does nothing
+#[cfg(not(feature = "check-stack"))]
+fn check_stacks() {}
+
+/// Check an individual stack to see how much has been used
+#[cfg(feature = "check-stack")]
+fn check_stack(start: *const usize, stack_len_bytes: usize, check_word: usize) {
+	let mut p: *const usize = start;
+	let mut free_bytes = 0;
+	loop {
+		let value = unsafe { p.read_volatile() };
+		if value != check_word {
+			break;
+		}
+		// Safety: We must hit a used stack value somewhere!
+		p = unsafe { p.offset(1) };
+		free_bytes += core::mem::size_of::<usize>();
+	}
+	defmt::debug!(
+		"Stack free at 0x{:08x}: {} bytes used of {} bytes",
+		start,
+		stack_len_bytes - free_bytes,
+		stack_len_bytes
+	);
+}
+
+/// Called when the CPU Hard Faults.
+///
+/// This probably means something panicked, and the Rust code was compiled to
+/// abort-on-panic. Or someone jumped to a bad address.
+///
+/// Hopefully the debug output we print will of be some use. Think of it as our
+/// Blue Screen of Death, or Guru Meditation Error.
+#[cortex_m_rt::exception]
+unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
+	// TODO: check we're actually in text mode
+	let tc = console::TextConsole::new();
+	tc.set_text_buffer(unsafe { &mut vga::GLYPH_ATTR_ARRAY });
+	for _col in 0..vga::MAX_TEXT_ROWS {
+		let _ = writeln!(&tc, "");
+	}
+	tc.move_to(0, 0);
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::DARK_RED,
+		false,
+	));
+	let _ = writeln!(&tc, "+------------------------------+");
+	let _ = writeln!(&tc, "| System Hardfault             |");
+	let _ = writeln!(&tc, "| pc: 0x{:08x}               |", frame.pc());
+	let _ = writeln!(&tc, "| lr: 0x{:08x}               |", frame.lr());
+	let _ = writeln!(&tc, "| r0: 0x{:08x}               |", frame.r0());
+	let _ = writeln!(&tc, "| r1: 0x{:08x}               |", frame.r1());
+	let _ = writeln!(&tc, "| r2: 0x{:08x}               |", frame.r2());
+	let _ = writeln!(&tc, "| r3: 0x{:08x}               |", frame.r3());
+	let _ = writeln!(&tc, "+------------------------------+");
+	loop {
+		cortex_m::asm::wfi();
+	}
 }
 
 // -----------------------------------------------------------------------------

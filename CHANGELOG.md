@@ -1,8 +1,22 @@
 # Changelog
 
-## Unreleased Changes ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/develop) | [Changes](https://github.com/neotron-compute/neotron-pico-bios/compare/v0.5.0...develop))
+In this repository, changes are made in branches which are merged into **develop**. Those changes should also update this file under "Unreleased Changes". Periodically a release branch is made which updates the crate version in `Cargo.toml` and is merged into **main**. The **main** branch thus only has commits corresponding to releases of the firmware. Once the release has been merged into **main** it is tagged, and the changes then merged back into **develop**.
+
+## Unreleased Changes ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/develop) | [Changes](https://github.com/neotron-compute/neotron-pico-bios/compare/v0.5.2...develop))
 
 * None
+
+## v0.5.2 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.5.2) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.5.2))
+
+* Update to neotron-common-bios 0.9.0
+* Use published neotron-bmc-protocol and neotron-bmc-commands crates
+* Clarify how BMC speaker works
+* Add ANSI art boot-up logo
+* Speed up boot, and add "ESC to Pause"
+* Print message on hardfault
+* Update to OS 0.4.0
+* Re-arrange BIOS memory and stack for Core 1
+* Re-wrote the video render system to be more robust
 
 ## v0.5.1 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.5.1) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.5.1))
 

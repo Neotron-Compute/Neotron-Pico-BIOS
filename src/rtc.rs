@@ -2,19 +2,51 @@
 //!
 //! We could have one of two RTCs fitted. This module abstracts that away.
 
+// -----------------------------------------------------------------------------
+// Licence Statement
+// -----------------------------------------------------------------------------
+// Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2023
+//
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free Software
+// Foundation, either version 3 of the License, or (at your option) any later
+// version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+// details.
+//
+// You should have received a copy of the GNU General Public License along with
+// this program.  If not, see <https://www.gnu.org/licenses/>.
+// -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// Sub-modules
+// -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// Imports
+// -----------------------------------------------------------------------------
+
 pub use ds1307::{DateTimeAccess, NaiveDateTime};
 
-pub enum Rtc {
-	Ds1307,
-	Mcp7940n,
-	None,
-}
+// -----------------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------------
 
 /// The ways this module can fail
 pub enum Error<E> {
 	BusError(E),
 	DriverBug,
 	NoRtcFound,
+}
+
+/// The kinds of RTC we support.
+pub enum Rtc {
+	Ds1307,
+	Mcp7940n,
+	None,
 }
 
 impl Rtc {
@@ -120,3 +152,15 @@ impl Rtc {
 		}
 	}
 }
+
+// -----------------------------------------------------------------------------
+// Static and Const Data
+// -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// Functions
+// -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// End of file
+// -----------------------------------------------------------------------------
