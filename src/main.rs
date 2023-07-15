@@ -95,7 +95,7 @@ use neotron_common_bios::{
 	self as common,
 	hid::HidEvent,
 	video::{Attr, TextBackgroundColour, TextForegroundColour},
-	Error as CError, MemoryRegion, Option as COption, Result as CResult,
+	ApiResult, Error as CError, FfiBuffer, FfiByteSlice, FfiOption, FfiString, MemoryRegion,
 };
 
 // -----------------------------------------------------------------------------
@@ -513,7 +513,7 @@ fn main() -> ! {
 	}
 
 	// Empty the keyboard FIFO
-	while let CResult::Ok(COption::Some(_x)) = hid_get_event() {
+	while let ApiResult::Ok(FfiOption::Some(_x)) = hid_get_event() {
 		// Spin
 	}
 
@@ -1394,11 +1394,11 @@ fn sign_on() {
 
 		tc.move_to(15, 0);
 		match hid_get_event() {
-			CResult::Ok(COption::Some(HidEvent::KeyPress(KeyCode::Escape))) => {
+			ApiResult::Ok(FfiOption::Some(HidEvent::KeyPress(KeyCode::Escape))) => {
 				write!(&tc, "Paused - Press SPACE to continue...").unwrap();
 				countdown = 0;
 			}
-			CResult::Ok(COption::Some(HidEvent::KeyPress(KeyCode::Spacebar))) => {
+			ApiResult::Ok(FfiOption::Some(HidEvent::KeyPress(KeyCode::Spacebar))) => {
 				write!(&tc, "Unpaused                           ").unwrap();
 				countdown = 10;
 			}
@@ -1435,8 +1435,8 @@ pub extern "C" fn api_version_get() -> common::Version {
 /// also pass the length (excluding the null) to make it easy to construct
 /// a Rust string. It is unspecified as to whether the string is located
 /// in Flash ROM or RAM (but it's likely to be Flash ROM).
-pub extern "C" fn bios_version_get() -> common::ApiString<'static> {
-	common::ApiString::new(VERSION)
+pub extern "C" fn bios_version_get() -> FfiString<'static> {
+	FfiString::new(VERSION)
 }
 
 /// Get information about the Serial ports in the system.
@@ -1451,14 +1451,14 @@ pub extern "C" fn bios_version_get() -> common::ApiString<'static> {
 /// that is an Operating System level design feature. These APIs just
 /// reflect the raw hardware, in a similar manner to the registers exposed
 /// by a memory-mapped UART peripheral.
-pub extern "C" fn serial_get_info(_device: u8) -> COption<common::serial::DeviceInfo> {
-	COption::None
+pub extern "C" fn serial_get_info(_device: u8) -> FfiOption<common::serial::DeviceInfo> {
+	FfiOption::None
 }
 
 /// Set the options for a given serial device. An error is returned if the
 /// options are invalid for that serial device.
-pub extern "C" fn serial_configure(_device: u8, _config: common::serial::Config) -> CResult<()> {
-	CResult::Err(CError::Unimplemented)
+pub extern "C" fn serial_configure(_device: u8, _config: common::serial::Config) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Write bytes to a serial port. There is no sense of 'opening' or
@@ -1468,10 +1468,10 @@ pub extern "C" fn serial_configure(_device: u8, _config: common::serial::Config)
 /// only the first `n` bytes were.
 pub extern "C" fn serial_write(
 	_device: u8,
-	_data: common::ApiByteSlice,
-	_timeout: COption<common::Timeout>,
-) -> CResult<usize> {
-	CResult::Err(CError::Unimplemented)
+	_data: FfiByteSlice,
+	_timeout: FfiOption<common::Timeout>,
+) -> ApiResult<usize> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Read bytes from a serial port. There is no sense of 'opening' or
@@ -1481,10 +1481,10 @@ pub extern "C" fn serial_write(
 ///  first `n` bytes were filled in.
 pub extern "C" fn serial_read(
 	_device: u8,
-	_data: common::ApiBuffer,
-	_timeout: COption<common::Timeout>,
-) -> CResult<usize> {
-	CResult::Err(CError::Unimplemented)
+	_data: FfiBuffer,
+	_timeout: FfiOption<common::Timeout>,
+) -> ApiResult<usize> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Get the current wall time.
@@ -1575,15 +1575,15 @@ pub extern "C" fn time_clock_set(time: common::Time) {
 /// Configuration data is, to the BIOS, just a block of bytes of a given
 /// length. How it stores them is up to the BIOS - it could be EEPROM, or
 /// battery-backed SRAM.
-pub extern "C" fn configuration_get(_buffer: common::ApiBuffer) -> CResult<usize> {
-	CResult::Err(CError::Unimplemented)
+pub extern "C" fn configuration_get(_buffer: FfiBuffer) -> ApiResult<usize> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Set the configuration data block.
 ///
 /// See `configuration_get`.
-pub extern "C" fn configuration_set(_buffer: common::ApiByteSlice) -> CResult<()> {
-	CResult::Err(CError::Unimplemented)
+pub extern "C" fn configuration_set(_buffer: FfiByteSlice) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Does this Neotron BIOS support this video mode?
@@ -1600,11 +1600,11 @@ pub extern "C" fn video_is_valid_mode(mode: common::video::Mode) -> bool {
 /// `video_get_framebuffer` will return `null`. You must then supply a
 /// pointer to a block of size `Mode::frame_size_bytes()` to
 /// `video_set_framebuffer` before any video will appear.
-pub extern "C" fn video_set_mode(mode: common::video::Mode) -> CResult<()> {
+pub extern "C" fn video_set_mode(mode: common::video::Mode) -> ApiResult<()> {
 	if vga::set_video_mode(mode) {
-		CResult::Ok(())
+		ApiResult::Ok(())
 	} else {
-		CResult::Err(CError::UnsupportedConfiguration(0))
+		ApiResult::Err(CError::UnsupportedConfiguration(0))
 	}
 }
 
@@ -1645,8 +1645,8 @@ pub extern "C" fn video_get_framebuffer() -> *mut u8 {
 ///
 /// The pointer must point to enough video memory to handle the current video
 /// mode, and any future video mode you set.
-pub unsafe extern "C" fn video_set_framebuffer(_buffer: *const u8) -> CResult<()> {
-	CResult::Err(CError::Unimplemented)
+pub unsafe extern "C" fn video_set_framebuffer(_buffer: *const u8) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Find out whether the given video mode needs more VRAM than we currently have.
@@ -1674,17 +1674,17 @@ pub extern "C" fn video_mode_needs_vram(_mode: common::video::Mode) -> bool {
 /// (other than Region 0), so faster memory should be listed first.
 ///
 /// If the region number given is invalid, the function returns `(null, 0)`.
-pub extern "C" fn memory_get_region(region: u8) -> COption<common::MemoryRegion> {
+pub extern "C" fn memory_get_region(region: u8) -> FfiOption<common::MemoryRegion> {
 	match region {
 		0 => {
 			// Application Region
-			COption::Some(MemoryRegion {
+			FfiOption::Some(MemoryRegion {
 				start: unsafe { &mut _ram_os_start as *mut u32 } as *mut u8,
 				length: unsafe { &mut _ram_os_len as *const u32 } as usize,
 				kind: common::MemoryKind::Ram,
 			})
 		}
-		_ => COption::None,
+		_ => FfiOption::None,
 	}
 }
 
@@ -1713,7 +1713,7 @@ pub extern "C" fn memory_get_region(region: u8) -> COption<common::MemoryRegion>
 /// a single KeyCode enum. Plus, Scan Code Set 2 is a pain, because most of the
 /// 'extended' keys they added on the IBM PC/AT actually generate two bytes, not
 /// one. It's much nicer when your Scan Codes always have one byte per key.
-pub extern "C" fn hid_get_event() -> CResult<COption<common::hid::HidEvent>> {
+pub extern "C" fn hid_get_event() -> ApiResult<FfiOption<common::hid::HidEvent>> {
 	let mut buffer = [0u8; 8];
 
 	let mut lock = HARDWARE.lock();
@@ -1721,7 +1721,7 @@ pub extern "C" fn hid_get_event() -> CResult<COption<common::hid::HidEvent>> {
 
 	if let Some(ev) = hw.event_queue.pop_front() {
 		// Queued data available, so short-cut
-		return CResult::Ok(COption::Some(ev));
+		return ApiResult::Ok(FfiOption::Some(ev));
 	}
 
 	loop {
@@ -1755,9 +1755,9 @@ pub extern "C" fn hid_get_event() -> CResult<COption<common::hid::HidEvent>> {
 
 	if let Some(ev) = hw.event_queue.pop_front() {
 		// Queued data available, so short-cut
-		CResult::Ok(COption::Some(ev))
+		ApiResult::Ok(FfiOption::Some(ev))
 	} else {
-		CResult::Ok(COption::None)
+		ApiResult::Ok(FfiOption::None)
 	}
 }
 
@@ -1788,8 +1788,8 @@ fn convert_hid_event(
 }
 
 /// Control the keyboard LEDs.
-pub extern "C" fn hid_set_leds(_leds: common::hid::KeyboardLeds) -> CResult<()> {
-	CResult::Err(CError::Unimplemented)
+pub extern "C" fn hid_set_leds(_leds: common::hid::KeyboardLeds) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Wait for the next occurence of the specified video scan-line.
@@ -1829,11 +1829,11 @@ pub extern "C" fn video_wait_for_line(line: u16) {
 }
 
 /// Read the RGB palette.
-extern "C" fn video_get_palette(index: u8) -> COption<common::video::RGBColour> {
+extern "C" fn video_get_palette(index: u8) -> FfiOption<common::video::RGBColour> {
 	let raw_u16 = vga::VIDEO_PALETTE[index as usize].load(Ordering::Relaxed);
 	let our_colour = vga::RGBColour(raw_u16);
 	// Convert from our 12-bit colour type to the public 24-bit colour type
-	COption::Some(our_colour.into())
+	FfiOption::Some(our_colour.into())
 }
 
 /// Update the RGB palette.
@@ -1856,80 +1856,80 @@ unsafe extern "C" fn video_set_whole_palette(
 	}
 }
 
-extern "C" fn i2c_bus_get_info(_i2c_bus: u8) -> COption<common::i2c::BusInfo> {
-	COption::None
+extern "C" fn i2c_bus_get_info(_i2c_bus: u8) -> FfiOption<common::i2c::BusInfo> {
+	FfiOption::None
 }
 
 extern "C" fn i2c_write_read(
 	_i2c_bus: u8,
 	_i2c_device_address: u8,
-	_tx: common::ApiByteSlice,
-	_tx2: common::ApiByteSlice,
-	_rx: common::ApiBuffer,
-) -> CResult<()> {
-	CResult::Err(CError::Unimplemented)
+	_tx: FfiByteSlice,
+	_tx2: FfiByteSlice,
+	_rx: FfiBuffer,
+) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 extern "C" fn audio_mixer_channel_get_info(
 	_audio_mixer_id: u8,
-) -> COption<common::audio::MixerChannelInfo> {
-	COption::None
+) -> FfiOption<common::audio::MixerChannelInfo> {
+	FfiOption::None
 }
 
-extern "C" fn audio_mixer_channel_set_level(_audio_mixer_id: u8, _level: u8) -> CResult<()> {
-	CResult::Err(CError::Unimplemented)
+extern "C" fn audio_mixer_channel_set_level(_audio_mixer_id: u8, _level: u8) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn audio_output_set_config(_config: common::audio::Config) -> CResult<()> {
-	CResult::Err(CError::Unimplemented)
+extern "C" fn audio_output_set_config(_config: common::audio::Config) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn audio_output_get_config() -> CResult<common::audio::Config> {
-	CResult::Err(CError::Unimplemented)
+extern "C" fn audio_output_get_config() -> ApiResult<common::audio::Config> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-unsafe extern "C" fn audio_output_data(_samples: common::ApiByteSlice) -> CResult<usize> {
-	CResult::Err(CError::Unimplemented)
+unsafe extern "C" fn audio_output_data(_samples: FfiByteSlice) -> ApiResult<usize> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn audio_output_get_space() -> CResult<usize> {
-	CResult::Ok(0)
+extern "C" fn audio_output_get_space() -> ApiResult<usize> {
+	ApiResult::Ok(0)
 }
 
-extern "C" fn audio_input_set_config(_config: common::audio::Config) -> CResult<()> {
-	CResult::Err(CError::Unimplemented)
+extern "C" fn audio_input_set_config(_config: common::audio::Config) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn audio_input_get_config() -> CResult<common::audio::Config> {
-	CResult::Err(CError::Unimplemented)
+extern "C" fn audio_input_get_config() -> ApiResult<common::audio::Config> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn audio_input_data(_samples: common::ApiBuffer) -> CResult<usize> {
-	CResult::Err(CError::Unimplemented)
+extern "C" fn audio_input_data(_samples: FfiBuffer) -> ApiResult<usize> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn audio_input_get_count() -> CResult<usize> {
-	CResult::Ok(0)
+extern "C" fn audio_input_get_count() -> ApiResult<usize> {
+	ApiResult::Ok(0)
 }
 
-extern "C" fn bus_select(_periperal_id: COption<u8>) {
+extern "C" fn bus_select(_periperal_id: FfiOption<u8>) {
 	// Do nothing
 }
 
-extern "C" fn bus_get_info(_periperal_id: u8) -> COption<common::bus::PeripheralInfo> {
-	COption::None
+extern "C" fn bus_get_info(_periperal_id: u8) -> FfiOption<common::bus::PeripheralInfo> {
+	FfiOption::None
 }
 
 extern "C" fn bus_write_read(
-	_tx: common::ApiByteSlice,
-	_tx2: common::ApiByteSlice,
-	_rx: common::ApiBuffer,
-) -> CResult<()> {
-	CResult::Err(CError::Unimplemented)
+	_tx: FfiByteSlice,
+	_tx2: FfiByteSlice,
+	_rx: FfiBuffer,
+) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn bus_exchange(_buffer: common::ApiBuffer) -> CResult<()> {
-	CResult::Err(CError::Unimplemented)
+extern "C" fn bus_exchange(_buffer: FfiBuffer) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 extern "C" fn bus_interrupt_status() -> u32 {
@@ -1947,7 +1947,7 @@ extern "C" fn bus_interrupt_status() -> u32 {
 /// The set of devices is not expected to change at run-time - removal of
 /// media is indicated with a boolean field in the
 /// `block_dev::DeviceInfo` structure.
-pub extern "C" fn block_dev_get_info(device: u8) -> COption<common::block_dev::DeviceInfo> {
+pub extern "C" fn block_dev_get_info(device: u8) -> FfiOption<common::block_dev::DeviceInfo> {
 	check_stacks();
 	match device {
 		0 => {
@@ -1960,8 +1960,8 @@ pub extern "C" fn block_dev_get_info(device: u8) -> COption<common::block_dev::D
 
 			match &hw.card_state {
 				CardState::Unplugged | CardState::Uninitialised | CardState::Errored => {
-					COption::Some(common::block_dev::DeviceInfo {
-						name: common::types::ApiString::new("SdCard0"),
+					FfiOption::Some(common::block_dev::DeviceInfo {
+						name: FfiString::new("SdCard0"),
 						device_type: common::block_dev::DeviceType::SecureDigitalCard,
 						block_size: 0,
 						num_blocks: 0,
@@ -1971,8 +1971,8 @@ pub extern "C" fn block_dev_get_info(device: u8) -> COption<common::block_dev::D
 						read_only: false,
 					})
 				}
-				CardState::Online(info) => COption::Some(common::block_dev::DeviceInfo {
-					name: common::types::ApiString::new("SdCard0"),
+				CardState::Online(info) => FfiOption::Some(common::block_dev::DeviceInfo {
+					name: FfiString::new("SdCard0"),
 					device_type: common::block_dev::DeviceType::SecureDigitalCard,
 					block_size: 512,
 					num_blocks: info.num_blocks,
@@ -1985,7 +1985,7 @@ pub extern "C" fn block_dev_get_info(device: u8) -> COption<common::block_dev::D
 		}
 		_ => {
 			// Nothing else supported by this BIOS
-			COption::None
+			FfiOption::None
 		}
 	}
 }
@@ -2002,9 +2002,9 @@ pub extern "C" fn block_write(
 	_device: u8,
 	_block: common::block_dev::BlockIdx,
 	_num_blocks: u8,
-	_data: common::ApiByteSlice,
-) -> CResult<()> {
-	CResult::Err(CError::Unimplemented)
+	_data: FfiByteSlice,
+) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
 /// Read one or more sectors to a block device.
@@ -2019,12 +2019,12 @@ pub extern "C" fn block_read(
 	device: u8,
 	block: common::block_dev::BlockIdx,
 	num_blocks: u8,
-	data: common::ApiBuffer,
-) -> CResult<()> {
+	data: FfiBuffer,
+) -> ApiResult<()> {
 	use embedded_sdmmc::BlockDevice;
 	check_stacks();
 	if data.data_len != usize::from(num_blocks) * 512 {
-		return CResult::Err(CError::UnsupportedConfiguration(0));
+		return ApiResult::Err(CError::UnsupportedConfiguration(0));
 	}
 	let mut lock = HARDWARE.lock();
 	let hw = lock.as_mut().unwrap();
@@ -2035,7 +2035,7 @@ pub extern "C" fn block_read(
 				hw.sdcard_poll();
 				let info = match &hw.card_state {
 					CardState::Online(info) => info.clone(),
-					_ => return CResult::Err(CError::NoMediaFound),
+					_ => return ApiResult::Err(CError::NoMediaFound),
 				};
 				// Run card at full speed
 				let spi = sdcard::FakeSpi(hw, false);
@@ -2054,16 +2054,16 @@ pub extern "C" fn block_read(
 				};
 				let start_block_idx = embedded_sdmmc::BlockIdx(block.0 as u32);
 				match sdcard.read(blocks, start_block_idx, "bios") {
-					Ok(_) => CResult::Ok(()),
+					Ok(_) => ApiResult::Ok(()),
 					Err(e) => {
 						defmt::warn!("SD error reading {}: {:?}", block.0, e);
-						CResult::Err(CError::DeviceError(0))
+						ApiResult::Err(CError::DeviceError(0))
 					}
 				}
 			}
 			_ => {
 				// Nothing else supported by this BIOS
-				CResult::Err(CError::InvalidDevice)
+				ApiResult::Err(CError::InvalidDevice)
 			}
 		}
 	};
@@ -2085,13 +2085,13 @@ pub extern "C" fn block_verify(
 	_device: u8,
 	_block: common::block_dev::BlockIdx,
 	_num_blocks: u8,
-	_data: common::ApiByteSlice,
-) -> CResult<()> {
-	CResult::Err(CError::Unimplemented)
+	_data: FfiByteSlice,
+) -> ApiResult<()> {
+	ApiResult::Err(CError::Unimplemented)
 }
 
-extern "C" fn block_dev_eject(_dev_id: u8) -> CResult<()> {
-	CResult::Ok(())
+extern "C" fn block_dev_eject(_dev_id: u8) -> ApiResult<()> {
+	ApiResult::Ok(())
 }
 
 /// Sleep the CPU until the next interrupt.

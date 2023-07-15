@@ -1,8 +1,16 @@
 # Changelog
 
-## Unreleased Changes ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/develop) | [Changes](https://github.com/neotron-compute/neotron-pico-bios/compare/v0.5.0...develop))
+## Unreleased Changes ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/develop) | [Changes](https://github.com/neotron-compute/neotron-pico-bios/compare/v0.5.1...develop))
 
-* None
+* Update to neotron-common-bios 0.9.0
+* Use published neotron-bmc-protocol and neotron-bmc-commands crates
+* Clarify how BMC speaker works
+* Add ANSI art boot-up logo
+* Speed up boot, and add "ESC to Pause"
+* Print message on hardfault
+* Update to OS 0.4.0
+* Re-arrange BIOS memory and stack for Core 1
+* Re-wrote the video render system to be more robust
 
 ## v0.5.1 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.5.1) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.5.1))
 
