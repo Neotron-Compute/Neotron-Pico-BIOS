@@ -1,8 +1,39 @@
 //! MCP23S17 Control Functions
 
+// -----------------------------------------------------------------------------
+// Licence Statement
+// -----------------------------------------------------------------------------
+// Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2023
+//
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free Software
+// Foundation, either version 3 of the License, or (at your option) any later
+// version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+// details.
+//
+// You should have received a copy of the GNU General Public License along with
+// this program.  If not, see <https://www.gnu.org/licenses/>.
+// -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// Sub-modules
+// -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// Imports
+// -----------------------------------------------------------------------------
+
 use embedded_hal::blocking::spi::{Transfer, Write};
 
 use super::SpiBus;
+
+// -----------------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------------
 
 /// The Registers on the MCP23S17
 ///
@@ -28,6 +59,10 @@ pub enum Register {
 	GPIOB = 0x13,
 }
 
+// -----------------------------------------------------------------------------
+// Static and Const Data
+// -----------------------------------------------------------------------------
+
 /// The Control Byte prefix
 const CONTROL_PREFIX: u8 = 0b0100;
 
@@ -43,6 +78,10 @@ const WRITE_COMMAND: u8 = (CONTROL_PREFIX << 4) | (ADDRESS_0 << 1);
 ///
 /// Is of the format `0 1 0 0 A2 A1 A0 R/W`
 const READ_COMMAND: u8 = (CONTROL_PREFIX << 4) | (ADDRESS_0 << 1) | 1;
+
+// -----------------------------------------------------------------------------
+// Functions
+// -----------------------------------------------------------------------------
 
 /// Write to a register on the MCP23S17.
 ///
@@ -60,3 +99,7 @@ pub fn read_register(spi: &mut SpiBus, register: Register) -> u8 {
 	spi.transfer(&mut buffer).unwrap();
 	buffer[2]
 }
+
+// -----------------------------------------------------------------------------
+// End of file
+// -----------------------------------------------------------------------------
