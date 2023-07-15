@@ -79,7 +79,7 @@ struct NeotronOutput {
 
 impl NeotronOutput {
 	const DEFAULT_ATTR: Attr = Attr::new(
-		TextForegroundColour::GREY,
+		TextForegroundColour::LIGHT_GRAY,
 		TextBackgroundColour::BLACK,
 		false,
 	);
@@ -127,24 +127,24 @@ impl vte::Perform for NeotronOutput {
 						self.attr.set_bg(TextBackgroundColour::BLACK);
 					}
 					41 => {
-						self.attr.set_bg(TextBackgroundColour::DARK_RED);
+						self.attr.set_bg(TextBackgroundColour::RED);
 					}
 					42 => {
-						self.attr.set_bg(TextBackgroundColour::DARK_GREEN);
+						self.attr.set_bg(TextBackgroundColour::GREEN);
 					}
 					43 => {
-						self.attr.set_bg(TextBackgroundColour::YELLOW);
+						self.attr.set_bg(TextBackgroundColour::BROWN);
 					}
 					44 => {
 						self.attr.set_bg(TextBackgroundColour::BLUE);
 					}
 					45 => {
-						self.attr.set_bg(TextBackgroundColour::DARK_MAGENTA);
+						self.attr.set_bg(TextBackgroundColour::MAGENTA);
 					}
 					46 => {
-						self.attr.set_bg(TextBackgroundColour::DARK_CYAN);
+						self.attr.set_bg(TextBackgroundColour::CYAN);
 					}
-					49 => {
+					47 | 49 => {
 						// Default
 						self.attr.set_bg(TextBackgroundColour::BLACK);
 					}
@@ -153,10 +153,10 @@ impl vte::Perform for NeotronOutput {
 						self.attr.set_fg(TextForegroundColour::BLACK);
 					}
 					31 => {
-						self.attr.set_fg(TextForegroundColour::DARK_RED);
+						self.attr.set_fg(TextForegroundColour::RED);
 					}
 					32 => {
-						self.attr.set_fg(TextForegroundColour::DARK_GREEN);
+						self.attr.set_fg(TextForegroundColour::GREEN);
 					}
 					33 => {
 						self.attr.set_fg(TextForegroundColour::YELLOW);
@@ -165,13 +165,13 @@ impl vte::Perform for NeotronOutput {
 						self.attr.set_fg(TextForegroundColour::BLUE);
 					}
 					35 => {
-						self.attr.set_fg(TextForegroundColour::DARK_MAGENTA);
+						self.attr.set_fg(TextForegroundColour::MAGENTA);
 					}
 					36 => {
-						self.attr.set_fg(TextForegroundColour::DARK_CYAN);
+						self.attr.set_fg(TextForegroundColour::CYAN);
 					}
-					37 => {
-						self.attr.set_fg(TextForegroundColour::GREY);
+					37 | 39 => {
+						self.attr.set_fg(TextForegroundColour::LIGHT_GRAY);
 					}
 					0 => {
 						self.attr = Self::DEFAULT_ATTR;
@@ -184,25 +184,28 @@ impl vte::Perform for NeotronOutput {
 			}
 			if self.bright {
 				match self.attr.fg() {
-					TextForegroundColour::DARK_RED => {
-						self.attr.set_fg(TextForegroundColour::BRIGHT_RED);
+					TextForegroundColour::BLACK => {
+						self.attr.set_fg(TextForegroundColour::DARK_GRAY);
 					}
-					TextForegroundColour::DARK_GREEN => {
-						self.attr.set_fg(TextForegroundColour::BRIGHT_GREEN);
+					TextForegroundColour::RED => {
+						self.attr.set_fg(TextForegroundColour::LIGHT_RED);
 					}
-					TextForegroundColour::YELLOW => {
-						self.attr.set_fg(TextForegroundColour::BRIGHT_YELLOW);
+					TextForegroundColour::GREEN => {
+						self.attr.set_fg(TextForegroundColour::LIGHT_GREEN);
+					}
+					TextForegroundColour::BROWN => {
+						self.attr.set_fg(TextForegroundColour::YELLOW);
 					}
 					TextForegroundColour::BLUE => {
-						self.attr.set_fg(TextForegroundColour::BRIGHT_BLUE);
+						self.attr.set_fg(TextForegroundColour::LIGHT_BLUE);
 					}
-					TextForegroundColour::DARK_MAGENTA => {
-						self.attr.set_fg(TextForegroundColour::BRIGHT_MAGENTA);
+					TextForegroundColour::MAGENTA => {
+						self.attr.set_fg(TextForegroundColour::PINK);
 					}
-					TextForegroundColour::DARK_CYAN => {
-						self.attr.set_fg(TextForegroundColour::BRIGHT_CYAN);
+					TextForegroundColour::CYAN => {
+						self.attr.set_fg(TextForegroundColour::LIGHT_CYAN);
 					}
-					TextForegroundColour::GREY => {
+					TextForegroundColour::LIGHT_GRAY => {
 						self.attr.set_fg(TextForegroundColour::WHITE);
 					}
 					_ => {

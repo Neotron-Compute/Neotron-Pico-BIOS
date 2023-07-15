@@ -2,7 +2,7 @@
 
 ## Unreleased Changes ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/develop) | [Changes](https://github.com/neotron-compute/neotron-pico-bios/compare/v0.5.1...develop))
 
-* Update to neotron-common-bios 0.9.0
+* Updated to neotron-common-bios 0.10.0, and changed the VGA palette to match
 * Use published neotron-bmc-protocol and neotron-bmc-commands crates
 * Clarify how BMC speaker works
 * Add ANSI art boot-up logo
@@ -11,6 +11,8 @@
 * Update to OS 0.4.0
 * Re-arrange BIOS memory and stack for Core 1
 * Re-wrote the video render system to be more robust
+* Added a cursor
+* Added ANSI decoding support (for basic colours)
 
 ## v0.5.1 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.5.1) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.5.1))
 
@@ -31,15 +33,15 @@
 * Implement new kind of Mutex
 * Updated to OS 0.3.2
 * Supports initialising SD Cards and reporting card size
- 
+
 ## v0.4.1 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.4.1) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.4.1))
 
 * Wait for interrupts from the BMC before reading PS/2 key codes
-   * Requires Neotron Pico BMC v0.5.0
+  * Requires Neotron Pico BMC v0.5.0
 * Debug LEDs change every time you get an interrupt from the IO controller
 * Doubled the speed of the RP2040's QSPI flash interface
 * Documentation updates to make programming your RP2040 easier
- 
+
 ## v0.4.0 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.4.0) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.4.0))
 
 * Updated dependencies
