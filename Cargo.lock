@@ -550,13 +550,20 @@ dependencies = [
 
 [[package]]
 name = "neotron-common-bios"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa4b43ef66a881b66110e2bafd11a8cd06613d0e99c52c9e8cdbc1195c61b94b"
+checksum = "eab0dc15bdff1f816ff9f1173467ccb155cda9e9ccb3cb4853883eb393f9f3e2"
 dependencies = [
  "chrono",
+ "neotron-ffi",
  "pc-keyboard",
 ]
+
+[[package]]
+name = "neotron-ffi"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d37886e73d87732421aaf5da617eead9d69a7daf6b0d059780f76157d9ce5372"
 
 [[package]]
 name = "neotron-pico-bios"
