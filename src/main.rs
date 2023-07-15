@@ -1173,18 +1173,14 @@ impl Hardware {
 	fn play_startup_tune(&mut self) -> Result<(), ()> {
 		// (delay (ms), command, data)
 		let seq: &[(u16, Command, u8)] = &[
-			// NB: Due to a BMC bug, this sets the high period
 			(0, Command::SpeakerPeriodLow, 137),
-			// NB: Due to a BMC bug, this sets the low period
 			(0, Command::SpeakerPeriodHigh, 0),
 			(0, Command::SpeakerDutyCycle, 127),
 			// This triggers the beep to occur
 			(70, Command::SpeakerDuration, 7),
-			// NB: Due to a BMC bug, this sets the high period
 			(0, Command::SpeakerPeriodLow, 116),
 			// This triggers the beep to occur
 			(70, Command::SpeakerDuration, 7),
-			// NB: Due to a BMC bug, this sets the high period
 			(0, Command::SpeakerPeriodLow, 97),
 			// This triggers the beep to occur
 			(70, Command::SpeakerDuration, 7),

@@ -531,8 +531,9 @@ checksum = "8d5439c4ad607c3c23abf66de8c8bf57ba8adcd1f129e699851a6e43935d339d"
 
 [[package]]
 name = "neotron-bmc-commands"
-version = "0.1.0"
-source = "git+https://github.com/neotron-compute/neotron-bmc?tag=v0.5.2#bb08ff2476058e9029a45fdda26f252285f10ddf"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6efa49a652e9172a28e0fecbf99f21ae7b320931fcef3a2638c8870428cadc01"
 dependencies = [
  "num_enum",
 ]
@@ -540,7 +541,8 @@ dependencies = [
 [[package]]
 name = "neotron-bmc-protocol"
 version = "0.1.0"
-source = "git+https://github.com/neotron-compute/neotron-bmc?tag=v0.5.2#bb08ff2476058e9029a45fdda26f252285f10ddf"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff9228d7b028c0056fd225cf3c11533e7548638f2c5822cee10e94ca2c71e718"
 dependencies = [
  "defmt",
  "num_enum",
