@@ -1336,7 +1336,7 @@ fn sign_on() {
 
 	// Draw the BIOS version
 	tc.change_attr(Attr::new(
-		TextForegroundColour::BRIGHT_YELLOW,
+		TextForegroundColour::YELLOW,
 		TextBackgroundColour::BLACK,
 		false,
 	));
@@ -1353,7 +1353,7 @@ fn sign_on() {
 	tc.move_to(13, 6);
 	tc.change_attr(Attr::new(
 		TextForegroundColour::WHITE,
-		TextBackgroundColour::DARK_RED,
+		TextBackgroundColour::RED,
 		false,
 	));
 	let bmc_ver = {
@@ -2205,7 +2205,7 @@ unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
 	tc.move_to(0, 0);
 	tc.change_attr(Attr::new(
 		TextForegroundColour::WHITE,
-		TextBackgroundColour::DARK_RED,
+		TextBackgroundColour::RED,
 		false,
 	));
 	let _ = writeln!(&tc, "+------------------------------+");
