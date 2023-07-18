@@ -255,6 +255,9 @@ static INTERRUPT_PENDING: AtomicBool = AtomicBool::new(false);
 /// Stack for Core 1
 static mut CORE1_STACK: [usize; 256] = [0; 256];
 
+/// The pin we use for external interrupt input
+static IRQ_PIN: NeoMutex<Option<IrqPin>> = NeoMutex::new(None);
+
 /// The table of API calls we provide the OS
 static API_CALLS: common::Api = common::Api {
 	api_version_get,
@@ -305,6 +308,9 @@ static API_CALLS: common::Api = common::Api {
 	bus_interrupt_status,
 	block_dev_eject,
 	power_idle,
+	power_off,
+	power_reboot,
+	compare_and_swap_bool,
 };
 
 /// Seconds between the Neotron Epoch (2000-01-01T00:00:00) and the UNIX Epoch (1970-01-01T00:00:00).
@@ -2114,7 +2120,36 @@ extern "C" fn time_ticks_per_second() -> common::Ticks {
 	common::Ticks(1_000_000)
 }
 
-static IRQ_PIN: NeoMutex<Option<IrqPin>> = NeoMutex::new(None);
+/// Power the system off.
+extern "C" fn power_off() -> ! {
+	todo!();
+}
+
+/// Reboot the system.
+extern "C" fn power_reboot() -> ! {
+	todo!();
+}
+
+/// Performs a compare-and-swap on `value`.
+///
+/// * If `value == old_value`, sets `value = new_value` and returns `true`
+/// * If `value != old_value`, returns `false`
+extern "C" fn compare_and_swap_bool(value: &AtomicBool, old_value: bool, new_value: bool) -> bool {
+	let state = unsafe { critical_section::acquire() };
+
+	let result = if value.load(Ordering::Relaxed) == old_value {
+		value.store(new_value, Ordering::Relaxed);
+		true
+	} else {
+		false
+	};
+
+	unsafe {
+		critical_section::release(state);
+	}
+
+	result
+}
 
 /// Called when we get a SIO interrupt on the main bank of GPIO pins.
 ///
@@ -2192,7 +2227,7 @@ fn check_stack(start: *const usize, stack_len_bytes: usize, check_word: usize) {
 /// This probably means something panicked, and the Rust code was compiled to
 /// abort-on-panic. Or someone jumped to a bad address.
 ///
-/// Hopefully the debug output we print will of be some use. Think of it as our
+/// Hopefully the debug output we print will be of some use. Think of it as our
 /// Blue Screen of Death, or Guru Meditation Error.
 #[cortex_m_rt::exception]
 unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
