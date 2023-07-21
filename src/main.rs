@@ -682,7 +682,7 @@ fn sign_on() {
 		}
 		if countdown == 1 {
 			break;
-		} else if countdown > 1 {
+		} else {
 			countdown -= 1;
 		}
 	}
@@ -1680,7 +1680,7 @@ pub extern "C" fn time_clock_set(time: common::Time) {
 			Ok(_) => {
 				defmt::info!("Time set in RTC OK");
 			}
-			Err(rtc::Error::BusError(_)) => {
+			Err(rtc::Error::Bus(_)) => {
 				defmt::warn!("Failed to talk to RTC to set time");
 			}
 			Err(rtc::Error::DriverBug) => {
@@ -2322,7 +2322,7 @@ unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
 	let tc = console::TextConsole::new();
 	tc.set_text_buffer(unsafe { &mut vga::GLYPH_ATTR_ARRAY });
 	for _col in 0..vga::MAX_TEXT_ROWS {
-		let _ = writeln!(&tc, "");
+		let _ = writeln!(&tc);
 	}
 	tc.move_to(0, 0);
 	tc.change_attr(Attr::new(
