@@ -5,7 +5,7 @@ resolver = "2"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 name = "neotron-pico-bios"
-version = "0.6.0"
+version = "0.5.2"
 
 [dependencies]
 # Useful Cortex-M specific functions (e.g. SysTick)
