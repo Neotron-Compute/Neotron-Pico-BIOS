@@ -2265,20 +2265,14 @@ extern "C" fn power_control(power_mode: common::PowerMode) -> ! {
 /// * If `value == old_value`, sets `value = new_value` and returns `true`
 /// * If `value != old_value`, returns `false`
 extern "C" fn compare_and_swap_bool(value: &AtomicBool, old_value: bool, new_value: bool) -> bool {
-	let state = unsafe { critical_section::acquire() };
-
-	let result = if value.load(Ordering::Relaxed) == old_value {
-		value.store(new_value, Ordering::Relaxed);
-		true
-	} else {
-		false
-	};
-
-	unsafe {
-		critical_section::release(state);
-	}
-
-	result
+	critical_section::with(|_cs| {
+		if value.load(Ordering::Relaxed) == old_value {
+			value.store(new_value, Ordering::Relaxed);
+			true
+		} else {
+			false
+		}
+	})
 }
 
 // -----------------------------------------------------------------------------
