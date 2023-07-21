@@ -1408,12 +1408,6 @@ pub fn init(
 	// cannot be reconfigured at a later time, but they do keep on running
 	// as-is.
 
-	unsafe {
-		for b in super::CORE1_STACK.iter_mut() {
-			*b = super::CORE1_STACK_PAINT_WORD;
-		}
-	}
-
 	debug!(
 		"Core 1 stack: {:08x}, {} bytes",
 		unsafe { super::CORE1_STACK.as_ptr() },
