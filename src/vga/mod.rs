@@ -627,34 +627,34 @@ pub static VIDEO_MODE: AtomicModeWrapper = AtomicModeWrapper::new(crate::common:
 pub static VIDEO_PALETTE: [AtomicU16; 256] = [
 	// Index 000: 0x000 (Black)
 	AtomicU16::new(RGBColour::from_12bit(0x0, 0x0, 0x0).0),
-	// Index 001: 0x800 (Dark Red)
-	AtomicU16::new(RGBColour::from_12bit(0x8, 0x0, 0x0).0),
-	// Index 002: 0x080 (Dark Green)
-	AtomicU16::new(RGBColour::from_12bit(0x0, 0x8, 0x0).0),
-	// Index 003: 0x880 (Orange)
-	AtomicU16::new(RGBColour::from_12bit(0x8, 0x8, 0x0).0),
-	// Index 004: 0x008 (Blue)
-	AtomicU16::new(RGBColour::from_12bit(0x0, 0x0, 0x8).0),
-	// Index 005: 0x808 (Dark Magenta)
-	AtomicU16::new(RGBColour::from_12bit(0x8, 0x0, 0x8).0),
-	// Index 006: 0x088 (Dark Cyan)
-	AtomicU16::new(RGBColour::from_12bit(0x0, 0x8, 0x8).0),
-	// Index 007: 0xcc0 (Yellow)
-	AtomicU16::new(RGBColour::from_12bit(0xc, 0xc, 0x0).0),
-	// Index 008: 0x888 (Grey)
-	AtomicU16::new(RGBColour::from_12bit(0x8, 0x8, 0x8).0),
-	// Index 009: 0xf00 (Bright Red)
-	AtomicU16::new(RGBColour::from_12bit(0xf, 0x0, 0x0).0),
-	// Index 010: 0x0f0 (Bright Green)
-	AtomicU16::new(RGBColour::from_12bit(0x0, 0xf, 0x0).0),
-	// Index 011: 0xff0 (Bright Yellow)
-	AtomicU16::new(RGBColour::from_12bit(0xf, 0xf, 0x0).0),
-	// Index 012: 0x00f (Bright Blue)
+	// Index 001: 0x00a (Blue)
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0x0, 0xa).0),
+	// Index 002: 0x0a0 (Green)
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xa, 0x0).0),
+	// Index 003: 0x0aa (Cyan)
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xa, 0xa).0),
+	// Index 004: 0xa00 (Red)
+	AtomicU16::new(RGBColour::from_12bit(0xa, 0x0, 0x0).0),
+	// Index 005: 0xa0a (Magenta)
+	AtomicU16::new(RGBColour::from_12bit(0xa, 0x0, 0xa).0),
+	// Index 006: 0xaa0 (Brown)
+	AtomicU16::new(RGBColour::from_12bit(0xa, 0xa, 0x0).0),
+	// Index 007: 0xaaa (Light Gray)
+	AtomicU16::new(RGBColour::from_12bit(0xa, 0xa, 0xa).0),
+	// Index 008: 0x666 (Dark Gray)
+	AtomicU16::new(RGBColour::from_12bit(0x6, 0x6, 0x6).0),
+	// Index 009: 0x00f (Light Blue)
 	AtomicU16::new(RGBColour::from_12bit(0x0, 0x0, 0xf).0),
-	// Index 013: 0xf0f (Bright Magenta)
-	AtomicU16::new(RGBColour::from_12bit(0xf, 0x0, 0xf).0),
-	// Index 014: 0x0ff (Bright Cyan)
+	// Index 010: 0x0f0 (Light Green)
+	AtomicU16::new(RGBColour::from_12bit(0x0, 0xf, 0x0).0),
+	// Index 011: 0x0ff (Light Cyan)
 	AtomicU16::new(RGBColour::from_12bit(0x0, 0xf, 0xf).0),
+	// Index 012: 0xf00 (Light Red)
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x0, 0x0).0),
+	// Index 013: 0xf0f (Pink)
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0x0, 0xf).0),
+	// Index 014: 0xff0 (Yellow)
+	AtomicU16::new(RGBColour::from_12bit(0xf, 0xf, 0x0).0),
 	// Index 015: 0xfff (White)
 	AtomicU16::new(RGBColour::from_12bit(0xf, 0xf, 0xf).0),
 	// Index 016: 0x003
@@ -1408,12 +1408,6 @@ pub fn init(
 	// cannot be reconfigured at a later time, but they do keep on running
 	// as-is.
 
-	unsafe {
-		for b in super::CORE1_STACK.iter_mut() {
-			*b = super::CORE1_STACK_PAINT_WORD;
-		}
-	}
-
 	debug!(
 		"Core 1 stack: {:08x}, {} bytes",
 		unsafe { super::CORE1_STACK.as_ptr() },
@@ -1451,28 +1445,22 @@ pub fn set_video_mode(mode: crate::common::video::Mode) -> bool {
 	}
 }
 
-/// Sets the current video mode
+/// Check the given video mode is allowable
 pub fn test_video_mode(mode: crate::common::video::Mode) -> bool {
-	match (
-		mode.timing(),
-		mode.format(),
-		mode.is_horiz_2x(),
-		mode.is_vert_2x(),
-	) {
+	matches!(
 		(
-			crate::common::video::Timing::T640x480,
+			mode.timing(),
+			mode.format(),
+			mode.is_horiz_2x(),
+			mode.is_vert_2x(),
+		),
+		(
+			crate::common::video::Timing::T640x480 | crate::common::video::Timing::T640x400,
 			crate::common::video::Format::Text8x16 | crate::common::video::Format::Text8x8,
 			false,
 			false,
-		) => true,
-		(
-			crate::common::video::Timing::T640x400,
-			crate::common::video::Format::Text8x16 | crate::common::video::Format::Text8x8,
-			false,
-			false,
-		) => true,
-		_ => false,
-	}
+		)
+	)
 }
 
 /// Get the current scan line.

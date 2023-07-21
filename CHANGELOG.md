@@ -6,9 +6,19 @@ In this repository, changes are made in branches which are merged into **develop
 
 * None
 
+## v0.6.0 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.6.0) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.6.0))
+
+* Use OS 0.5.0
+* Implement reboot support
+* Hard reboot system if we detect only Core 0 has restarted - should fix odd
+  video issue after flashing
+* Updated to neotron-common-bios 0.11.0
+* Changed the VGA palette to match as required in neotron-common-bios 0.10.0
+* Updated flashing instructions
+
 ## v0.5.2 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.5.2) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.5.2))
 
-* Update to neotron-common-bios 0.9.0
+* Updated to neotron-common-bios 0.9.0
 * Use published neotron-bmc-protocol and neotron-bmc-commands crates
 * Clarify how BMC speaker works
 * Add ANSI art boot-up logo
@@ -17,6 +27,8 @@ In this repository, changes are made in branches which are merged into **develop
 * Update to OS 0.4.0
 * Re-arrange BIOS memory and stack for Core 1
 * Re-wrote the video render system to be more robust
+* Added a cursor
+* Added ANSI decoding support (for basic colours)
 
 ## v0.5.1 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.5.1) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.5.1))
 
@@ -37,15 +49,15 @@ In this repository, changes are made in branches which are merged into **develop
 * Implement new kind of Mutex
 * Updated to OS 0.3.2
 * Supports initialising SD Cards and reporting card size
- 
+
 ## v0.4.1 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.4.1) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.4.1))
 
 * Wait for interrupts from the BMC before reading PS/2 key codes
-   * Requires Neotron Pico BMC v0.5.0
+  * Requires Neotron Pico BMC v0.5.0
 * Debug LEDs change every time you get an interrupt from the IO controller
 * Doubled the speed of the RP2040's QSPI flash interface
 * Documentation updates to make programming your RP2040 easier
- 
+
 ## v0.4.0 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.4.0) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.4.0))
 
 * Updated dependencies
