@@ -19,7 +19,7 @@ rp-pico = { version = "0.7", default-features = false, features = [
 # Cortex-M run-time (or start-up) code
 cortex-m-rt = "0.7"
 # The BIOS to OS API
-neotron-common-bios = { version = "0.11.0-alpha", git = "https://github.com/neotron-compute/neotron-common-bios", branch = "extra-functions" }
+neotron-common-bios = "0.11.0"
 # For the RP2040 bootloader
 rp2040-boot2 = "0.3.0"
 # For hardware abstraction traits
@@ -60,7 +60,7 @@ embedded-sdmmc = { version = "0.5", default-features = false, features = [
 ] }
 
 [build-dependencies]
-neotron-common-bios = { version = "0.11.0-alpha", git = "https://github.com/neotron-compute/neotron-common-bios", branch = "extra-functions" }
+neotron-common-bios = "0.11.0"
 vte = "0.11"
 
 [[bin]]
