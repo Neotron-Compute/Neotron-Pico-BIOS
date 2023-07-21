@@ -37,7 +37,7 @@ pub use ds1307::{DateTimeAccess, NaiveDateTime};
 
 /// The ways this module can fail
 pub enum Error<E> {
-	BusError(E),
+	Bus(E),
 	DriverBug,
 	NoRtcFound,
 }
@@ -108,14 +108,14 @@ impl Rtc {
 			Self::Ds1307 => {
 				let mut driver = ds1307::Ds1307::new(bus);
 				driver.datetime().map_err(|e| match e {
-					ds1307::Error::I2C(bus_error) => Error::BusError(bus_error),
+					ds1307::Error::I2C(bus_error) => Error::Bus(bus_error),
 					ds1307::Error::InvalidInputData => Error::DriverBug,
 				})
 			}
 			Self::Mcp7940n => {
 				let mut driver = mcp794xx::Mcp794xx::new_mcp7940n(bus);
 				driver.datetime().map_err(|e| match e {
-					mcp794xx::Error::Comm(bus_error) => Error::BusError(bus_error),
+					mcp794xx::Error::Comm(bus_error) => Error::Bus(bus_error),
 					mcp794xx::Error::InvalidInputData => Error::DriverBug,
 				})
 			}
@@ -137,14 +137,14 @@ impl Rtc {
 			Self::Ds1307 => {
 				let mut driver = ds1307::Ds1307::new(bus);
 				driver.set_datetime(&new_time).map_err(|e| match e {
-					ds1307::Error::I2C(bus_error) => Error::BusError(bus_error),
+					ds1307::Error::I2C(bus_error) => Error::Bus(bus_error),
 					ds1307::Error::InvalidInputData => Error::DriverBug,
 				})
 			}
 			Self::Mcp7940n => {
 				let mut driver = mcp794xx::Mcp794xx::new_mcp7940n(bus);
 				driver.set_datetime(&new_time).map_err(|e| match e {
-					mcp794xx::Error::Comm(bus_error) => Error::BusError(bus_error),
+					mcp794xx::Error::Comm(bus_error) => Error::Bus(bus_error),
 					mcp794xx::Error::InvalidInputData => Error::DriverBug,
 				})
 			}

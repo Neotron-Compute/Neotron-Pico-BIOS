@@ -170,6 +170,8 @@ struct Hardware {
 	card_state: CardState,
 	/// Tracks all the clocks in the RP2040
 	clocks: ClocksManager,
+	/// The watchdog
+	watchdog: hal::Watchdog,
 }
 
 /// Flips between true and false so we always send a unique read request
@@ -233,6 +235,9 @@ static USE_ALT: UseAlt = UseAlt::new();
 ///
 /// You need to grab this to do anything with the hardware.
 static HARDWARE: NeoMutex<Option<Hardware>> = NeoMutex::new(None);
+
+/// The pin we use for external interrupt input
+static IRQ_PIN: NeoMutex<Option<IrqPin>> = NeoMutex::new(None);
 
 /// This is our Operating System. It must be compiled separately.
 ///
@@ -305,6 +310,8 @@ static API_CALLS: common::Api = common::Api {
 	bus_interrupt_status,
 	block_dev_eject,
 	power_idle,
+	power_control,
+	compare_and_swap_bool,
 };
 
 /// Seconds between the Neotron Epoch (2000-01-01T00:00:00) and the UNIX Epoch (1970-01-01T00:00:00).
@@ -338,6 +345,11 @@ fn main() -> ! {
 	// Grab the singleton containing all the generic Cortex-M peripherals
 	let cp = pac::CorePeripherals::take().unwrap();
 
+	// Check if stuff is running that shouldn't be. If so, do a full watchdog reboot.
+	if stuff_running(&mut pp) {
+		watchdog_reboot();
+	}
+
 	// Reset the DMA engine. If we don't do this, starting from probe-run
 	// (as opposed to a cold-start) is unreliable.
 	reset_dma_engine(&mut pp);
@@ -345,28 +357,7 @@ fn main() -> ! {
 	// Reset the spinlocks.
 	pp.SIO.spinlock[31].reset();
 
-	{
-		// Paint the stack
-		extern "C" {
-			static mut __sheap: usize;
-			static mut _stack_start: usize;
-		}
-		let stack_len = unsafe {
-			(&_stack_start as *const usize as usize) - (&__sheap as *const usize as usize)
-		};
-		// But not the top 64 words, because we're using the stack right now!
-		let stack = unsafe {
-			core::slice::from_raw_parts_mut(
-				&mut __sheap as *mut usize,
-				(stack_len / core::mem::size_of::<usize>()) - 256,
-			)
-		};
-		info!("Painting {:?}", stack.as_ptr_range());
-		for b in stack.iter_mut() {
-			*b = CORE0_STACK_PAINT_WORD;
-		}
-	}
-
+	paint_stacks();
 	check_stacks();
 
 	// Needed by the clock setup
@@ -461,6 +452,7 @@ fn main() -> ! {
 		pp.TIMER,
 		clocks,
 		delay,
+		watchdog,
 		&mut pp.RESETS,
 	);
 	hw.init_io_chip();
@@ -525,6 +517,262 @@ fn main() -> ! {
 	code(&API_CALLS);
 }
 
+/// Check if the rest of the system appears to be running already.
+///
+/// If so, returns `true`, else `false`.
+///
+/// This probably means Core 0 reset but the rest of the system did not, and you
+/// should do a hard reset to get everything back into sync.
+fn stuff_running(p: &mut pac::Peripherals) -> bool {
+	// Look at scratch register 7 and see what we left ourselves. If it's zero,
+	// this was a full clean boot-up. If it's 0xDEADC0DE, this means we were
+	// running and Core 0 restarted without restarting everything else.
+	let scratch = p.WATCHDOG.scratch7.read().bits();
+	defmt::info!("WD Scratch is 0x{:08x}", scratch);
+	if scratch == 0xDEADC0DE {
+		// we need a hard reset
+		true
+	} else {
+		// set the marker so we know Core 0 has booted up
+		p.WATCHDOG.scratch7.write(|w| unsafe { w.bits(0xDEADC0DE) });
+		false
+	}
+}
+
+/// Clear the scratch register so we don't force a full watchdog reboot on the
+/// next boot.
+fn clear_scratch() {
+	let p = unsafe { pac::Peripherals::steal() };
+	p.WATCHDOG.scratch7.write(|w| unsafe { w.bits(0) });
+}
+
+/// Do a full watchdog reboot
+fn watchdog_reboot() -> ! {
+	use embedded_hal::watchdog::WatchdogEnable;
+	clear_scratch();
+	if let Some(hw) = HARDWARE.lock().as_mut() {
+		hw.watchdog
+			.start(fugit::Duration::<u32, 1, 1000000>::millis(10));
+	} else {
+		// Hardware hasn't been initialised, so make a temporary watchdog driver
+		let p = unsafe { pac::Peripherals::steal() };
+		let mut watchdog = hal::Watchdog::new(p.WATCHDOG);
+		watchdog.start(fugit::Duration::<u32, 1, 1000000>::millis(10));
+	}
+	loop {
+		cortex_m::asm::wfi();
+	}
+}
+
+/// Print the BIOS boot-up messages on a temporary text console
+fn sign_on() {
+	static LOGO_ANSI_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/logo.bytes"));
+	static COPYRIGHT_TEXT: &str = "\
+		\n\
+		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2023\n\
+		This program is free software under GPL v3 (or later)\n\
+		You are entitled to the Complete and Corresponding Source for this BIOS\n\
+		\n\
+		BIOS: \n\
+		BMC : \n\
+		\n\
+		Press ESC to pause...";
+
+	// Create a new temporary console for some boot-up messages
+	let tc = console::TextConsole::new();
+	tc.set_text_buffer(unsafe { &mut vga::GLYPH_ATTR_ARRAY });
+
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::BLUE,
+		false,
+	));
+
+	// A crude way to clear the screen
+	for _col in 0..vga::MAX_TEXT_ROWS {
+		writeln!(&tc, " ").unwrap();
+	}
+
+	// Draw the logo
+	tc.move_to(0, 0);
+	for pair in LOGO_ANSI_BYTES.chunks(2) {
+		tc.change_attr(Attr(pair[0]));
+		tc.write_font_glyph(neotron_common_bios::video::Glyph(pair[1]));
+	}
+
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::BLUE,
+		false,
+	));
+
+	write!(&tc, "{}", COPYRIGHT_TEXT).unwrap();
+
+	// Draw the BIOS version
+	tc.change_attr(Attr::new(
+		TextForegroundColour::YELLOW,
+		TextBackgroundColour::BLACK,
+		false,
+	));
+	tc.move_to(12, 6);
+	write!(
+		&tc,
+		"v{} (git:{})",
+		env!("CARGO_PKG_VERSION"),
+		VERSION.trim_matches('\0')
+	)
+	.unwrap();
+
+	// Draw the BMC version
+	tc.move_to(13, 6);
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::RED,
+		false,
+	));
+	let bmc_ver = {
+		let mut lock = HARDWARE.lock();
+		let hw = lock.as_mut().unwrap();
+		let ver = hw.bmc_read_firmware_version();
+		let _ = hw.play_startup_tune();
+		ver
+	};
+	match bmc_ver {
+		Ok(string_bytes) => match core::str::from_utf8(&string_bytes) {
+			Ok(s) => {
+				write!(&tc, "{}", s.trim_matches('\0')).unwrap();
+			}
+			Err(_e) => {
+				write!(&tc, "Version Unknown").unwrap();
+			}
+		},
+		Err(_e) => {
+			write!(&tc, "Error reading version").unwrap();
+		}
+	}
+
+	tc.change_attr(Attr::new(
+		TextForegroundColour::WHITE,
+		TextBackgroundColour::BLUE,
+		false,
+	));
+
+	// This is in 100ms units
+	let mut countdown = 15;
+	loop {
+		{
+			let mut lock = HARDWARE.lock();
+			let hw = lock.as_mut().unwrap();
+			hw.delay.delay_ms(100);
+		}
+
+		tc.move_to(15, 0);
+		match hid_get_event() {
+			ApiResult::Ok(FfiOption::Some(HidEvent::KeyPress(KeyCode::Escape))) => {
+				write!(&tc, "Paused - Press SPACE to continue...").unwrap();
+				countdown = 0;
+			}
+			ApiResult::Ok(FfiOption::Some(HidEvent::KeyPress(KeyCode::Spacebar))) => {
+				write!(&tc, "Unpaused                           ").unwrap();
+				countdown = 10;
+			}
+			_ => {
+				// ignore
+			}
+		}
+		if countdown == 1 {
+			break;
+		} else {
+			countdown -= 1;
+		}
+	}
+}
+
+/// Paint the Core 0 and Core 1 stacks
+fn paint_stacks() {
+	extern "C" {
+		static mut __sheap: usize;
+		static mut _stack_start: usize;
+	}
+	unsafe {
+		let stack_len =
+			(&_stack_start as *const usize as usize) - (&__sheap as *const usize as usize);
+		// But not the top 64 words, because we're using the stack right now!
+		let stack = core::slice::from_raw_parts_mut(
+			&mut __sheap as *mut usize,
+			(stack_len / core::mem::size_of::<usize>()) - 256,
+		);
+		info!("Painting Core 1 stack: {:?}", stack.as_ptr_range());
+		for b in stack.iter_mut() {
+			*b = CORE0_STACK_PAINT_WORD;
+		}
+
+		info!("Painting Core 1 stack: {:?}", CORE1_STACK.as_ptr_range());
+		for b in CORE1_STACK.iter_mut() {
+			*b = CORE1_STACK_PAINT_WORD;
+		}
+	}
+}
+
+/// Reset the DMA Peripheral.
+fn reset_dma_engine(pp: &mut pac::Peripherals) {
+	pp.RESETS.reset.modify(|_r, w| w.dma().set_bit());
+	cortex_m::asm::nop();
+	pp.RESETS.reset.modify(|_r, w| w.dma().clear_bit());
+	while pp.RESETS.reset_done.read().dma().bit_is_clear() {}
+}
+
+/// Measure how much stack space remains unused.
+#[cfg(feature = "check-stack")]
+fn check_stacks() {
+	extern "C" {
+		static mut __sheap: usize;
+		static mut _stack_start: usize;
+	}
+	let stack_len =
+		unsafe { (&_stack_start as *const usize as usize) - (&__sheap as *const usize as usize) };
+	check_stack(
+		unsafe { &__sheap as *const usize },
+		stack_len,
+		CORE0_STACK_PAINT_WORD,
+	);
+	check_stack(
+		unsafe { CORE1_STACK.as_ptr() },
+		unsafe { CORE1_STACK.len() * core::mem::size_of::<usize>() },
+		CORE1_STACK_PAINT_WORD,
+	);
+}
+
+/// Dummy stack checker that does nothing
+#[cfg(not(feature = "check-stack"))]
+fn check_stacks() {}
+
+/// Check an individual stack to see how much has been used
+#[cfg(feature = "check-stack")]
+fn check_stack(start: *const usize, stack_len_bytes: usize, check_word: usize) {
+	let mut p: *const usize = start;
+	let mut free_bytes = 0;
+	loop {
+		let value = unsafe { p.read_volatile() };
+		if value != check_word {
+			break;
+		}
+		// Safety: We must hit a used stack value somewhere!
+		p = unsafe { p.offset(1) };
+		free_bytes += core::mem::size_of::<usize>();
+	}
+	defmt::debug!(
+		"Stack free at 0x{:08x}: {} bytes used of {} bytes",
+		start,
+		stack_len_bytes - free_bytes,
+		stack_len_bytes
+	);
+}
+
+// -----------------------------------------------------------------------------
+// Type impl blocks
+// -----------------------------------------------------------------------------
+
 impl Hardware {
 	/// How fast can the I/O chip SPI CLK input go?
 	const CLOCK_IO: fugit::Rate<u32, 1, 1> = fugit::Rate::<u32, 1, 1>::Hz(10_000_000);
@@ -571,6 +819,7 @@ impl Hardware {
 		timer: pac::TIMER,
 		clocks: ClocksManager,
 		delay: cortex_m::delay::Delay,
+		watchdog: hal::Watchdog,
 		resets: &mut pac::RESETS,
 	) -> (Hardware, IrqPin) {
 		let hal_pins = rp_pico::Pins::new(bank, pads, sio, resets);
@@ -778,6 +1027,7 @@ impl Hardware {
 				timer,
 				card_state: CardState::Unplugged,
 				clocks,
+				watchdog,
 			},
 			hal_pins.gpio20.into_pull_up_input(),
 		)
@@ -1291,136 +1541,9 @@ impl Hardware {
 	}
 }
 
-fn sign_on() {
-	static LOGO_ANSI_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/logo.bytes"));
-	static COPYRIGHT_TEXT: &str = "\
-		\n\
-		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2023\n\
-		This program is free software under GPL v3 (or later)\n\
-		You are entitled to the Complete and Corresponding Source for this BIOS\n\
-		\n\
-		BIOS: \n\
-		BMC : \n\
-		\n\
-		Press ESC to pause...";
-
-	// Create a new temporary console for some boot-up messages
-	let tc = console::TextConsole::new();
-	tc.set_text_buffer(unsafe { &mut vga::GLYPH_ATTR_ARRAY });
-
-	tc.change_attr(Attr::new(
-		TextForegroundColour::WHITE,
-		TextBackgroundColour::BLUE,
-		false,
-	));
-
-	// A crude way to clear the screen
-	for _col in 0..vga::MAX_TEXT_ROWS {
-		writeln!(&tc, " ").unwrap();
-	}
-
-	// Draw the logo
-	tc.move_to(0, 0);
-	for pair in LOGO_ANSI_BYTES.chunks(2) {
-		tc.change_attr(Attr(pair[0]));
-		tc.write_font_glyph(neotron_common_bios::video::Glyph(pair[1]));
-	}
-
-	tc.change_attr(Attr::new(
-		TextForegroundColour::WHITE,
-		TextBackgroundColour::BLUE,
-		false,
-	));
-
-	write!(&tc, "{}", COPYRIGHT_TEXT).unwrap();
-
-	// Draw the BIOS version
-	tc.change_attr(Attr::new(
-		TextForegroundColour::YELLOW,
-		TextBackgroundColour::BLACK,
-		false,
-	));
-	tc.move_to(12, 6);
-	write!(
-		&tc,
-		"v{} (git:{})",
-		env!("CARGO_PKG_VERSION"),
-		VERSION.trim_matches('\0')
-	)
-	.unwrap();
-
-	// Draw the BMC version
-	tc.move_to(13, 6);
-	tc.change_attr(Attr::new(
-		TextForegroundColour::WHITE,
-		TextBackgroundColour::RED,
-		false,
-	));
-	let bmc_ver = {
-		let mut lock = HARDWARE.lock();
-		let hw = lock.as_mut().unwrap();
-		let ver = hw.bmc_read_firmware_version();
-		let _ = hw.play_startup_tune();
-		ver
-	};
-	match bmc_ver {
-		Ok(string_bytes) => match core::str::from_utf8(&string_bytes) {
-			Ok(s) => {
-				write!(&tc, "{}", s.trim_matches('\0')).unwrap();
-			}
-			Err(_e) => {
-				write!(&tc, "Version Unknown").unwrap();
-			}
-		},
-		Err(_e) => {
-			write!(&tc, "Error reading version").unwrap();
-		}
-	}
-
-	tc.change_attr(Attr::new(
-		TextForegroundColour::WHITE,
-		TextBackgroundColour::BLUE,
-		false,
-	));
-
-	// This is in 100ms units
-	let mut countdown = 15;
-	loop {
-		{
-			let mut lock = HARDWARE.lock();
-			let hw = lock.as_mut().unwrap();
-			hw.delay.delay_ms(100);
-		}
-
-		tc.move_to(15, 0);
-		match hid_get_event() {
-			ApiResult::Ok(FfiOption::Some(HidEvent::KeyPress(KeyCode::Escape))) => {
-				write!(&tc, "Paused - Press SPACE to continue...").unwrap();
-				countdown = 0;
-			}
-			ApiResult::Ok(FfiOption::Some(HidEvent::KeyPress(KeyCode::Spacebar))) => {
-				write!(&tc, "Unpaused                           ").unwrap();
-				countdown = 10;
-			}
-			_ => {
-				// ignore
-			}
-		}
-		if countdown == 1 {
-			break;
-		} else if countdown > 1 {
-			countdown -= 1;
-		}
-	}
-}
-
-/// Reset the DMA Peripheral.
-fn reset_dma_engine(pp: &mut pac::Peripherals) {
-	pp.RESETS.reset.modify(|_r, w| w.dma().set_bit());
-	cortex_m::asm::nop();
-	pp.RESETS.reset.modify(|_r, w| w.dma().clear_bit());
-	while pp.RESETS.reset_done.read().dma().bit_is_clear() {}
-}
+// -----------------------------------------------------------------------------
+// Exported API functions
+// -----------------------------------------------------------------------------
 
 /// Returns the version number of the BIOS API.
 pub extern "C" fn api_version_get() -> common::Version {
@@ -1557,7 +1680,7 @@ pub extern "C" fn time_clock_set(time: common::Time) {
 			Ok(_) => {
 				defmt::info!("Time set in RTC OK");
 			}
-			Err(rtc::Error::BusError(_)) => {
+			Err(rtc::Error::Bus(_)) => {
 				defmt::warn!("Failed to talk to RTC to set time");
 			}
 			Err(rtc::Error::DriverBug) => {
@@ -2109,12 +2232,52 @@ extern "C" fn time_ticks_get() -> common::Ticks {
 	common::Ticks(now.ticks())
 }
 
-/// We have a 1 MHz timer
+/// Report that we have a 1 MHz timer
 extern "C" fn time_ticks_per_second() -> common::Ticks {
 	common::Ticks(1_000_000)
 }
 
-static IRQ_PIN: NeoMutex<Option<IrqPin>> = NeoMutex::new(None);
+/// Control the system power.
+extern "C" fn power_control(power_mode: common::PowerMode) -> ! {
+	match power_mode {
+		common::PowerMode::Off => {
+			// TODO: Need to send a message to the BMC to turn us off.
+			// We'll just reboot for now.
+			watchdog_reboot()
+		}
+		common::PowerMode::Bootloader => {
+			// Reboot to USB bootloader with no GPIOs and both USB interfaces
+			// enabled.
+			hal::rom_data::reset_to_usb_boot(0, 0);
+			loop {
+				core::unreachable!()
+			}
+		}
+		_ => {
+			// Anything else causes a reset
+			watchdog_reboot()
+		}
+	}
+}
+
+/// Performs a compare-and-swap on `value`.
+///
+/// * If `value == old_value`, sets `value = new_value` and returns `true`
+/// * If `value != old_value`, returns `false`
+extern "C" fn compare_and_swap_bool(value: &AtomicBool, old_value: bool, new_value: bool) -> bool {
+	critical_section::with(|_cs| {
+		if value.load(Ordering::Relaxed) == old_value {
+			value.store(new_value, Ordering::Relaxed);
+			true
+		} else {
+			false
+		}
+	})
+}
+
+// -----------------------------------------------------------------------------
+// Interrupts and Exceptions
+// -----------------------------------------------------------------------------
 
 /// Called when we get a SIO interrupt on the main bank of GPIO pins.
 ///
@@ -2140,59 +2303,12 @@ fn IO_IRQ_BANK0() {
 	cortex_m::asm::sev();
 }
 
-/// Measure how much stack space remains unused.
-#[cfg(feature = "check-stack")]
-fn check_stacks() {
-	extern "C" {
-		static mut __sheap: usize;
-		static mut _stack_start: usize;
-	}
-	let stack_len =
-		unsafe { (&_stack_start as *const usize as usize) - (&__sheap as *const usize as usize) };
-	check_stack(
-		unsafe { &__sheap as *const usize },
-		stack_len,
-		CORE0_STACK_PAINT_WORD,
-	);
-	check_stack(
-		unsafe { CORE1_STACK.as_ptr() },
-		unsafe { CORE1_STACK.len() * core::mem::size_of::<usize>() },
-		CORE1_STACK_PAINT_WORD,
-	);
-}
-
-/// Dummy stack checker that does nothing
-#[cfg(not(feature = "check-stack"))]
-fn check_stacks() {}
-
-/// Check an individual stack to see how much has been used
-#[cfg(feature = "check-stack")]
-fn check_stack(start: *const usize, stack_len_bytes: usize, check_word: usize) {
-	let mut p: *const usize = start;
-	let mut free_bytes = 0;
-	loop {
-		let value = unsafe { p.read_volatile() };
-		if value != check_word {
-			break;
-		}
-		// Safety: We must hit a used stack value somewhere!
-		p = unsafe { p.offset(1) };
-		free_bytes += core::mem::size_of::<usize>();
-	}
-	defmt::debug!(
-		"Stack free at 0x{:08x}: {} bytes used of {} bytes",
-		start,
-		stack_len_bytes - free_bytes,
-		stack_len_bytes
-	);
-}
-
 /// Called when the CPU Hard Faults.
 ///
 /// This probably means something panicked, and the Rust code was compiled to
 /// abort-on-panic. Or someone jumped to a bad address.
 ///
-/// Hopefully the debug output we print will of be some use. Think of it as our
+/// Hopefully the debug output we print will be of some use. Think of it as our
 /// Blue Screen of Death, or Guru Meditation Error.
 #[cortex_m_rt::exception]
 unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
@@ -2200,7 +2316,7 @@ unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
 	let tc = console::TextConsole::new();
 	tc.set_text_buffer(unsafe { &mut vga::GLYPH_ATTR_ARRAY });
 	for _col in 0..vga::MAX_TEXT_ROWS {
-		let _ = writeln!(&tc, "");
+		let _ = writeln!(&tc);
 	}
 	tc.move_to(0, 0);
 	tc.change_attr(Attr::new(

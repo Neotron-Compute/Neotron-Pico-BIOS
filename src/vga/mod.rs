@@ -1408,12 +1408,6 @@ pub fn init(
 	// cannot be reconfigured at a later time, but they do keep on running
 	// as-is.
 
-	unsafe {
-		for b in super::CORE1_STACK.iter_mut() {
-			*b = super::CORE1_STACK_PAINT_WORD;
-		}
-	}
-
 	debug!(
 		"Core 1 stack: {:08x}, {} bytes",
 		unsafe { super::CORE1_STACK.as_ptr() },
@@ -1451,28 +1445,22 @@ pub fn set_video_mode(mode: crate::common::video::Mode) -> bool {
 	}
 }
 
-/// Sets the current video mode
+/// Check the given video mode is allowable
 pub fn test_video_mode(mode: crate::common::video::Mode) -> bool {
-	match (
-		mode.timing(),
-		mode.format(),
-		mode.is_horiz_2x(),
-		mode.is_vert_2x(),
-	) {
+	matches!(
 		(
-			crate::common::video::Timing::T640x480,
+			mode.timing(),
+			mode.format(),
+			mode.is_horiz_2x(),
+			mode.is_vert_2x(),
+		),
+		(
+			crate::common::video::Timing::T640x480 | crate::common::video::Timing::T640x400,
 			crate::common::video::Format::Text8x16 | crate::common::video::Format::Text8x8,
 			false,
 			false,
-		) => true,
-		(
-			crate::common::video::Timing::T640x400,
-			crate::common::video::Format::Text8x16 | crate::common::video::Format::Text8x8,
-			false,
-			false,
-		) => true,
-		_ => false,
-	}
+		)
+	)
 }
 
 /// Get the current scan line.

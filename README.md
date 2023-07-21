@@ -94,9 +94,7 @@ The Neotron BIOS uses the [defmt](https://crates.io/crates/defmt) crate to provi
    cargo install probe-run
    ```
 
-5. Power on your Neotron Pico by applying 12V and pressing the On/Off button.
-
-6. Build the Neotron OS:
+5. Build the Neotron OS:
     We use the "neotron-flash-1002.ld" linker script to link it at `0x1002_0000`.
 
     ```console
@@ -104,7 +102,18 @@ The Neotron BIOS uses the [defmt](https://crates.io/crates/defmt) crate to provi
     user@host ~/neotron-os $ arm-none-eabi-objcopy -O binary ./target/thumbv6m-none-eabi/release/flash1002 ../neotron-pico-bios/src/thumbv6m-none-eabi-flash1002-libneotron_os.bin
     ```
 
-7. Build and load the Neotron BIOS, and view the debug output stream, with `cargo run --release`:
+5. Power on your Neotron Pico into bootloader mode by applying 12V, holding down
+   the "BOOTSEL" button on the Raspberry Pi Pico and then and tapping the On/Off
+   button on the Neotron.
+
+   If you don't put the RP2040 into bootloader mode then when `probe-run` resets
+   the chip after programming, the firmware will detect it has had an incomplete
+   reset and cause a full reset. This makes the video output more reliable, but
+   the full reset will immediately disconnect `probe-run` so you won't see any
+   log messages. Booting the RP2040 in USB bootloader mode avoids this issue by
+   making the `probe-run` triggered reset look more like a full reset.
+
+7. Build and load the Neotron BIOS, and view the debug output stream, with `cargo run --release`.
 
     ```console
     user@host ~/neotron-pico-bios $ DEFMT_LOG=debug cargo run --release
