@@ -40,6 +40,7 @@ use super::SpiBus;
 /// Assumes the device is in `BANK = 0` mode.
 #[derive(defmt::Format, Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(u8)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum Register {
 	/// Data Direction Register A
 	DDRA = 0x00,
