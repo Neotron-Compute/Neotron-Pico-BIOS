@@ -51,6 +51,7 @@ mod multicore;
 mod mutex;
 mod rtc;
 mod sdcard;
+mod tlv320aic23b;
 mod vga;
 
 // -----------------------------------------------------------------------------
@@ -172,6 +173,8 @@ struct Hardware {
 	clocks: ClocksManager,
 	/// The watchdog
 	watchdog: hal::Watchdog,
+	/// The audio CODEC
+	codec: tlv320aic23b::Codec,
 }
 
 /// Flips between true and false so we always send a unique read request
@@ -999,6 +1002,27 @@ impl Hardware {
 			i2s_lr_clock: hal_pins.gpio28.into_mode(),
 		};
 
+		let mut codec = tlv320aic23b::Codec::new(tlv320aic23b::BusAddress::CsLow);
+		if let Err(hal::i2c::Error::Abort(code)) = codec.reset(&mut i2c.acquire_i2c()) {
+			defmt::error!("CODEC did not respond: code {:?}", code);
+		}
+		codec.set_digital_interface_enabled(true);
+		codec.set_dac_enable(true);
+		// TODO: turn off bypass if you want to hear digital output
+		codec.set_bypass(true);
+		codec.set_line_input_mute(false, tlv320aic23b::Channel::Both);
+		codec.set_powered_on(tlv320aic23b::Subsystem::AnalogDigitalConverter, true);
+		codec.set_powered_on(tlv320aic23b::Subsystem::MicrophoneInput, true);
+		codec.set_powered_on(tlv320aic23b::Subsystem::LineInput, true);
+		codec.set_sample_rate(
+			&tlv320aic23b::CONFIG_USB_48K,
+			tlv320aic23b::Mode::Main,
+			tlv320aic23b::WordLength::B16,
+		);
+		if let Err(hal::i2c::Error::Abort(code)) = codec.sync(&mut i2c.acquire_i2c()) {
+			defmt::error!("CODEC did not respond: code {:?}", code);
+		}
+
 		(
 			Hardware {
 				pins,
@@ -1028,6 +1052,7 @@ impl Hardware {
 				card_state: CardState::Unplugged,
 				clocks,
 				watchdog,
+				codec,
 			},
 			hal_pins.gpio20.into_pull_up_input(),
 		)
@@ -1994,9 +2019,56 @@ extern "C" fn i2c_write_read(
 }
 
 extern "C" fn audio_mixer_channel_get_info(
-	_audio_mixer_id: u8,
+	audio_mixer_id: u8,
 ) -> FfiOption<common::audio::MixerChannelInfo> {
-	FfiOption::None
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+
+	match audio_mixer_id {
+		0 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("Left"),
+			direction: common::audio::Direction::Input,
+			max_level: 31,
+			current_level: hw.codec.get_line_input_volume_steps().0,
+		}),
+		1 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("Right"),
+			direction: common::audio::Direction::Input,
+			max_level: 31,
+			current_level: hw.codec.get_line_input_volume_steps().0,
+		}),
+		2 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("Left"),
+			direction: common::audio::Direction::Output,
+			max_level: 127,
+			current_level: hw.codec.get_headphone_output_volume_steps().0,
+		}),
+		3 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("Right"),
+			direction: common::audio::Direction::Output,
+			max_level: 127,
+			current_level: hw.codec.get_headphone_output_volume_steps().0,
+		}),
+		4 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("Mic Mute"),
+			direction: common::audio::Direction::Input,
+			max_level: 1,
+			current_level: 0,
+		}),
+		5 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("Mic Enable"),
+			direction: common::audio::Direction::Input,
+			max_level: 1,
+			current_level: 0,
+		}),
+		6 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("Mic Boost"),
+			direction: common::audio::Direction::Input,
+			max_level: 1,
+			current_level: 0,
+		}),
+		_ => FfiOption::None,
+	}
 }
 
 extern "C" fn audio_mixer_channel_set_level(_audio_mixer_id: u8, _level: u8) -> ApiResult<()> {
