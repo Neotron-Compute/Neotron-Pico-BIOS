@@ -591,6 +591,7 @@ dependencies = [
  "rp-pico",
  "rp2040-boot2",
  "shared-bus",
+ "tlv320aic23",
  "vte",
 ]
 
@@ -1106,6 +1107,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2c9d3793400a45f954c52e73d068316d76b6f4e36977e3fcebb13a2721e80237"
 dependencies = [
  "crunchy",
+]
+
+[[package]]
+name = "tlv320aic23"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa5c99c9953031293060573e1f17e64878c4cb308e1d77aa5db3c8f8d5727f51"
+dependencies = [
+ "embedded-hal",
 ]
 
 [[package]]
