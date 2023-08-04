@@ -19,9 +19,13 @@ MEMORY {
      */
     FLASH : ORIGIN = 0x10000100, LENGTH = 128K - 0x100
     /*
+     * Here's 384K for the OS
+     */
+    FLASH_OS : ORIGIN = 0x10020000, LENGTH = 384K
+    /*
      * This is the remainder of the 2048 KiB flash chip.
      */
-    FLASH_OS : ORIGIN = 0x10020000, LENGTH = 2048K - 128K
+    FLASH_SAMPLES : ORIGIN = 0x10080000, LENGTH = 2048K - 512K
     /*
      * This is the bottom of the four striped banks of SRAM in the RP2040.
      */
@@ -54,6 +58,12 @@ SECTIONS {
     {
         KEEP(*(.flash_os));
     } > FLASH_OS
+
+    /* ### Samples */
+    .flash_samples ORIGIN(FLASH_SAMPLES) :
+    {
+        KEEP(*(.flash_samples));
+    } > FLASH_SAMPLES
 } INSERT BEFORE .text;
 
 

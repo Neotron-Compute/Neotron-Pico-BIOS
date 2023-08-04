@@ -46,6 +46,7 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 // -----------------------------------------------------------------------------
 
 mod console;
+mod i2s;
 mod mcp23s17;
 mod multicore;
 mod mutex;
@@ -175,6 +176,8 @@ struct Hardware {
 	watchdog: hal::Watchdog,
 	/// The audio CODEC
 	codec: tlv320aic23b::Codec,
+	/// PCM sample output queue
+	sample_queue: rp_pico::hal::pio::Tx<(pac::PIO1, rp_pico::hal::pio::SM0)>,
 }
 
 /// Flips between true and false so we always send a unique read request
@@ -453,6 +456,7 @@ fn main() -> ! {
 		pp.SPI0,
 		pp.I2C1,
 		pp.TIMER,
+		pp.PIO1,
 		clocks,
 		delay,
 		watchdog,
@@ -660,6 +664,13 @@ fn sign_on() {
 		false,
 	));
 
+	{
+		let mut lock = HARDWARE.lock();
+		let hw = lock.as_mut().unwrap();
+		let (_, samples, _) = unsafe { i2s::TEST_DATA.align_to() };
+		i2s::play(&mut hw.sample_queue, samples);
+	}
+
 	// This is in 100ms units
 	let mut countdown = 15;
 	loop {
@@ -820,6 +831,7 @@ impl Hardware {
 		spi: pac::SPI0,
 		i2c: pac::I2C1,
 		timer: pac::TIMER,
+		pio1: pac::PIO1,
 		clocks: ClocksManager,
 		delay: cortex_m::delay::Delay,
 		watchdog: hal::Watchdog,
@@ -1008,20 +1020,24 @@ impl Hardware {
 		}
 		codec.set_digital_interface_enabled(true);
 		codec.set_dac_enable(true);
-		// TODO: turn off bypass if you want to hear digital output
-		codec.set_bypass(true);
-		codec.set_line_input_mute(false, tlv320aic23b::Channel::Both);
+		codec.set_dac_mute(false);
+		codec.set_bypass(false);
+		codec.set_line_input_mute(true, tlv320aic23b::Channel::Both);
 		codec.set_powered_on(tlv320aic23b::Subsystem::AnalogDigitalConverter, true);
 		codec.set_powered_on(tlv320aic23b::Subsystem::MicrophoneInput, true);
 		codec.set_powered_on(tlv320aic23b::Subsystem::LineInput, true);
+		codec.set_headphone_output_volume_steps(100, tlv320aic23b::Channel::Both);
 		codec.set_sample_rate(
 			&tlv320aic23b::CONFIG_USB_48K,
-			tlv320aic23b::Mode::Main,
+			tlv320aic23b::Mode::Secondary,
 			tlv320aic23b::WordLength::B16,
+			tlv320aic23b::DataFormat::I2s,
 		);
 		if let Err(hal::i2c::Error::Abort(code)) = codec.sync(&mut i2c.acquire_i2c()) {
 			defmt::error!("CODEC did not respond: code {:?}", code);
 		}
+
+		let sample_queue = i2s::init(pio1, resets);
 
 		(
 			Hardware {
@@ -1053,6 +1069,7 @@ impl Hardware {
 				clocks,
 				watchdog,
 				codec,
+				sample_queue,
 			},
 			hal_pins.gpio20.into_pull_up_input(),
 		)
@@ -2026,53 +2043,83 @@ extern "C" fn audio_mixer_channel_get_info(
 
 	match audio_mixer_id {
 		0 => FfiOption::Some(common::audio::MixerChannelInfo {
-			name: common::FfiString::new("Left"),
+			name: common::FfiString::new("LeftIn"),
 			direction: common::audio::Direction::Input,
 			max_level: 31,
 			current_level: hw.codec.get_line_input_volume_steps().0,
 		}),
 		1 => FfiOption::Some(common::audio::MixerChannelInfo {
-			name: common::FfiString::new("Right"),
+			name: common::FfiString::new("RightIn"),
 			direction: common::audio::Direction::Input,
 			max_level: 31,
-			current_level: hw.codec.get_line_input_volume_steps().0,
+			current_level: hw.codec.get_line_input_volume_steps().1,
 		}),
 		2 => FfiOption::Some(common::audio::MixerChannelInfo {
-			name: common::FfiString::new("Left"),
+			name: common::FfiString::new("LeftOut"),
 			direction: common::audio::Direction::Output,
 			max_level: 127,
 			current_level: hw.codec.get_headphone_output_volume_steps().0,
 		}),
 		3 => FfiOption::Some(common::audio::MixerChannelInfo {
-			name: common::FfiString::new("Right"),
+			name: common::FfiString::new("RightOut"),
 			direction: common::audio::Direction::Output,
 			max_level: 127,
-			current_level: hw.codec.get_headphone_output_volume_steps().0,
-		}),
-		4 => FfiOption::Some(common::audio::MixerChannelInfo {
-			name: common::FfiString::new("Mic Mute"),
-			direction: common::audio::Direction::Input,
-			max_level: 1,
-			current_level: 0,
-		}),
-		5 => FfiOption::Some(common::audio::MixerChannelInfo {
-			name: common::FfiString::new("Mic Enable"),
-			direction: common::audio::Direction::Input,
-			max_level: 1,
-			current_level: 0,
-		}),
-		6 => FfiOption::Some(common::audio::MixerChannelInfo {
-			name: common::FfiString::new("Mic Boost"),
-			direction: common::audio::Direction::Input,
-			max_level: 1,
-			current_level: 0,
+			current_level: hw.codec.get_headphone_output_volume_steps().1,
 		}),
 		_ => FfiOption::None,
 	}
 }
 
-extern "C" fn audio_mixer_channel_set_level(_audio_mixer_id: u8, _level: u8) -> ApiResult<()> {
-	ApiResult::Err(CError::Unimplemented)
+extern "C" fn audio_mixer_channel_set_level(audio_mixer_id: u8, level: u8) -> ApiResult<()> {
+	let FfiOption::Some(info) = audio_mixer_channel_get_info(audio_mixer_id) else {
+		return ApiResult::Err(neotron_common_bios::Error::InvalidDevice);
+	};
+
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+
+	match audio_mixer_id {
+		0 => {
+			if level <= info.max_level {
+				hw.codec
+					.set_line_input_volume_steps(level, tlv320aic23b::Channel::Left)
+			} else {
+				return ApiResult::Err(neotron_common_bios::Error::UnsupportedConfiguration(0));
+			}
+		}
+		1 => {
+			if level <= info.max_level {
+				hw.codec
+					.set_line_input_volume_steps(level, tlv320aic23b::Channel::Right)
+			} else {
+				return ApiResult::Err(neotron_common_bios::Error::UnsupportedConfiguration(0));
+			}
+		}
+		2 => {
+			if level <= info.max_level {
+				hw.codec
+					.set_headphone_output_volume_steps(level, tlv320aic23b::Channel::Left)
+			} else {
+				return ApiResult::Err(neotron_common_bios::Error::UnsupportedConfiguration(0));
+			}
+		}
+		3 => {
+			if level <= info.max_level {
+				hw.codec
+					.set_headphone_output_volume_steps(level, tlv320aic23b::Channel::Right)
+			} else {
+				return ApiResult::Err(neotron_common_bios::Error::UnsupportedConfiguration(0));
+			}
+		}
+		_ => {
+			return ApiResult::Err(neotron_common_bios::Error::InvalidDevice);
+		}
+	};
+	if hw.codec.sync(&mut hw.i2c.acquire_i2c()).is_ok() {
+		neotron_common_bios::FfiResult::Ok(())
+	} else {
+		ApiResult::Err(neotron_common_bios::Error::DeviceError(0))
+	}
 }
 
 extern "C" fn audio_output_set_config(_config: common::audio::Config) -> ApiResult<()> {
