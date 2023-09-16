@@ -88,10 +88,10 @@ The Neotron BIOS uses the [defmt](https://crates.io/crates/defmt) crate to provi
 
 3. If your *Debugger* Pico was a bare Pi Pico (and not a Debug Probe) then flash it with <https://github.com/raspberrypi/picoprobe> or <https://github.com/majbthrd/DapperMime> firmware (e.g. by copying the UF2 file to the USB Mass Storage device)
 
-4. On your PC, install [*probe-run*](https://github.com/knurling-rs/probe-run), the programming tool from [Ferrous System's](https://www.ferrous-systems.com) [Knurling Project](https://github.com/knurling).
+4. On your PC, install [*probe-rs*](https://github.com/probe-rs), a microcontroller flashing tool.
 
    ```sh
-   cargo install probe-run
+   cargo install probe-rs --features=cli
    ```
 
 5. Build the Neotron OS:
@@ -102,16 +102,16 @@ The Neotron BIOS uses the [defmt](https://crates.io/crates/defmt) crate to provi
     user@host ~/neotron-os $ arm-none-eabi-objcopy -O binary ./target/thumbv6m-none-eabi/release/flash1002 ../neotron-pico-bios/src/thumbv6m-none-eabi-flash1002-libneotron_os.bin
     ```
 
-5. Power on your Neotron Pico into bootloader mode by applying 12V, holding down
+6. Power on your Neotron Pico into bootloader mode by applying 12V, holding down
    the "BOOTSEL" button on the Raspberry Pi Pico and then and tapping the On/Off
    button on the Neotron.
 
-   If you don't put the RP2040 into bootloader mode then when `probe-run` resets
+   If you don't put the RP2040 into bootloader mode then when `probe-rs` resets
    the chip after programming, the firmware will detect it has had an incomplete
    reset and cause a full reset. This makes the video output more reliable, but
-   the full reset will immediately disconnect `probe-run` so you won't see any
+   the full reset will immediately disconnect `probe-rs` so you won't see any
    log messages. Booting the RP2040 in USB bootloader mode avoids this issue by
-   making the `probe-run` triggered reset look more like a full reset.
+   making the `probe-rs` triggered reset look more like a full reset.
 
 7. Build and load the Neotron BIOS, and view the debug output stream, with `cargo run --release`.
 
@@ -119,7 +119,7 @@ The Neotron BIOS uses the [defmt](https://crates.io/crates/defmt) crate to provi
     user@host ~/neotron-pico-bios $ DEFMT_LOG=debug cargo run --release
       Compiling neotron-pico-bios v0.1.0 (/home/jonathan/Documents/neotron/neotron-pico-bios)
         Finished release [optimized + debuginfo] target(s) in 0.76s
-        Running `probe-run-rp --chip RP2040 target/thumbv6m-none-eabi/release/neotron-pico-bios`
+        Running `probe-rs run --chip RP2040 target/thumbv6m-none-eabi/release/neotron-pico-bios`
     (HOST) INFO  flashing program (7.30 KiB)
     (HOST) INFO  success!
     ────────────────────────────────────────────────────────────────────────────────
@@ -133,29 +133,30 @@ The Neotron BIOS uses the [defmt](https://crates.io/crates/defmt) crate to provi
     └─ neotron_pico_bios::__cortex_m_rt_main @ src/main.rs:128
     ```
 
-    You should see your Neotron Pico boot, both over RTT in the `probe-run` output, and also on the VGA output.
+    You should see your Neotron Pico boot, both over RTT in the `probe-rs` output, and also on the VGA output.
 
 ## Multiple Probes
 
 If you have multiple `probe-rs` compatible probes attached to your computer,
 you will receive an error message.
 
-You can set the PROBE_RUN_PROBE environment variable to select one of the
-available probes, like so:
+
+You will need to check what probes are available and edit `.cargo/config.toml` to add the appropriate `--probe VID:PID` argument.
 
 ```console
-$ probe-run --list-probes
+$ probe-rs list
 the following probes were found:
 [0]: Picoprobe CMSIS-DAP (VID: 2e8a, PID: 000c, Serial: Exxxxxxxxxxxxxx6, CmsisDap)
 [1]: STLink V2 (VID: 0483, PID: 3748, Serial: 0xxxxxxxxxxxxxxxxxxxxxxE, StLink)
-user@host ~/neotron-pico-bios $ PROBE_RUN_PROBE='0483:3748' DEFMT_LOG=debug cargo run --release
+user@host ~/neotron-pico-bios $ $EDITOR .cargo/config.toml
+user@host ~/neotron-pico-bios $ cat .cargo/config.toml | grep runner
+# runner = "elf2uf2-rs -d"
+# runner = "probe-rs run --chip RP2040"
+runner = "probe-rs run --chip RP2040 --probe 2e8a:000c"
 ```
 
 You can also just provide the probe Serial number, for example if you have multiple
 identical probes.
-
-The documentation for this feature can be found at
-<https://github.com/knurling-rs/probe-run#12-multiple-probes>
 
 ## Changelog
 
