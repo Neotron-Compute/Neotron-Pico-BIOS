@@ -24,20 +24,16 @@ MEMORY {
     FLASH_OS : ORIGIN = 0x10020000, LENGTH = 2048K - 128K
     /*
      * This is the bottom of the four striped banks of SRAM in the RP2040.
-     *
-     * We can think of RAM as 66 (0x42) blocks of 4 KiB. The OS gets the first
-     * 56 (0x38) of them. Of those it'll keep one for itself and give the other
-     * 55 (0x37) over as the Transient Program Area (TPA).
      */
-    RAM_OS : ORIGIN = 0x20000000, LENGTH = 0x38000
+    RAM_OS : ORIGIN = 0x20000000, LENGTH = 0x38FE0
     /*
      * This is the top of the four striped banks of SRAM in the RP2040, plus
      * SRAM_BANK4 and SRAM_BANK5.
      *
-     * We give ourselves ten 4K pages [0x38_000..0x41_FFF]. This includes our
-     * stack space.
+     * This is carefully calculated to give us 8 KiB of stack space and ensure
+     * the defmt buffer doesn't span across SRAM_BANK3 and SRAM_BANK4.
      */
-    RAM : ORIGIN = 0x20038000, LENGTH = 40K
+    RAM : ORIGIN = 0x20038FE0, LENGTH = 0x9020
 }
 
 /*
