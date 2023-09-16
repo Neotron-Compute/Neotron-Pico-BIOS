@@ -767,7 +767,7 @@ fn check_stack(start: *const usize, stack_len_bytes: usize, check_word: usize) {
 		p = unsafe { p.offset(1) };
 		free_bytes += core::mem::size_of::<usize>();
 	}
-	defmt::debug!(
+	defmt::info!(
 		"Stack free at 0x{:08x}: {} bytes used of {} bytes",
 		start,
 		stack_len_bytes - free_bytes,
