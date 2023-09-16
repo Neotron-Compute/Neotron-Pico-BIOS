@@ -58,6 +58,8 @@ atomic-polyfill = "1.0.2"
 embedded-sdmmc = { version = "0.5", default-features = false, features = [
     "defmt-log"
 ] }
+# CODEC register control
+tlv320aic23 = "0.1.0"
 
 [build-dependencies]
 neotron-common-bios = "0.11.0"
