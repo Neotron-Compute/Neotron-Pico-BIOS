@@ -1790,7 +1790,12 @@ pub extern "C" fn video_get_mode() -> common::video::Mode {
 /// to provide the 'basic' text buffer experience from reserves, so this
 /// function will never return `null` on start-up.
 pub extern "C" fn video_get_framebuffer() -> *mut u8 {
-	unsafe { vga::GLYPH_ATTR_ARRAY.as_mut_ptr() as *mut u8 }
+	let ptr = vga::CUSTOM_FB.load(Ordering::Relaxed);
+	if ptr.is_null() {
+		unsafe { vga::GLYPH_ATTR_ARRAY.as_mut_ptr() as *mut u8 }
+	} else {
+		ptr
+	}
 }
 
 /// Set the framebuffer address.
@@ -1804,8 +1809,9 @@ pub extern "C" fn video_get_framebuffer() -> *mut u8 {
 ///
 /// The pointer must point to enough video memory to handle the current video
 /// mode, and any future video mode you set.
-pub unsafe extern "C" fn video_set_framebuffer(_buffer: *const u8) -> ApiResult<()> {
-	ApiResult::Err(CError::Unimplemented)
+pub unsafe extern "C" fn video_set_framebuffer(buffer: *const u8) -> ApiResult<()> {
+	vga::CUSTOM_FB.store(buffer as *mut u8, Ordering::Relaxed);
+	ApiResult::Ok(())
 }
 
 /// Find out whether the given video mode needs more VRAM than we currently have.
@@ -2398,7 +2404,9 @@ extern "C" fn block_dev_eject(_dev_id: u8) -> ApiResult<()> {
 /// Sleep the CPU until the next interrupt.
 extern "C" fn power_idle() {
 	if !INTERRUPT_PENDING.load(Ordering::Relaxed) {
-		cortex_m::asm::wfe();
+		unsafe {
+			core::arch::asm!("wfe");
+		}
 	}
 }
 

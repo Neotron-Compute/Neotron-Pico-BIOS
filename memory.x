@@ -25,15 +25,18 @@ MEMORY {
     /*
      * This is the bottom of the four striped banks of SRAM in the RP2040.
      */
-    RAM_OS : ORIGIN = 0x20000000, LENGTH = 0x38FE0
+    RAM_OS : ORIGIN = 0x20000000, LENGTH = 0x42000 - 0x9080
     /*
      * This is the top of the four striped banks of SRAM in the RP2040, plus
      * SRAM_BANK4 and SRAM_BANK5.
      *
      * This is carefully calculated to give us 8 KiB of stack space and ensure
      * the defmt buffer doesn't span across SRAM_BANK3 and SRAM_BANK4.
+     *
+     * 0x9080 should be the (size of .data + size of .bss + size of .uninit +
+     * 0x2000 for the stack).
      */
-    RAM : ORIGIN = 0x20038FE0, LENGTH = 0x9020
+    RAM : ORIGIN = 0x20042000 - 0x9080, LENGTH = 0x9080
 }
 
 /*
