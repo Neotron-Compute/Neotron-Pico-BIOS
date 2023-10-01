@@ -589,6 +589,7 @@ dependencies = [
  "pio-proc",
  "rp-pico",
  "rp2040-boot2",
+ "rp2040-hal",
  "shared-bus",
  "tlv320aic23",
  "vte",
@@ -875,6 +876,7 @@ checksum = "9888dd4a476bb7b25000f6497fed50ade399c38bbfebaa18d14f4fc651a62855"
 dependencies = [
  "cortex-m",
  "critical-section",
+ "defmt",
  "embedded-dma",
  "embedded-hal",
  "fugit",

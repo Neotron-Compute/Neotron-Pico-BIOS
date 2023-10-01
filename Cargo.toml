@@ -10,12 +10,14 @@ version = "0.6.0"
 [dependencies]
 # Useful Cortex-M specific functions (e.g. SysTick)
 cortex-m = "0.7"
-# The Raspberry Pi Pico HAL
+# The Raspberry Pi Pico BSP
 rp-pico = { version = "0.7", default-features = false, features = [
     "rt",
     "critical-section-impl",
     "rom-func-cache"
 ] }
+# The Raspberry Pi RP2040 HAL 
+rp2040-hal = { version = "0.8", features = [ "defmt" ] }
 # Cortex-M run-time (or start-up) code
 cortex-m-rt = "0.7"
 # The BIOS to OS API
