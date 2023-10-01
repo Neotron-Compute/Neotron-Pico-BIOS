@@ -1760,6 +1760,7 @@ pub extern "C" fn video_is_valid_mode(mode: common::video::Mode) -> bool {
 /// pointer to a block of size `Mode::frame_size_bytes()` to
 /// `video_set_framebuffer` before any video will appear.
 pub extern "C" fn video_set_mode(mode: common::video::Mode) -> ApiResult<()> {
+	defmt::info!("Changing to mode {}", mode.as_u8());
 	if vga::set_video_mode(mode) {
 		ApiResult::Ok(())
 	} else {
