@@ -1734,15 +1734,57 @@ pub extern "C" fn time_clock_set(time: common::Time) {
 /// Configuration data is, to the BIOS, just a block of bytes of a given
 /// length. How it stores them is up to the BIOS - it could be EEPROM, or
 /// battery-backed SRAM.
-pub extern "C" fn configuration_get(_buffer: FfiBuffer) -> ApiResult<usize> {
-	ApiResult::Err(CError::Unimplemented)
+pub extern "C" fn configuration_get(mut buffer: FfiBuffer) -> ApiResult<usize> {
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+	let Some(slice) = buffer.as_mut_slice() else {
+		return ApiResult::Err(CError::Unimplemented);
+	};
+	match hw.rtc.configuration_get(hw.i2c.acquire_i2c(), slice) {
+		Ok(n) => {
+			defmt::info!("Config Read {:x}", &slice[0..usize::from(n)]);
+			ApiResult::Ok(usize::from(n))
+		}
+		Err(rtc::Error::NoRtcFound) => {
+			defmt::info!("Can't get config - no RTC present");
+			ApiResult::Err(CError::InvalidDevice)
+		}
+		Err(rtc::Error::DriverBug) => {
+			defmt::warn!("Can't get config - Driver Bug");
+			ApiResult::Err(CError::DeviceError(0))
+		}
+		Err(rtc::Error::Bus(e)) => {
+			defmt::warn!("Can't get config - bus error {:?}", e);
+			ApiResult::Err(CError::DeviceError(1))
+		}
+	}
 }
 
 /// Set the configuration data block.
 ///
 /// See `configuration_get`.
-pub extern "C" fn configuration_set(_buffer: FfiByteSlice) -> ApiResult<()> {
-	ApiResult::Err(CError::Unimplemented)
+pub extern "C" fn configuration_set(buffer: FfiByteSlice) -> ApiResult<()> {
+	defmt::info!("Config save {:x}", buffer.as_slice());
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+	match hw
+		.rtc
+		.configuration_set(hw.i2c.acquire_i2c(), buffer.as_slice())
+	{
+		Ok(()) => ApiResult::Ok(()),
+		Err(rtc::Error::NoRtcFound) => {
+			defmt::info!("Can't save config - no RTC present");
+			ApiResult::Err(CError::InvalidDevice)
+		}
+		Err(rtc::Error::DriverBug) => {
+			defmt::warn!("Can't save config - Driver Bug");
+			ApiResult::Err(CError::DeviceError(0))
+		}
+		Err(rtc::Error::Bus(e)) => {
+			defmt::warn!("Can't save config - bus error {:?}", e);
+			ApiResult::Err(CError::DeviceError(0))
+		}
+	}
 }
 
 /// Does this Neotron BIOS support this video mode?
@@ -1760,6 +1802,7 @@ pub extern "C" fn video_is_valid_mode(mode: common::video::Mode) -> bool {
 /// pointer to a block of size `Mode::frame_size_bytes()` to
 /// `video_set_framebuffer` before any video will appear.
 pub extern "C" fn video_set_mode(mode: common::video::Mode) -> ApiResult<()> {
+	defmt::info!("Changing to mode {}", mode.as_u8());
 	if vga::set_video_mode(mode) {
 		ApiResult::Ok(())
 	} else {
@@ -1790,7 +1833,12 @@ pub extern "C" fn video_get_mode() -> common::video::Mode {
 /// to provide the 'basic' text buffer experience from reserves, so this
 /// function will never return `null` on start-up.
 pub extern "C" fn video_get_framebuffer() -> *mut u8 {
-	unsafe { vga::GLYPH_ATTR_ARRAY.as_mut_ptr() as *mut u8 }
+	let ptr = vga::CUSTOM_FB.load(Ordering::Relaxed);
+	if ptr.is_null() {
+		unsafe { vga::GLYPH_ATTR_ARRAY.as_mut_ptr() as *mut u8 }
+	} else {
+		ptr
+	}
 }
 
 /// Set the framebuffer address.
@@ -1804,8 +1852,9 @@ pub extern "C" fn video_get_framebuffer() -> *mut u8 {
 ///
 /// The pointer must point to enough video memory to handle the current video
 /// mode, and any future video mode you set.
-pub unsafe extern "C" fn video_set_framebuffer(_buffer: *const u8) -> ApiResult<()> {
-	ApiResult::Err(CError::Unimplemented)
+pub unsafe extern "C" fn video_set_framebuffer(buffer: *const u8) -> ApiResult<()> {
+	vga::CUSTOM_FB.store(buffer as *mut u8, Ordering::Relaxed);
+	ApiResult::Ok(())
 }
 
 /// Find out whether the given video mode needs more VRAM than we currently have.
@@ -2398,7 +2447,9 @@ extern "C" fn block_dev_eject(_dev_id: u8) -> ApiResult<()> {
 /// Sleep the CPU until the next interrupt.
 extern "C" fn power_idle() {
 	if !INTERRUPT_PENDING.load(Ordering::Relaxed) {
-		cortex_m::asm::wfe();
+		unsafe {
+			core::arch::asm!("wfe");
+		}
 	}
 }
 

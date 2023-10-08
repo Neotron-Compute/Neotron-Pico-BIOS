@@ -151,6 +151,95 @@ impl Rtc {
 			Self::None => Err(Error::NoRtcFound),
 		}
 	}
+
+	/// Store configuration in the RTC's RAM
+	pub fn configuration_set<T, E>(&mut self, bus: T, data: &[u8]) -> Result<(), Error<E>>
+	where
+		T: embedded_hal::blocking::i2c::WriteRead<Error = E>
+			+ embedded_hal::blocking::i2c::Write<Error = E>,
+	{
+		match self {
+			Self::Ds1307 => {
+				let mut driver = ds1307::Ds1307::new(bus);
+				driver.write_ram(1, data).map_err(|e| match e {
+					ds1307::Error::I2C(bus_error) => Error::Bus(bus_error),
+					ds1307::Error::InvalidInputData => Error::DriverBug,
+				})?;
+				driver
+					.write_ram(0, &[data.len() as u8])
+					.map_err(|e| match e {
+						ds1307::Error::I2C(bus_error) => Error::Bus(bus_error),
+						ds1307::Error::InvalidInputData => Error::DriverBug,
+					})
+			}
+			Self::Mcp7940n => {
+				let mut driver = mcp794xx::Mcp794xx::new_mcp7940n(bus);
+				driver.write_sram_data(1, data).map_err(|e| match e {
+					mcp794xx::Error::Comm(bus_error) => Error::Bus(bus_error),
+					mcp794xx::Error::InvalidInputData => Error::DriverBug,
+				})?;
+				driver
+					.write_sram_byte(0, data.len() as u8)
+					.map_err(|e| match e {
+						mcp794xx::Error::Comm(bus_error) => Error::Bus(bus_error),
+						mcp794xx::Error::InvalidInputData => Error::DriverBug,
+					})
+			}
+			Self::None => Err(Error::NoRtcFound),
+		}
+	}
+
+	/// Get configuration from the RTC's RAM
+	pub fn configuration_get<T, E>(&mut self, bus: T, mut data: &mut [u8]) -> Result<u8, Error<E>>
+	where
+		T: embedded_hal::blocking::i2c::WriteRead<Error = E>
+			+ embedded_hal::blocking::i2c::Write<Error = E>,
+	{
+		match self {
+			Self::Ds1307 => {
+				let mut driver = ds1307::Ds1307::new(bus);
+				if data.len() > 55 {
+					// This chip can only read 56 bytes (inc our count byte)
+					data = &mut data[0..55];
+				}
+				let mut count = [0u8; 1];
+				driver.read_ram(0, &mut count).map_err(|e| match e {
+					ds1307::Error::I2C(bus_error) => Error::Bus(bus_error),
+					ds1307::Error::InvalidInputData => Error::DriverBug,
+				})?;
+				driver.read_ram(1, data).map_err(|e| match e {
+					ds1307::Error::I2C(bus_error) => Error::Bus(bus_error),
+					ds1307::Error::InvalidInputData => Error::DriverBug,
+				})?;
+				if usize::from(count[0]) <= data.len() {
+					Ok(count[0])
+				} else {
+					Ok(0)
+				}
+			}
+			Self::Mcp7940n => {
+				if data.len() > 63 {
+					// This chip can only read 64 bytes (inc our count byte)
+					data = &mut data[0..63];
+				}
+				let mut driver = mcp794xx::Mcp794xx::new_mcp7940n(bus);
+				let count = driver.read_sram_byte(0).map_err(|e| match e {
+					mcp794xx::Error::Comm(bus_error) => Error::Bus(bus_error),
+					mcp794xx::Error::InvalidInputData => Error::DriverBug,
+				})?;
+				driver.read_sram_data(1, data).map_err(|e| match e {
+					mcp794xx::Error::Comm(bus_error) => Error::Bus(bus_error),
+					mcp794xx::Error::InvalidInputData => Error::DriverBug,
+				})?;
+				if usize::from(count) <= data.len() {
+					Ok(count)
+				} else {
+					Ok(0)
+				}
+			}
+			Self::None => Err(Error::NoRtcFound),
+		}
+	}
 }
 
 // -----------------------------------------------------------------------------
