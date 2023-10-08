@@ -1,10 +1,20 @@
 # Changelog
 
-In this repository, changes are made in branches which are merged into **develop**. Those changes should also update this file under "Unreleased Changes". Periodically a release branch is made which updates the crate version in `Cargo.toml` and is merged into **main**. The **main** branch thus only has commits corresponding to releases of the firmware. Once the release has been merged into **main** it is tagged, and the changes then merged back into **develop**.
+In this repository, changes are made in branches which are merged into **develop**. Those changes should also update this file under "Unreleased Changes". Periodically a release branch is made which updates the crate version in `Cargo.toml` and is merged into **main**. The **main** branch thus only has commits corresponding to releases of the firmware. Once the release has been merged into **main** it is tagged, and the changes are then merged back into **develop**.
 
-## Unreleased Changes ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/develop) | [Changes](https://github.com/neotron-compute/neotron-pico-bios/compare/v0.5.2...develop))
+## Unreleased Changes ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/develop) | [Changes](https://github.com/neotron-compute/neotron-pico-bios/compare/v0.6.0...develop))
 
-* None
+* Use OS 0.6.0
+* Support changing video mode
+* I2S Audio output
+* Audio CODEC mixer support
+* Support 1-bpp 640x480 bitmap mode, and changing the framebuffer pointer
+* Run SD Card at 25 MHz
+* Switch instructions to recommend `probe-rs` for flashing
+* Support reboot from OS
+* Updated to neotron-common-bios 0.11.1
+* Get/set config in battery-backed RTC SRAM
+* Use `vte` crate for ANSI parsing for the BIOS logo
 
 ## v0.6.0 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.6.0) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.6.0))
 
