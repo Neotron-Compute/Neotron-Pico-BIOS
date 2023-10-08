@@ -48,10 +48,10 @@ Currently the BIOS uses Core 0 for running the Neotron OS (and application code)
   * [x] Fixed font
   * [ ] Loadable soft-font
 * [ ] 640x480 @ 60 Hz graphics mode
-  * [ ] 1-bpp mode (2 colours) in 38 KiB
+  * [x] 1-bpp mode (2 colours) in 38 KiB
   * [ ] 2-bpp mode (4 colours) in 75 KiB
   * [ ] 4-bpp mode (4 colours) in 150 KiB
-* [ ] 320x240 @ 60 Hz grapics mode
+* [ ] 320x240 @ 60 Hz graphics mode
   * [ ] 1-bpp mode (2 colours) in 10 KiB
   * [ ] 2-bpp mode (4 colours) in 19 KiB
   * [ ] 4-bpp mode (4 colours) in 38 KiB
@@ -70,12 +70,12 @@ Currently the BIOS uses Core 0 for running the Neotron OS (and application code)
   * [ ] Reading/writing to/from the PS/2 mouse
   * [ ] UART support
   * [ ] Second I2C Bus support
-  * [ ] Volatage monitoring
+  * [ ] Voltage monitoring
   * [ ] Soft-power
-  * [ ] Soft-reset
+  * [x] Soft-reset
 * [x] Dallas or Microchip RTC support
-* [ ] Audio CODEC mixer programming
-* [ ] I2S Audio Output
+* [x] Audio CODEC mixer programming
+* [x] I2S Audio Output
 * [ ] I2S Audio Input
 
 ## Programming
