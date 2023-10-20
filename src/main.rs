@@ -174,9 +174,11 @@ struct Hardware {
 	/// The watchdog
 	watchdog: hal::Watchdog,
 	/// The audio CODEC
-	codec: tlv320aic23::Codec,
+	audio_codec: tlv320aic23::Codec,
 	/// PCM sample output queue
 	audio_player: i2s::Player,
+	/// How we are currently configured
+	audio_config: common::audio::Config,
 }
 
 /// Flips between true and false so we always send a unique read request
@@ -1006,32 +1008,37 @@ impl Hardware {
 			i2s_lr_clock: hal_pins.gpio28.into_mode(),
 		};
 
-		let mut codec = tlv320aic23::Codec::new(tlv320aic23::BusAddress::CsLow);
-		if let Err(hal::i2c::Error::Abort(code)) = codec.reset(&mut i2c.acquire_i2c()) {
+		let mut audio_codec = tlv320aic23::Codec::new(tlv320aic23::BusAddress::CsLow);
+		if let Err(hal::i2c::Error::Abort(code)) = audio_codec.reset(&mut i2c.acquire_i2c()) {
 			defmt::error!("CODEC did not respond: code {:?}", code);
 		}
-		codec.set_digital_interface_enabled(true);
-		codec.set_dac_selected(true);
-		codec.set_dac_mute(false);
-		codec.set_bypass(false);
-		codec.set_line_input_mute(true, tlv320aic23::Channel::Both);
-		codec.set_powered_on(tlv320aic23::Subsystem::AnalogDigitalConverter, true);
-		codec.set_powered_on(tlv320aic23::Subsystem::MicrophoneInput, true);
-		codec.set_powered_on(tlv320aic23::Subsystem::LineInput, true);
-		codec.set_headphone_output_volume(100, tlv320aic23::Channel::Both);
-		codec.set_sample_rate(
-			tlv320aic23::CONFIG_USB_44K1,
+		audio_codec.set_digital_interface_enabled(true);
+		audio_codec.set_dac_selected(true);
+		audio_codec.set_dac_mute(false);
+		audio_codec.set_bypass(false);
+		audio_codec.set_line_input_mute(true, tlv320aic23::Channel::Both);
+		audio_codec.set_powered_on(tlv320aic23::Subsystem::AnalogDigitalConverter, true);
+		audio_codec.set_powered_on(tlv320aic23::Subsystem::MicrophoneInput, true);
+		audio_codec.set_powered_on(tlv320aic23::Subsystem::LineInput, true);
+		// Set volume to -6dB. 73 = 0 dB, and it's 1 dB per step.
+		audio_codec.set_headphone_output_volume(64, tlv320aic23::Channel::Both);
+		audio_codec.set_sample_rate(
+			tlv320aic23::CONFIG_USB_48K,
 			tlv320aic23::LrSwap::Disabled,
 			tlv320aic23::LrPhase::RightOnHigh,
 			tlv320aic23::Mode::Controller,
 			tlv320aic23::InputBitLength::B16,
 			tlv320aic23::DataFormat::I2s,
 		);
-		if let Err(hal::i2c::Error::Abort(code)) = codec.sync(&mut i2c.acquire_i2c()) {
+		let audio_config = common::audio::Config {
+			sample_format: common::audio::SampleFormat::SixteenBitStereo,
+			sample_rate_hz: 48000,
+		};
+		if let Err(hal::i2c::Error::Abort(code)) = audio_codec.sync(&mut i2c.acquire_i2c()) {
 			defmt::error!("CODEC did not respond: code {:?}", code);
 		}
 
-		let sample_queue = i2s::init(pio1, resets);
+		let audio_player = i2s::init(pio1, resets);
 
 		(
 			Hardware {
@@ -1062,8 +1069,9 @@ impl Hardware {
 				card_state: CardState::Unplugged,
 				clocks,
 				watchdog,
-				codec,
-				audio_player: sample_queue,
+				audio_codec,
+				audio_player,
+				audio_config,
 			},
 			hal_pins.gpio20.into_pull_up_input(),
 		)
@@ -2092,43 +2100,43 @@ extern "C" fn audio_mixer_channel_get_info(
 			name: common::FfiString::new("LeftOut"),
 			direction: common::audio::Direction::Output,
 			max_level: 79,
-			current_level: hw.codec.get_headphone_output_volume().0,
+			current_level: hw.audio_codec.get_headphone_output_volume().0,
 		}),
 		1 => FfiOption::Some(common::audio::MixerChannelInfo {
 			name: common::FfiString::new("RightOut"),
 			direction: common::audio::Direction::Output,
 			max_level: 79,
-			current_level: hw.codec.get_headphone_output_volume().1,
+			current_level: hw.audio_codec.get_headphone_output_volume().1,
 		}),
 		2 => FfiOption::Some(common::audio::MixerChannelInfo {
 			name: common::FfiString::new("LeftIn"),
 			direction: common::audio::Direction::Input,
 			max_level: 31,
-			current_level: hw.codec.get_line_input_volume_steps().0,
+			current_level: hw.audio_codec.get_line_input_volume_steps().0,
 		}),
 		3 => FfiOption::Some(common::audio::MixerChannelInfo {
 			name: common::FfiString::new("RightIn"),
 			direction: common::audio::Direction::Input,
 			max_level: 31,
-			current_level: hw.codec.get_line_input_volume_steps().1,
+			current_level: hw.audio_codec.get_line_input_volume_steps().1,
 		}),
 		4 => FfiOption::Some(common::audio::MixerChannelInfo {
 			name: common::FfiString::new("LeftInMute"),
 			direction: common::audio::Direction::Input,
 			max_level: 1,
-			current_level: hw.codec.get_line_input_mute().0 as u8,
+			current_level: hw.audio_codec.get_line_input_mute().0 as u8,
 		}),
 		5 => FfiOption::Some(common::audio::MixerChannelInfo {
 			name: common::FfiString::new("RightInMute"),
 			direction: common::audio::Direction::Input,
 			max_level: 1,
-			current_level: hw.codec.get_line_input_mute().1 as u8,
+			current_level: hw.audio_codec.get_line_input_mute().1 as u8,
 		}),
 		6 => FfiOption::Some(common::audio::MixerChannelInfo {
 			name: common::FfiString::new("Sidetone"),
 			direction: common::audio::Direction::Output,
 			max_level: 5,
-			current_level: match hw.codec.get_sidetone_level() {
+			current_level: match hw.audio_codec.get_sidetone_level() {
 				tlv320aic23::Sidetone::ZeroDb => 5,
 				tlv320aic23::Sidetone::Minus6 => 4,
 				tlv320aic23::Sidetone::Minus9 => 3,
@@ -2141,37 +2149,37 @@ extern "C" fn audio_mixer_channel_get_info(
 			name: common::FfiString::new("MicEnable"),
 			direction: common::audio::Direction::Input,
 			max_level: 1,
-			current_level: hw.codec.get_audio_input() as u8,
+			current_level: hw.audio_codec.get_audio_input() as u8,
 		}),
 		8 => FfiOption::Some(common::audio::MixerChannelInfo {
 			name: common::FfiString::new("MicBoost"),
 			direction: common::audio::Direction::Input,
 			max_level: 1,
-			current_level: hw.codec.get_microphone_boost() as u8,
+			current_level: hw.audio_codec.get_microphone_boost() as u8,
 		}),
 		9 => FfiOption::Some(common::audio::MixerChannelInfo {
 			name: common::FfiString::new("MicMute"),
 			direction: common::audio::Direction::Input,
 			max_level: 1,
-			current_level: hw.codec.get_microphone_mute() as u8,
+			current_level: hw.audio_codec.get_microphone_mute() as u8,
 		}),
 		10 => FfiOption::Some(common::audio::MixerChannelInfo {
 			name: common::FfiString::new("Bypass"),
 			direction: common::audio::Direction::Input,
 			max_level: 1,
-			current_level: hw.codec.get_bypass() as u8,
+			current_level: hw.audio_codec.get_bypass() as u8,
 		}),
 		11 => FfiOption::Some(common::audio::MixerChannelInfo {
 			name: common::FfiString::new("DacEnable"),
 			direction: common::audio::Direction::Output,
 			max_level: 1,
-			current_level: hw.codec.get_dac_selected() as u8,
+			current_level: hw.audio_codec.get_dac_selected() as u8,
 		}),
 		12 => FfiOption::Some(common::audio::MixerChannelInfo {
 			name: common::FfiString::new("DacMute"),
 			direction: common::audio::Direction::Output,
 			max_level: 1,
-			current_level: hw.codec.get_dac_mute() as u8,
+			current_level: hw.audio_codec.get_dac_mute() as u8,
 		}),
 		_ => FfiOption::None,
 	}
@@ -2192,13 +2200,25 @@ extern "C" fn audio_mixer_channel_set_level(audio_mixer_id: u8, level: u8) -> Ap
 	use tlv320aic23::Channel;
 
 	match audio_mixer_id {
-		0 => hw.codec.set_headphone_output_volume(level, Channel::Left),
-		1 => hw.codec.set_headphone_output_volume(level, Channel::Right),
-		2 => hw.codec.set_line_input_volume_steps(level, Channel::Left),
-		3 => hw.codec.set_line_input_volume_steps(level, Channel::Right),
-		4 => hw.codec.set_line_input_mute(level == 1, Channel::Left),
-		5 => hw.codec.set_line_input_mute(level == 1, Channel::Right),
-		6 => hw.codec.set_sidetone_level(match level {
+		0 => hw
+			.audio_codec
+			.set_headphone_output_volume(level, Channel::Left),
+		1 => hw
+			.audio_codec
+			.set_headphone_output_volume(level, Channel::Right),
+		2 => hw
+			.audio_codec
+			.set_line_input_volume_steps(level, Channel::Left),
+		3 => hw
+			.audio_codec
+			.set_line_input_volume_steps(level, Channel::Right),
+		4 => hw
+			.audio_codec
+			.set_line_input_mute(level == 1, Channel::Left),
+		5 => hw
+			.audio_codec
+			.set_line_input_mute(level == 1, Channel::Right),
+		6 => hw.audio_codec.set_sidetone_level(match level {
 			5 => tlv320aic23::Sidetone::ZeroDb,
 			4 => tlv320aic23::Sidetone::Minus6,
 			3 => tlv320aic23::Sidetone::Minus9,
@@ -2206,46 +2226,94 @@ extern "C" fn audio_mixer_channel_set_level(audio_mixer_id: u8, level: u8) -> Ap
 			1 => tlv320aic23::Sidetone::Minus18,
 			_ => tlv320aic23::Sidetone::Disabled,
 		}),
-		7 => hw.codec.set_audio_input(match level {
+		7 => hw.audio_codec.set_audio_input(match level {
 			0 => tlv320aic23::AudioInput::LineInput,
 			_ => tlv320aic23::AudioInput::Microphone,
 		}),
-		8 => hw.codec.set_microphone_boost(level == 1),
-		9 => hw.codec.set_microphone_mute(level == 1),
-		10 => hw.codec.set_bypass(level == 1),
-		11 => hw.codec.set_dac_selected(level == 1),
-		12 => hw.codec.set_dac_mute(level == 1),
+		8 => hw.audio_codec.set_microphone_boost(level == 1),
+		9 => hw.audio_codec.set_microphone_mute(level == 1),
+		10 => hw.audio_codec.set_bypass(level == 1),
+		11 => hw.audio_codec.set_dac_selected(level == 1),
+		12 => hw.audio_codec.set_dac_mute(level == 1),
 		_ => {
 			return ApiResult::Err(neotron_common_bios::Error::InvalidDevice);
 		}
 	};
-	if hw.codec.sync(&mut hw.i2c.acquire_i2c()).is_ok() {
+	if hw.audio_codec.sync(&mut hw.i2c.acquire_i2c()).is_ok() {
 		neotron_common_bios::FfiResult::Ok(())
 	} else {
 		ApiResult::Err(neotron_common_bios::Error::DeviceError(0))
 	}
 }
 
-extern "C" fn audio_output_set_config(_config: common::audio::Config) -> ApiResult<()> {
-	ApiResult::Err(CError::Unimplemented)
+extern "C" fn audio_output_set_config(config: common::audio::Config) -> ApiResult<()> {
+	// We can't support 8-bit samples with this CODEC. See `audio_output_data`
+	// if you add any more supported sample formats, so the playback routine
+	// does the right thing.
+	match config.sample_format {
+		common::audio::SampleFormat::SixteenBitStereo
+		| common::audio::SampleFormat::SixteenBitMono => {
+			// Format Ok
+		}
+		_ => {
+			return ApiResult::Err(CError::UnsupportedConfiguration(0));
+		}
+	}
+	let sample_rate = match config.sample_rate_hz {
+		48000 => tlv320aic23::CONFIG_USB_48K,
+		44100 => tlv320aic23::CONFIG_USB_44K1,
+		32000 => tlv320aic23::CONFIG_USB_32K,
+		8000 => tlv320aic23::CONFIG_USB_8K,
+		_ => {
+			return ApiResult::Err(CError::UnsupportedConfiguration(1));
+		}
+	};
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+	hw.audio_codec.set_sample_rate(
+		sample_rate,
+		tlv320aic23::LrSwap::Disabled,
+		tlv320aic23::LrPhase::RightOnHigh,
+		tlv320aic23::Mode::Controller,
+		tlv320aic23::InputBitLength::B16,
+		tlv320aic23::DataFormat::I2s,
+	);
+	hw.audio_config = config;
+	ApiResult::Ok(())
 }
 
 extern "C" fn audio_output_get_config() -> ApiResult<common::audio::Config> {
-	ApiResult::Err(CError::Unimplemented)
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+	let config = hw.audio_config.clone();
+	ApiResult::Ok(config)
 }
 
 unsafe extern "C" fn audio_output_data(samples: FfiByteSlice) -> ApiResult<usize> {
 	let mut lock = HARDWARE.lock();
 	let hw = lock.as_mut().unwrap();
 	let samples = samples.as_slice();
-	let count = hw.audio_player.play_samples_16bit_stereo_48khz(samples);
+	// We only support these two kinds.
+	let count = match hw.audio_config.sample_format {
+		common::audio::SampleFormat::SixteenBitMono => {
+			hw.audio_player.play_samples_16bit_mono(samples)
+		}
+		common::audio::SampleFormat::SixteenBitStereo => {
+			hw.audio_player.play_samples_16bit_stereo(samples)
+		}
+		_ => {
+			return ApiResult::Err(CError::Unimplemented);
+		}
+	};
 	ApiResult::Ok(count)
 }
 
 extern "C" fn audio_output_get_space() -> ApiResult<usize> {
 	let mut lock = HARDWARE.lock();
 	let hw = lock.as_mut().unwrap();
-	// The result is in samples, where each sample is 16-bit stereo (i.e. 32-bits)
+	// The result is in samples, where each sample is 16-bit stereo (i.e.
+	// 32-bits) or 16-bit mono (i.e. 16-bit) depending on the audio
+	// configuration.
 	ApiResult::Ok(hw.audio_player.available_space())
 }
 

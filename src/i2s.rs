@@ -19,15 +19,15 @@ pub struct Player {
 }
 
 impl Player {
-	/// Queue some samples for playback.
+	/// Queue some 16-bit stereo samples for playback.
 	///
-	/// Takes as many as will fit in the FIFO. Returns how many were taken,
-	/// which will always be a multiple of 4 because it always takes them in
-	/// Little Endian 16-bit stereo.
+	/// Takes as many as will fit in the FIFO. Returns how many bytes were
+	/// taken, which will always be a multiple of 4 because it always takes them
+	/// in Little Endian 16-bit stereo.
 	///
 	/// The length of `samples` must be a multiple of 4, as they should be
 	/// 16-bit stereo pairs.
-	pub fn play_samples_16bit_stereo_48khz(&mut self, samples: &[u8]) -> usize {
+	pub fn play_samples_16bit_stereo(&mut self, samples: &[u8]) -> usize {
 		let mut count = 0;
 		for samples in samples.chunks_exact(4) {
 			if self.fifo.ready() {
@@ -36,6 +36,30 @@ impl Player {
 				let stereo_sample = left_sample << 16 | right_sample;
 				self.fifo.enqueue(stereo_sample).unwrap();
 				count += 4;
+			} else {
+				break;
+			}
+		}
+		count
+	}
+
+	/// Queue some 16-bit mono samples for playback.
+	///
+	/// Takes as many as will fit in the FIFO. Returns how many bytes were
+	/// taken, which will always be a multiple of 2 because it always takes them
+	/// in Little Endian 16-bit mono, and duplicates them as they go into the
+	/// FIFO.
+	///
+	/// The length of `samples` must be a multiple of 2, as they should be
+	/// 16-bit mono samples.
+	pub fn play_samples_16bit_mono(&mut self, samples: &[u8]) -> usize {
+		let mut count = 0;
+		for samples in samples.chunks_exact(2) {
+			if self.fifo.ready() {
+				let mono_sample = (samples[1] as u32) << 8 | (samples[0] as u32);
+				let stereo_sample = mono_sample << 16 | mono_sample;
+				self.fifo.enqueue(stereo_sample).unwrap();
+				count += 2;
 			} else {
 				break;
 			}
