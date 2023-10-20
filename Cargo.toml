@@ -57,7 +57,7 @@ shared-bus = "0.2"
 # Gets us compare-swap atomic operations
 atomic-polyfill = "1.0.2"
 # SD Card driver
-embedded-sdmmc = { version = "0.5", default-features = false, features = [
+embedded-sdmmc = { version = "0.6", default-features = false, features = [
     "defmt-log"
 ] }
 # CODEC register control
