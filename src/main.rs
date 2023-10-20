@@ -1555,7 +1555,10 @@ impl Hardware {
 				let spi = sdcard::FakeSpi(self, true);
 				let cs = sdcard::FakeCs();
 				let delayer = sdcard::FakeDelayer();
-				let options = embedded_sdmmc::sdcard::AcquireOpts { use_crc: true };
+				let options = embedded_sdmmc::sdcard::AcquireOpts {
+					use_crc: true,
+					acquire_retries: 5,
+				};
 				let sdcard = embedded_sdmmc::SdCard::new_with_options(spi, cs, delayer, options);
 				// Talk to the card to trigger a scan if its type
 				let num_blocks = sdcard.num_blocks();
@@ -2359,12 +2362,13 @@ pub extern "C" fn block_write(
 
 /// Read one or more sectors to a block device.
 ///
-/// The function will block until all data is read. The array pointed
-/// to by `data` must be `num_blocks * block_size` in length, where
-/// `block_size` is given by `block_dev_get_info`.
+/// The function will block until all data is read. The array pointed to by
+/// `data` must be `num_blocks * block_size` in length, where `block_size` is
+/// given by `block_dev_get_info`.
 ///
-/// There are no requirements on the alignment of `data` but if it is
-/// aligned, the BIOS may be able to use a higher-performance code path.
+/// The API docs say there are no requirements on the alignment of `data` but we
+/// unsafely transmute it into a `[embedded_sdmmc::Block]` so it should match
+/// whatever that needs.
 pub extern "C" fn block_read(
 	device: u8,
 	block: common::block_dev::BlockIdx,
@@ -2391,7 +2395,10 @@ pub extern "C" fn block_read(
 				let spi = sdcard::FakeSpi(hw, false);
 				let cs = sdcard::FakeCs();
 				let delayer = sdcard::FakeDelayer();
-				let options = embedded_sdmmc::sdcard::AcquireOpts { use_crc: true };
+				let options = embedded_sdmmc::sdcard::AcquireOpts {
+					use_crc: true,
+					acquire_retries: 5,
+				};
 				let sdcard = embedded_sdmmc::SdCard::new_with_options(spi, cs, delayer, options);
 				unsafe {
 					sdcard.mark_card_as_init(info.card_type);
