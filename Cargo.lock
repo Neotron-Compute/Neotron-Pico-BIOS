@@ -586,7 +586,7 @@ checksum = "d37886e73d87732421aaf5da617eead9d69a7daf6b0d059780f76157d9ce5372"
 
 [[package]]
 name = "neotron-pico-bios"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "atomic-polyfill 1.0.3",
  "cortex-m",
@@ -1020,7 +1020,7 @@ checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
 [[package]]
 name = "shared-bus"
 version = "0.3.0"
-source = "git+https://github.com/thejpster/shared-bus?branch=add-iter-traits#639a2e68d4e5d41567a0436648973e3d16d0c1f4"
+source = "git+https://github.com/thejpster/shared-bus?rev=639a2e6#639a2e68d4e5d41567a0436648973e3d16d0c1f4"
 dependencies = [
  "embedded-hal",
  "nb 1.1.0",

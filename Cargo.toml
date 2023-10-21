@@ -5,7 +5,7 @@ resolver = "2"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 name = "neotron-pico-bios"
-version = "0.6.0"
+version = "0.7.0"
 
 [dependencies]
 # Useful Cortex-M specific functions (e.g. SysTick)
@@ -91,4 +91,4 @@ check-stack = []
 # Patched to include the WriteIterRead trait on i2c
 rp2040-hal = { git = "https://github.com/rp-rs/rp-hal", rev = "9c17a2d" }
 # Patched to include the WriteIterRead trait on i2c
-shared-bus = { git = "https://github.com/thejpster/shared-bus", branch = "add-iter-traits" }
+shared-bus = { git = "https://github.com/thejpster/shared-bus", rev = "639a2e6" }

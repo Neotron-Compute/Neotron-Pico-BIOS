@@ -2,13 +2,18 @@
 
 In this repository, changes are made in branches which are merged into **develop**. Those changes should also update this file under "Unreleased Changes". Periodically a release branch is made which updates the crate version in `Cargo.toml` and is merged into **main**. The **main** branch thus only has commits corresponding to releases of the firmware. Once the release has been merged into **main** it is tagged, and the changes are then merged back into **develop**.
 
-## Unreleased Changes ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/develop) | [Changes](https://github.com/neotron-compute/neotron-pico-bios/compare/v0.6.0...develop))
+## Unreleased Changes ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/develop) | [Changes](https://github.com/neotron-compute/neotron-pico-bios/compare/v0.7.0...develop))
 
-* Use OS 0.6.0
+* None
+
+## v0.7.0 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.7.0) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.7.0))
+
+* Use OS 0.7.1
 * Support changing video mode
 * I2S Audio output
 * Audio CODEC mixer support
 * Support 1-bpp 640x480 bitmap mode, and changing the framebuffer pointer
+* Optimise the video drawing code (fewer function calls into flash)
 * Run SD Card at 25 MHz
 * Switch instructions to recommend `probe-rs` for flashing
 * Support reboot from OS
@@ -17,6 +22,7 @@ In this repository, changes are made in branches which are merged into **develop
 * Use `vte` crate for ANSI parsing for the BIOS logo
 * Support I2C access from the OS
 * Support changing the Audio CODEC settings
+* List Neotron Bus devices via BIOS API
 
 ## v0.6.0 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.6.0) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.6.0))
 
