@@ -40,7 +40,7 @@ mod rgb;
 // Imports
 // -----------------------------------------------------------------------------
 
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, AtomicU8, Ordering};
 use defmt::{debug, trace};
 use neotron_common_bios::video::{Attr, GlyphAttr, TextBackgroundColour, TextForegroundColour};
 use rp_pico::{hal::pio::PIOExt, pac::interrupt};
@@ -182,10 +182,16 @@ impl RenderEngine {
 
 		match self.current_video_mode.format() {
 			crate::common::video::Format::Text8x16 => {
+				// Text with 8x16 glyphs
 				self.draw_next_line_text::<16>(&font16::FONT, scan_line_buffer, current_line_num)
 			}
 			crate::common::video::Format::Text8x8 => {
+				// Text with 8x8 glyphs
 				self.draw_next_line_text::<8>(&font8::FONT, scan_line_buffer, current_line_num)
+			}
+			crate::common::video::Format::Chunky1 => {
+				// Bitmap with 1 bit per pixel
+				self.draw_next_line_chunky1(scan_line_buffer, current_line_num);
 			}
 			_ => {
 				// Draw nothing
@@ -193,9 +199,133 @@ impl RenderEngine {
 		};
 	}
 
-	/// Draw a line of pixels into the relevant pixel buffer (either
-	/// [`PIXEL_DATA_BUFFER_ODD`] or [`PIXEL_DATA_BUFFER_EVEN`]) using the 8x16
-	/// font.
+	/// Draw a line of 1-bpp bitmap as pixels.
+	///
+	/// Writes into the relevant pixel buffer (either [`PIXEL_DATA_BUFFER_ODD`]
+	/// or [`PIXEL_DATA_BUFFER_EVEN`]) using the 8x16 font.
+	///
+	/// The `current_line_num` goes from `0..NUM_LINES`.
+	#[link_section = ".data"]
+	pub fn draw_next_line_chunky1(
+		&mut self,
+		scan_line_buffer: &mut LineBuffer,
+		current_line_num: u16,
+	) {
+		let base_ptr = CUSTOM_FB.load(Ordering::Relaxed) as *const u8;
+		let line_len_pixels = self.current_video_mode.horizontal_pixels();
+		let line_len_bytes = (line_len_pixels / 8) as usize;
+		let is_double = self.current_video_mode.is_horiz_2x();
+		let offset = usize::from(current_line_num) * line_len_bytes;
+		// Get a slice of bytes in our framebuffer. There are eight mono pixels per byte.
+		let line_slice =
+			unsafe { core::slice::from_raw_parts(base_ptr.add(offset), line_len_bytes) };
+		// Get a pointer into our scan-line buffer
+		let mut scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
+		if is_double {
+			// double-width mode.
+			// sixteen RGB pixels (eight pairs) per byte
+			let white = RGBPair::from_pixels(RGBColour::WHITE, RGBColour::WHITE);
+			let black = RGBPair::from_pixels(RGBColour::BLACK, RGBColour::BLACK);
+			for b in line_slice {
+				let mono_pixels = *b;
+				unsafe {
+					// 0bX-------
+					scan_line_buffer_ptr
+						.offset(0)
+						.write(if (mono_pixels & (1 << 7)) != 0 {
+							white
+						} else {
+							black
+						});
+					// 0b-X------
+					scan_line_buffer_ptr
+						.offset(1)
+						.write(if (mono_pixels & (1 << 6)) != 0 {
+							white
+						} else {
+							black
+						});
+					// 0b--X-----
+					scan_line_buffer_ptr
+						.offset(2)
+						.write(if (mono_pixels & (1 << 5)) != 0 {
+							white
+						} else {
+							black
+						});
+					// 0b---X----
+					scan_line_buffer_ptr
+						.offset(3)
+						.write(if (mono_pixels & (1 << 4)) != 0 {
+							white
+						} else {
+							black
+						});
+					// 0b----X---
+					scan_line_buffer_ptr
+						.offset(4)
+						.write(if (mono_pixels & (1 << 3)) != 0 {
+							white
+						} else {
+							black
+						});
+					// 0b-----X--
+					scan_line_buffer_ptr
+						.offset(5)
+						.write(if (mono_pixels & (1 << 2)) != 0 {
+							white
+						} else {
+							black
+						});
+					// 0b------X-
+					scan_line_buffer_ptr
+						.offset(6)
+						.write(if (mono_pixels & (1 << 1)) != 0 {
+							white
+						} else {
+							black
+						});
+					// 0b-------X
+					scan_line_buffer_ptr
+						.offset(7)
+						.write(if (mono_pixels & 1) == 0 { white } else { black });
+					// move pointer along 16 pixels / 8 pairs
+					scan_line_buffer_ptr = scan_line_buffer_ptr.offset(8);
+				}
+			}
+		} else {
+			// Non-double-width mode.
+			// eight RGB pixels (four pairs) per byte
+			let attr = Attr::new(
+				TextForegroundColour::WHITE,
+				TextBackgroundColour::BLACK,
+				false,
+			);
+			for b in line_slice {
+				let mono_pixels = *b;
+				unsafe {
+					// 0bXX------
+					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 6);
+					scan_line_buffer_ptr.write(pair);
+					// 0b--XX----
+					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 4);
+					scan_line_buffer_ptr.offset(1).write(pair);
+					// 0b----XX--
+					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 2);
+					scan_line_buffer_ptr.offset(2).write(pair);
+					// 0b------XX
+					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels);
+					scan_line_buffer_ptr.offset(3).write(pair);
+					scan_line_buffer_ptr = scan_line_buffer_ptr.offset(4);
+				}
+			}
+		}
+	}
+
+	/// Draw a line text as pixels.
+	///
+	/// Writes into the relevant pixel buffer (either [`PIXEL_DATA_BUFFER_ODD`]
+	/// or [`PIXEL_DATA_BUFFER_EVEN`]) using the 8x16 font.
 	///
 	/// The `current_line_num` goes from `0..NUM_LINES`.
 	#[link_section = ".data"]
@@ -209,56 +339,53 @@ impl RenderEngine {
 		let text_row = current_line_num as usize / GLYPH_HEIGHT;
 		let font_row = current_line_num as usize % GLYPH_HEIGHT;
 
-		if text_row < self.num_text_rows {
-			// Note (unsafe): We could stash the char array inside `self`
-			// but at some point we are going to need one CPU rendering
-			// the text, and the other CPU running code and writing to
-			// the buffer. This might be Undefined Behaviour, but
-			// unfortunately real-time video is all about shared mutable
-			// state. At least our platform is fixed, so we can simply
-			// test if it works, for some given version of the Rust compiler.
-			let row_slice = unsafe {
-				&GLYPH_ATTR_ARRAY
-					[(text_row * self.num_text_cols)..((text_row + 1) * self.num_text_cols)]
-			};
-			// Every font look-up we are about to do for this row will
-			// involve offsetting by the row within each glyph. As this
-			// is the same for every glyph on this row, we calculate a
-			// new pointer once, in advance, and save ourselves an
-			// addition each time around the loop.
-			let font_ptr = unsafe { font.data.as_ptr().add(font_row) };
+		if text_row >= self.num_text_rows {
+			return;
+		}
 
-			// Get a pointer into our scan-line buffer
-			let mut scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
+		// Note (unsafe): We are using whatever memory we were given and we
+		// assume there is good data there and there is enough data there. To
+		// try and avoid Undefined Behaviour, we only access through a pointer
+		// and never make a reference to the data.
+		let fb_ptr = super::video_get_framebuffer() as *const GlyphAttr;
+		let row_ptr = unsafe { fb_ptr.add(text_row * self.num_text_cols) };
 
-			// Convert from characters to coloured pixels, using the font as a look-up table.
+		// Every font look-up we are about to do for this row will
+		// involve offsetting by the row within each glyph. As this
+		// is the same for every glyph on this row, we calculate a
+		// new pointer once, in advance, and save ourselves an
+		// addition each time around the loop.
+		let font_ptr = unsafe { font.data.as_ptr().add(font_row) };
 
-			for glyphattr in row_slice.iter() {
+		// Get a pointer into our scan-line buffer
+		let mut scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
+
+		// Convert from characters to coloured pixels, using the font as a look-up table.
+		for col in 0..self.num_text_cols {
+			unsafe {
+				// Note (unsafe): We use pointer arithmetic here because we
+				// can't afford a bounds-check on an array. This is safe
+				// because the font is `256 * width` bytes long and we can't
+				// index more than `255 * width` bytes into it.
+				let glyphattr = row_ptr.add(col).read();
 				let index = (glyphattr.glyph().0 as usize) * GLYPH_HEIGHT;
 				let attr = glyphattr.attr();
+				let mono_pixels = *font_ptr.add(index);
 
-				unsafe {
-					// Note (unsafe): We use pointer arithmetic here because we
-					// can't afford a bounds-check on an array. This is safe
-					// because the font is `256 * width` bytes long and we can't
-					// index more than `255 * width` bytes into it.
-					let mono_pixels = *font_ptr.add(index);
+				// 0bXX------
+				let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 6);
+				scan_line_buffer_ptr.write(pair);
+				// 0b--XX----
+				let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 4);
+				scan_line_buffer_ptr.offset(1).write(pair);
+				// 0b----XX--
+				let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 2);
+				scan_line_buffer_ptr.offset(2).write(pair);
+				// 0b------XX
+				let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels);
+				scan_line_buffer_ptr.offset(3).write(pair);
 
-					// 0bXX------
-					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 6);
-					scan_line_buffer_ptr.write(pair);
-					// 0b--XX----
-					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 4);
-					scan_line_buffer_ptr.offset(1).write(pair);
-					// 0b----XX--
-					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels >> 2);
-					scan_line_buffer_ptr.offset(2).write(pair);
-					// 0b------XX
-					let pair = TEXT_COLOUR_LOOKUP.lookup(attr, mono_pixels);
-					scan_line_buffer_ptr.offset(3).write(pair);
-
-					scan_line_buffer_ptr = scan_line_buffer_ptr.offset(4);
-				}
+				scan_line_buffer_ptr = scan_line_buffer_ptr.offset(4);
 			}
 		}
 	}
@@ -286,6 +413,49 @@ impl LineBuffer {
 	}
 }
 
+/// The kind of IRQ we want to raise
+#[derive(Debug, Copy, Clone)]
+enum RaiseIrq {
+	None,
+	Irq0,
+	Irq1,
+}
+
+impl RaiseIrq {
+	const IRQ0_INSTR: u16 = pio::InstructionOperands::IRQ {
+		clear: false,
+		wait: false,
+		index: 0,
+		relative: false,
+	}
+	.encode();
+
+	const IRQ1_INSTR: u16 = pio::InstructionOperands::IRQ {
+		clear: false,
+		wait: false,
+		index: 1,
+		relative: false,
+	}
+	.encode();
+
+	const IRQ_NONE_INSTR: u16 = pio::InstructionOperands::MOV {
+		destination: pio::MovDestination::Y,
+		op: pio::MovOperation::None,
+		source: pio::MovSource::Y,
+	}
+	.encode();
+
+	/// Produces a PIO command that raises the appropriate IRQ
+	#[inline]
+	pub const fn into_command(self) -> u16 {
+		match self {
+			RaiseIrq::None => Self::IRQ_NONE_INSTR,
+			RaiseIrq::Irq0 => Self::IRQ0_INSTR,
+			RaiseIrq::Irq1 => Self::IRQ1_INSTR,
+		}
+	}
+}
+
 /// Holds the four scan-line timing FIFO words we need for one scan-line.
 ///
 /// See `make_timing` for a function which can generate these words. We DMA
@@ -301,6 +471,7 @@ impl ScanlineTimingBuffer {
 	/// Create a timing buffer for each scan-line in the V-Sync visible portion.
 	///
 	/// The timings are in the order (front-porch, sync, back-porch, visible) and are in pixel clocks.
+	#[inline]
 	const fn new_v_visible(
 		hsync: SyncPolarity,
 		vsync: SyncPolarity,
@@ -313,14 +484,14 @@ impl ScanlineTimingBuffer {
 					timings.0 * Self::CLOCKS_PER_PIXEL,
 					hsync.disabled(),
 					vsync.disabled(),
-					Some(1),
+					RaiseIrq::Irq1,
 				),
 				// Sync pulse (as per the spec)
 				Self::make_timing(
 					timings.1 * Self::CLOCKS_PER_PIXEL,
 					hsync.enabled(),
 					vsync.disabled(),
-					None,
+					RaiseIrq::None,
 				),
 				// Back porch. Adjusted by a few clocks to account for interrupt +
 				// PIO SM start latency.
@@ -328,7 +499,7 @@ impl ScanlineTimingBuffer {
 					(timings.2 * Self::CLOCKS_PER_PIXEL) - 5,
 					hsync.disabled(),
 					vsync.disabled(),
-					None,
+					RaiseIrq::None,
 				),
 				// Visible portion. It also triggers the IRQ to start pixels
 				// moving. Adjusted to compensate for changes made to previous
@@ -337,13 +508,14 @@ impl ScanlineTimingBuffer {
 					(timings.3 * Self::CLOCKS_PER_PIXEL) + 5,
 					hsync.disabled(),
 					vsync.disabled(),
-					Some(0),
+					RaiseIrq::Irq0,
 				),
 			],
 		}
 	}
 
 	/// Create a timing buffer for each scan-line in the V-Sync front-porch and back-porch
+	#[inline]
 	const fn new_v_porch(
 		hsync: SyncPolarity,
 		vsync: SyncPolarity,
@@ -356,34 +528,35 @@ impl ScanlineTimingBuffer {
 					timings.0 * Self::CLOCKS_PER_PIXEL,
 					hsync.disabled(),
 					vsync.disabled(),
-					Some(1),
+					RaiseIrq::Irq1,
 				),
 				// Sync pulse (as per the spec)
 				Self::make_timing(
 					timings.1 * Self::CLOCKS_PER_PIXEL,
 					hsync.enabled(),
 					vsync.disabled(),
-					None,
+					RaiseIrq::None,
 				),
 				// Back porch.
 				Self::make_timing(
 					timings.2 * Self::CLOCKS_PER_PIXEL,
 					hsync.disabled(),
 					vsync.disabled(),
-					None,
+					RaiseIrq::None,
 				),
 				// Visible portion.
 				Self::make_timing(
 					timings.3 * Self::CLOCKS_PER_PIXEL,
 					hsync.disabled(),
 					vsync.disabled(),
-					None,
+					RaiseIrq::None,
 				),
 			],
 		}
 	}
 
 	/// Create a timing buffer for each scan-line in the V-Sync pulse
+	#[inline]
 	const fn new_v_pulse(
 		hsync: SyncPolarity,
 		vsync: SyncPolarity,
@@ -396,28 +569,28 @@ impl ScanlineTimingBuffer {
 					timings.0 * Self::CLOCKS_PER_PIXEL,
 					hsync.disabled(),
 					vsync.enabled(),
-					Some(1),
+					RaiseIrq::Irq1,
 				),
 				// Sync pulse (as per the spec)
 				Self::make_timing(
 					timings.1 * Self::CLOCKS_PER_PIXEL,
 					hsync.enabled(),
 					vsync.enabled(),
-					None,
+					RaiseIrq::None,
 				),
 				// Back porch.
 				Self::make_timing(
 					timings.2 * Self::CLOCKS_PER_PIXEL,
 					hsync.disabled(),
 					vsync.enabled(),
-					None,
+					RaiseIrq::None,
 				),
 				// Visible portion.
 				Self::make_timing(
 					timings.3 * Self::CLOCKS_PER_PIXEL,
 					hsync.disabled(),
 					vsync.enabled(),
-					None,
+					RaiseIrq::None,
 				),
 			],
 		}
@@ -431,25 +604,9 @@ impl ScanlineTimingBuffer {
 	/// * `raise_irq` - true the timing statemachine should raise an IRQ at the start of this period
 	///
 	/// Returns a 32-bit value you can post to the Timing FIFO.
-	const fn make_timing(period: u32, hsync: bool, vsync: bool, raise_irq: Option<u8>) -> u32 {
-		let command = if let Some(irq_index) = raise_irq {
-			// This command sets IRQ 0
-			pio::InstructionOperands::IRQ {
-				clear: false,
-				wait: false,
-				index: irq_index,
-				relative: false,
-			}
-			.encode()
-		} else {
-			// This command is a no-op (it moves Y into Y)
-			pio::InstructionOperands::MOV {
-				destination: pio::MovDestination::Y,
-				op: pio::MovOperation::None,
-				source: pio::MovSource::Y,
-			}
-			.encode()
-		} as u32;
+	#[inline]
+	const fn make_timing(period: u32, hsync: bool, vsync: bool, raise_irq: RaiseIrq) -> u32 {
+		let command = raise_irq.into_command() as u32;
 		let mut value: u32 = 0;
 		if hsync {
 			value |= 1 << 0;
@@ -1204,6 +1361,11 @@ static mut PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer {
 /// ```
 static mut TEXT_COLOUR_LOOKUP: TextColourLookup = TextColourLookup::blank();
 
+/// Stores a custom framebuffer pointer provided by the OS.
+///
+/// Defaults to null, which means we use our internal text buffer.
+pub(crate) static CUSTOM_FB: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+
 // -----------------------------------------------------------------------------
 // Functions
 // -----------------------------------------------------------------------------
@@ -1456,8 +1618,15 @@ pub fn test_video_mode(mode: crate::common::video::Mode) -> bool {
 		),
 		(
 			crate::common::video::Timing::T640x480 | crate::common::video::Timing::T640x400,
-			crate::common::video::Format::Text8x16 | crate::common::video::Format::Text8x8,
+			crate::common::video::Format::Text8x16
+				| crate::common::video::Format::Text8x8
+				| crate::common::video::Format::Chunky1,
 			false,
+			false,
+		) | (
+			crate::common::video::Timing::T640x480 | crate::common::video::Timing::T640x400,
+			crate::common::video::Format::Chunky1,
+			true,
 			false,
 		)
 	)
@@ -1494,7 +1663,9 @@ unsafe extern "C" fn core1_main() -> u32 {
 	let gpio_out_clr = 0xd000_0018 as *mut u32;
 
 	// Enable the interrupts (DMA has to first be set by Core 0)
-	cortex_m::interrupt::enable();
+	unsafe {
+		core::arch::asm!("cpsie i");
+	}
 	// We are on Core 1, so these interrupts will run on Core 1
 	crate::pac::NVIC::unpend(crate::pac::Interrupt::PIO0_IRQ_1);
 	crate::pac::NVIC::unmask(crate::pac::Interrupt::PIO0_IRQ_1);
@@ -1502,7 +1673,9 @@ unsafe extern "C" fn core1_main() -> u32 {
 	loop {
 		// Wait for a free DMA buffer. Can't do a compare-and-swap on ARMv6-M :/
 		while !DRAW_THIS_LINE.load(Ordering::Acquire) {
-			cortex_m::asm::wfe();
+			unsafe {
+				core::arch::asm!("wfe");
+			}
 		}
 		DRAW_THIS_LINE.store(false, Ordering::Relaxed);
 

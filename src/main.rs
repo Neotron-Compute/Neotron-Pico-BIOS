@@ -46,6 +46,7 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 // -----------------------------------------------------------------------------
 
 mod console;
+mod i2s;
 mod mcp23s17;
 mod multicore;
 mod mutex;
@@ -70,6 +71,7 @@ use defmt::info;
 use defmt_rtt as _;
 use ds1307::{Datelike, NaiveDateTime, Timelike};
 use embedded_hal::{
+	blocking::i2c::{WriteIter as _I2cWriteIter, WriteIterRead as _I2cWriteIterRead},
 	blocking::spi::{Transfer as _SpiTransfer, Write as _SpiWrite},
 	digital::v2::{InputPin, OutputPin},
 };
@@ -81,7 +83,10 @@ use rp_pico::{
 	hal::{
 		self,
 		clocks::ClocksManager,
-		gpio::{bank0, Function, Input, Output, Pin, PullUp, PushPull},
+		gpio::{
+			bank0::{self, Gpio16, Gpio18, Gpio19},
+			FunctionPio0, FunctionPio1, FunctionSioOutput, FunctionSpi, Pin, PullNone,
+		},
 		pac::{self, interrupt},
 		Clock,
 	},
@@ -106,14 +111,23 @@ use neotron_common_bios::{
 type Duration = fugit::Duration<u64, 1, 1_000_000>;
 
 /// The type of our IRQ input pin from the MCP23S17.
-type IrqPin = Pin<bank0::Gpio20, Input<PullUp>>;
+type IrqPin = Pin<bank0::Gpio20, rp_pico::hal::gpio::FunctionSioInput, rp_pico::hal::gpio::PullUp>;
 
 type I2cPins = (
-	Pin<bank0::Gpio14, Function<hal::gpio::I2C>>,
-	Pin<bank0::Gpio15, Function<hal::gpio::I2C>>,
+	Pin<bank0::Gpio14, rp_pico::hal::gpio::FunctionI2C, rp_pico::hal::gpio::PullNone>,
+	Pin<bank0::Gpio15, rp_pico::hal::gpio::FunctionI2C, rp_pico::hal::gpio::PullNone>,
 );
 
-type SpiBus = hal::Spi<hal::spi::Enabled, pac::SPI0, 8>;
+type SpiBus = hal::Spi<
+	hal::spi::Enabled,
+	pac::SPI0,
+	(
+		Pin<Gpio19, FunctionSpi, PullNone>,
+		Pin<Gpio16, FunctionSpi, PullNone>,
+		Pin<Gpio18, FunctionSpi, PullNone>,
+	),
+	8,
+>;
 
 /// What state our SD Card can be in
 #[derive(defmt::Format, Debug, Clone, PartialEq, Eq)]
@@ -172,6 +186,12 @@ struct Hardware {
 	clocks: ClocksManager,
 	/// The watchdog
 	watchdog: hal::Watchdog,
+	/// The audio CODEC
+	audio_codec: tlv320aic23::Codec,
+	/// PCM sample output queue
+	audio_player: i2s::Player,
+	/// How we are currently configured
+	audio_config: common::audio::Config,
 }
 
 /// Flips between true and false so we always send a unique read request
@@ -195,30 +215,27 @@ impl UseAlt {
 /// order to demonstrate the hardware is in the right state.
 #[allow(unused)]
 struct Pins {
-	h_sync: Pin<bank0::Gpio0, Function<pac::PIO0>>,
-	v_sync: Pin<bank0::Gpio1, Function<pac::PIO0>>,
-	red0: Pin<bank0::Gpio2, Function<pac::PIO0>>,
-	red1: Pin<bank0::Gpio3, Function<pac::PIO0>>,
-	red2: Pin<bank0::Gpio4, Function<pac::PIO0>>,
-	red3: Pin<bank0::Gpio5, Function<pac::PIO0>>,
-	green0: Pin<bank0::Gpio6, Function<pac::PIO0>>,
-	green1: Pin<bank0::Gpio7, Function<pac::PIO0>>,
-	green2: Pin<bank0::Gpio8, Function<pac::PIO0>>,
-	green3: Pin<bank0::Gpio9, Function<pac::PIO0>>,
-	blue0: Pin<bank0::Gpio10, Function<pac::PIO0>>,
-	blue1: Pin<bank0::Gpio11, Function<pac::PIO0>>,
-	blue2: Pin<bank0::Gpio12, Function<pac::PIO0>>,
-	blue3: Pin<bank0::Gpio13, Function<pac::PIO0>>,
-	npower_save: Pin<bank0::Gpio23, Output<PushPull>>,
-	spi_cipo: Pin<bank0::Gpio16, Function<hal::gpio::Spi>>,
-	nspi_cs_io: Pin<bank0::Gpio17, Output<PushPull>>,
-	spi_clk: Pin<bank0::Gpio18, Function<hal::gpio::Spi>>,
-	spi_copi: Pin<bank0::Gpio19, Function<hal::gpio::Spi>>,
-	noutput_en: Pin<bank0::Gpio21, Output<PushPull>>,
-	i2s_adc_data: Pin<bank0::Gpio22, Function<pac::PIO1>>,
-	i2s_dac_data: Pin<bank0::Gpio26, Function<pac::PIO1>>,
-	i2s_bit_clock: Pin<bank0::Gpio27, Function<pac::PIO1>>,
-	i2s_lr_clock: Pin<bank0::Gpio28, Function<pac::PIO1>>,
+	h_sync: Pin<bank0::Gpio0, FunctionPio0, PullNone>,
+	v_sync: Pin<bank0::Gpio1, FunctionPio0, PullNone>,
+	red0: Pin<bank0::Gpio2, FunctionPio0, PullNone>,
+	red1: Pin<bank0::Gpio3, FunctionPio0, PullNone>,
+	red2: Pin<bank0::Gpio4, FunctionPio0, PullNone>,
+	red3: Pin<bank0::Gpio5, FunctionPio0, PullNone>,
+	green0: Pin<bank0::Gpio6, FunctionPio0, PullNone>,
+	green1: Pin<bank0::Gpio7, FunctionPio0, PullNone>,
+	green2: Pin<bank0::Gpio8, FunctionPio0, PullNone>,
+	green3: Pin<bank0::Gpio9, FunctionPio0, PullNone>,
+	blue0: Pin<bank0::Gpio10, FunctionPio0, PullNone>,
+	blue1: Pin<bank0::Gpio11, FunctionPio0, PullNone>,
+	blue2: Pin<bank0::Gpio12, FunctionPio0, PullNone>,
+	blue3: Pin<bank0::Gpio13, FunctionPio0, PullNone>,
+	npower_save: Pin<bank0::Gpio23, FunctionSioOutput, PullNone>,
+	nspi_cs_io: Pin<bank0::Gpio17, FunctionSioOutput, PullNone>,
+	noutput_en: Pin<bank0::Gpio21, FunctionSioOutput, PullNone>,
+	i2s_adc_data: Pin<bank0::Gpio22, FunctionPio1, PullNone>,
+	i2s_dac_data: Pin<bank0::Gpio26, FunctionPio1, PullNone>,
+	i2s_bit_clock: Pin<bank0::Gpio27, FunctionPio1, PullNone>,
+	i2s_lr_clock: Pin<bank0::Gpio28, FunctionPio1, PullNone>,
 }
 
 // -----------------------------------------------------------------------------
@@ -350,7 +367,7 @@ fn main() -> ! {
 		watchdog_reboot();
 	}
 
-	// Reset the DMA engine. If we don't do this, starting from probe-run
+	// Reset the DMA engine. If we don't do this, starting from probe-rs
 	// (as opposed to a cold-start) is unreliable.
 	reset_dma_engine(&mut pp);
 
@@ -450,6 +467,7 @@ fn main() -> ! {
 		pp.SPI0,
 		pp.I2C1,
 		pp.TIMER,
+		pp.PIO1,
 		clocks,
 		delay,
 		watchdog,
@@ -761,7 +779,7 @@ fn check_stack(start: *const usize, stack_len_bytes: usize, check_word: usize) {
 		p = unsafe { p.offset(1) };
 		free_bytes += core::mem::size_of::<usize>();
 	}
-	defmt::debug!(
+	defmt::info!(
 		"Stack free at 0x{:08x}: {} bytes used of {} bytes",
 		start,
 		stack_len_bytes - free_bytes,
@@ -817,6 +835,7 @@ impl Hardware {
 		spi: pac::SPI0,
 		i2c: pac::I2C1,
 		timer: pac::TIMER,
+		pio1: pac::PIO1,
 		clocks: ClocksManager,
 		delay: cortex_m::delay::Delay,
 		watchdog: hal::Watchdog,
@@ -831,13 +850,13 @@ impl Hardware {
 		let raw_i2c = hal::i2c::I2C::i2c1(
 			i2c,
 			{
-				let mut pin = hal_pins.gpio14.into_mode();
+				let mut pin = hal_pins.gpio14.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			{
-				let mut pin = hal_pins.gpio15.into_mode();
+				let mut pin = hal_pins.gpio15.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
@@ -849,7 +868,7 @@ impl Hardware {
 		let i2c = shared_bus::BusManagerSimple::new(raw_i2c);
 		let proxy = i2c.acquire_i2c();
 		let mut external_rtc = rtc::Rtc::new(proxy);
-		let timer = hal::timer::Timer::new(timer, resets);
+		let timer = hal::timer::Timer::new(timer, resets, &clocks);
 		// Do a conversion from external RTC time (chrono::NaiveDateTime) to a format we can track
 		let ticks_at_boot_us = match external_rtc.get_time(i2c.acquire_i2c()) {
 			Ok(time) => {
@@ -876,127 +895,160 @@ impl Hardware {
 		let pins = Pins {
 			// Disable power save mode to force SMPS into low-efficiency, low-noise mode.
 			npower_save: {
-				let mut pin = hal_pins.b_power_save.into_push_pull_output();
+				let mut pin = hal_pins.b_power_save.reconfigure();
 				pin.set_high().unwrap();
 				pin
 			},
 			// Give H-Sync, V-Sync and 12 RGB colour pins to PIO0 to output video
 			h_sync: {
-				let mut pin = hal_pins.gpio0.into_mode();
+				let mut pin = hal_pins.gpio0.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			v_sync: {
-				let mut pin = hal_pins.gpio1.into_mode();
+				let mut pin = hal_pins.gpio1.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			red0: {
-				let mut pin = hal_pins.gpio2.into_mode();
+				let mut pin = hal_pins.gpio2.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			red1: {
-				let mut pin = hal_pins.gpio3.into_mode();
+				let mut pin = hal_pins.gpio3.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			red2: {
-				let mut pin = hal_pins.gpio4.into_mode();
+				let mut pin = hal_pins.gpio4.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			red3: {
-				let mut pin = hal_pins.gpio5.into_mode();
+				let mut pin = hal_pins.gpio5.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			green0: {
-				let mut pin = hal_pins.gpio6.into_mode();
+				let mut pin = hal_pins.gpio6.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			green1: {
-				let mut pin = hal_pins.gpio7.into_mode();
+				let mut pin = hal_pins.gpio7.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			green2: {
-				let mut pin = hal_pins.gpio8.into_mode();
+				let mut pin = hal_pins.gpio8.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			green3: {
-				let mut pin = hal_pins.gpio9.into_mode();
+				let mut pin = hal_pins.gpio9.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			blue0: {
-				let mut pin = hal_pins.gpio10.into_mode();
+				let mut pin = hal_pins.gpio10.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			blue1: {
-				let mut pin = hal_pins.gpio11.into_mode();
+				let mut pin = hal_pins.gpio11.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			blue2: {
-				let mut pin = hal_pins.gpio12.into_mode();
+				let mut pin = hal_pins.gpio12.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			blue3: {
-				let mut pin = hal_pins.gpio13.into_mode();
-				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-				pin
-			},
-			spi_cipo: {
-				let mut pin = hal_pins.gpio16.into_mode();
+				let mut pin = hal_pins.gpio13.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			nspi_cs_io: {
-				let mut pin = hal_pins.gpio17.into_push_pull_output();
+				let mut pin = hal_pins.gpio17.reconfigure();
 				pin.set_high().unwrap();
-				pin
-			},
-			spi_clk: {
-				let mut pin = hal_pins.gpio18.into_mode();
-				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-				pin
-			},
-			spi_copi: {
-				let mut pin = hal_pins.gpio19.into_mode();
-				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			noutput_en: {
-				let mut pin = hal_pins.gpio21.into_push_pull_output();
+				let mut pin = hal_pins.gpio21.reconfigure();
 				pin.set_high().unwrap();
 				pin
 			},
-			i2s_adc_data: hal_pins.gpio22.into_mode(),
-			i2s_dac_data: hal_pins.gpio26.into_mode(),
-			i2s_bit_clock: hal_pins.gpio27.into_mode(),
-			i2s_lr_clock: hal_pins.gpio28.into_mode(),
+			i2s_adc_data: hal_pins.gpio22.reconfigure(),
+			i2s_dac_data: hal_pins.gpio26.reconfigure(),
+			i2s_bit_clock: hal_pins.gpio27.reconfigure(),
+			i2s_lr_clock: hal_pins.gpio28.reconfigure(),
+		};
+
+		let mut audio_codec = tlv320aic23::Codec::new(tlv320aic23::BusAddress::CsLow);
+		if let Err(hal::i2c::Error::Abort(code)) = audio_codec.reset(&mut i2c.acquire_i2c()) {
+			defmt::error!("CODEC did not respond: code {:?}", code);
+		}
+		audio_codec.set_digital_interface_enabled(true);
+		audio_codec.set_dac_selected(true);
+		audio_codec.set_dac_mute(false);
+		audio_codec.set_bypass(false);
+		audio_codec.set_line_input_mute(true, tlv320aic23::Channel::Both);
+		audio_codec.set_powered_on(tlv320aic23::Subsystem::AnalogDigitalConverter, true);
+		audio_codec.set_powered_on(tlv320aic23::Subsystem::MicrophoneInput, true);
+		audio_codec.set_powered_on(tlv320aic23::Subsystem::LineInput, true);
+		// Set volume to -6dB. 73 = 0 dB, and it's 1 dB per step.
+		audio_codec.set_headphone_output_volume(64, tlv320aic23::Channel::Both);
+		audio_codec.set_sample_rate(
+			tlv320aic23::CONFIG_USB_48K,
+			tlv320aic23::LrSwap::Disabled,
+			tlv320aic23::LrPhase::RightOnHigh,
+			tlv320aic23::Mode::Controller,
+			tlv320aic23::InputBitLength::B16,
+			tlv320aic23::DataFormat::I2s,
+		);
+		let audio_config = common::audio::Config {
+			sample_format: common::audio::SampleFormat::SixteenBitStereo,
+			sample_rate_hz: 48000,
+		};
+		if let Err(hal::i2c::Error::Abort(code)) = audio_codec.sync(&mut i2c.acquire_i2c()) {
+			defmt::error!("CODEC did not respond: code {:?}", code);
+		}
+
+		let audio_player = i2s::init(pio1, resets);
+
+		let spi_copi = {
+			let mut pin = hal_pins.gpio19.reconfigure();
+			pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+			pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+			pin
+		};
+		let spi_cipo = {
+			let mut pin = hal_pins.gpio16.reconfigure();
+			pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+			pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+			pin
+		};
+		let spi_clk = {
+			let mut pin = hal_pins.gpio18.reconfigure();
+			pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+			pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+			pin
 		};
 
 		(
@@ -1007,7 +1059,7 @@ impl Hardware {
 				// edge.
 				//
 				// SPI clock speed here is irrelevant - we change it depending on the device.
-				spi_bus: hal::Spi::new(spi).init(
+				spi_bus: hal::Spi::new(spi, (spi_copi, spi_cipo, spi_clk)).init(
 					resets,
 					clocks.peripheral_clock.freq(),
 					2_000_000.Hz(),
@@ -1028,8 +1080,11 @@ impl Hardware {
 				card_state: CardState::Unplugged,
 				clocks,
 				watchdog,
+				audio_codec,
+				audio_player,
+				audio_config,
 			},
-			hal_pins.gpio20.into_pull_up_input(),
+			hal_pins.gpio20.reconfigure(),
 		)
 	}
 
@@ -1040,7 +1095,7 @@ impl Hardware {
 	/// chip-select signal.
 	fn with_io_cs<F, T>(&mut self, func: F) -> T
 	where
-		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>) -> T,
+		F: FnOnce(&mut SpiBus) -> T,
 	{
 		self.spi_bus
 			.set_baudrate(self.clocks.peripheral_clock.freq(), Self::CLOCK_IO);
@@ -1128,7 +1183,7 @@ impl Hardware {
 	/// SPI bus object), then de-activates the CS pin.
 	fn with_bus_cs<F>(&mut self, cs: u8, clock_speed: fugit::Rate<u32, 1, 1>, func: F)
 	where
-		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>, &mut [u8]),
+		F: FnOnce(&mut SpiBus, &mut [u8]),
 	{
 		// Only CS0..CS7 is valid
 		let cs = cs & 0b111;
@@ -1519,7 +1574,10 @@ impl Hardware {
 				let spi = sdcard::FakeSpi(self, true);
 				let cs = sdcard::FakeCs();
 				let delayer = sdcard::FakeDelayer();
-				let options = embedded_sdmmc::sdcard::AcquireOpts { use_crc: true };
+				let options = embedded_sdmmc::sdcard::AcquireOpts {
+					use_crc: true,
+					acquire_retries: 5,
+				};
 				let sdcard = embedded_sdmmc::SdCard::new_with_options(spi, cs, delayer, options);
 				// Talk to the card to trigger a scan if its type
 				let num_blocks = sdcard.num_blocks();
@@ -1698,15 +1756,57 @@ pub extern "C" fn time_clock_set(time: common::Time) {
 /// Configuration data is, to the BIOS, just a block of bytes of a given
 /// length. How it stores them is up to the BIOS - it could be EEPROM, or
 /// battery-backed SRAM.
-pub extern "C" fn configuration_get(_buffer: FfiBuffer) -> ApiResult<usize> {
-	ApiResult::Err(CError::Unimplemented)
+pub extern "C" fn configuration_get(mut buffer: FfiBuffer) -> ApiResult<usize> {
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+	let Some(slice) = buffer.as_mut_slice() else {
+		return ApiResult::Err(CError::Unimplemented);
+	};
+	match hw.rtc.configuration_get(hw.i2c.acquire_i2c(), slice) {
+		Ok(n) => {
+			defmt::info!("Config Read {:x}", &slice[0..usize::from(n)]);
+			ApiResult::Ok(usize::from(n))
+		}
+		Err(rtc::Error::NoRtcFound) => {
+			defmt::info!("Can't get config - no RTC present");
+			ApiResult::Err(CError::InvalidDevice)
+		}
+		Err(rtc::Error::DriverBug) => {
+			defmt::warn!("Can't get config - Driver Bug");
+			ApiResult::Err(CError::DeviceError(0))
+		}
+		Err(rtc::Error::Bus(e)) => {
+			defmt::warn!("Can't get config - bus error {:?}", e);
+			ApiResult::Err(CError::DeviceError(1))
+		}
+	}
 }
 
 /// Set the configuration data block.
 ///
 /// See `configuration_get`.
-pub extern "C" fn configuration_set(_buffer: FfiByteSlice) -> ApiResult<()> {
-	ApiResult::Err(CError::Unimplemented)
+pub extern "C" fn configuration_set(buffer: FfiByteSlice) -> ApiResult<()> {
+	defmt::info!("Config save {:x}", buffer.as_slice());
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+	match hw
+		.rtc
+		.configuration_set(hw.i2c.acquire_i2c(), buffer.as_slice())
+	{
+		Ok(()) => ApiResult::Ok(()),
+		Err(rtc::Error::NoRtcFound) => {
+			defmt::info!("Can't save config - no RTC present");
+			ApiResult::Err(CError::InvalidDevice)
+		}
+		Err(rtc::Error::DriverBug) => {
+			defmt::warn!("Can't save config - Driver Bug");
+			ApiResult::Err(CError::DeviceError(0))
+		}
+		Err(rtc::Error::Bus(e)) => {
+			defmt::warn!("Can't save config - bus error {:?}", e);
+			ApiResult::Err(CError::DeviceError(0))
+		}
+	}
 }
 
 /// Does this Neotron BIOS support this video mode?
@@ -1724,6 +1824,7 @@ pub extern "C" fn video_is_valid_mode(mode: common::video::Mode) -> bool {
 /// pointer to a block of size `Mode::frame_size_bytes()` to
 /// `video_set_framebuffer` before any video will appear.
 pub extern "C" fn video_set_mode(mode: common::video::Mode) -> ApiResult<()> {
+	defmt::info!("Changing to mode {}", mode.as_u8());
 	if vga::set_video_mode(mode) {
 		ApiResult::Ok(())
 	} else {
@@ -1754,7 +1855,12 @@ pub extern "C" fn video_get_mode() -> common::video::Mode {
 /// to provide the 'basic' text buffer experience from reserves, so this
 /// function will never return `null` on start-up.
 pub extern "C" fn video_get_framebuffer() -> *mut u8 {
-	unsafe { vga::GLYPH_ATTR_ARRAY.as_mut_ptr() as *mut u8 }
+	let ptr = vga::CUSTOM_FB.load(Ordering::Relaxed);
+	if ptr.is_null() {
+		unsafe { vga::GLYPH_ATTR_ARRAY.as_mut_ptr() as *mut u8 }
+	} else {
+		ptr
+	}
 }
 
 /// Set the framebuffer address.
@@ -1768,8 +1874,9 @@ pub extern "C" fn video_get_framebuffer() -> *mut u8 {
 ///
 /// The pointer must point to enough video memory to handle the current video
 /// mode, and any future video mode you set.
-pub unsafe extern "C" fn video_set_framebuffer(_buffer: *const u8) -> ApiResult<()> {
-	ApiResult::Err(CError::Unimplemented)
+pub unsafe extern "C" fn video_set_framebuffer(buffer: *const u8) -> ApiResult<()> {
+	vga::CUSTOM_FB.store(buffer as *mut u8, Ordering::Relaxed);
+	ApiResult::Ok(())
 }
 
 /// Find out whether the given video mode needs more VRAM than we currently have.
@@ -1979,44 +2086,281 @@ unsafe extern "C" fn video_set_whole_palette(
 	}
 }
 
-extern "C" fn i2c_bus_get_info(_i2c_bus: u8) -> FfiOption<common::i2c::BusInfo> {
-	FfiOption::None
+extern "C" fn i2c_bus_get_info(i2c_bus: u8) -> FfiOption<common::i2c::BusInfo> {
+	match i2c_bus {
+		0 => FfiOption::Some(common::i2c::BusInfo {
+			name: "RP2040".into(),
+		}),
+		1 => FfiOption::Some(common::i2c::BusInfo {
+			name: "Pico-BMC".into(),
+		}),
+		_ => FfiOption::None,
+	}
 }
 
 extern "C" fn i2c_write_read(
-	_i2c_bus: u8,
-	_i2c_device_address: u8,
-	_tx: FfiByteSlice,
-	_tx2: FfiByteSlice,
-	_rx: FfiBuffer,
+	i2c_bus: u8,
+	i2c_device_address: u8,
+	tx: FfiByteSlice,
+	tx2: FfiByteSlice,
+	mut rx: FfiBuffer,
 ) -> ApiResult<()> {
-	ApiResult::Err(CError::Unimplemented)
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+	match i2c_bus {
+		0 => {
+			// Use RP2040 bus
+			let mut i2c = hw.i2c.acquire_i2c();
+			let tx_bytes = tx.as_slice();
+			let tx2_bytes = tx2.as_slice();
+			let tx_iter = tx_bytes.iter().chain(tx2_bytes).cloned();
+			let r = if let Some(rx_buf) = rx.as_mut_slice() {
+				i2c.write_iter_read(i2c_device_address, tx_iter, rx_buf)
+			} else {
+				i2c.write(i2c_device_address, tx_iter)
+			};
+			match r {
+				Ok(()) => ApiResult::Ok(()),
+				Err(e) => {
+					defmt::warn!("Error executing I2C: {:?}", e);
+					ApiResult::Err(CError::DeviceError(0))
+				}
+			}
+		}
+		1 => {
+			// TODO talk to Pico-BMC over SPI
+			ApiResult::Err(CError::Unimplemented)
+		}
+		_ => ApiResult::Err(CError::Unimplemented),
+	}
 }
 
 extern "C" fn audio_mixer_channel_get_info(
-	_audio_mixer_id: u8,
+	audio_mixer_id: u8,
 ) -> FfiOption<common::audio::MixerChannelInfo> {
-	FfiOption::None
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+
+	match audio_mixer_id {
+		0 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("LeftOut"),
+			direction: common::audio::Direction::Output,
+			max_level: 79,
+			current_level: hw.audio_codec.get_headphone_output_volume().0,
+		}),
+		1 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("RightOut"),
+			direction: common::audio::Direction::Output,
+			max_level: 79,
+			current_level: hw.audio_codec.get_headphone_output_volume().1,
+		}),
+		2 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("LeftIn"),
+			direction: common::audio::Direction::Input,
+			max_level: 31,
+			current_level: hw.audio_codec.get_line_input_volume_steps().0,
+		}),
+		3 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("RightIn"),
+			direction: common::audio::Direction::Input,
+			max_level: 31,
+			current_level: hw.audio_codec.get_line_input_volume_steps().1,
+		}),
+		4 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("LeftInMute"),
+			direction: common::audio::Direction::Input,
+			max_level: 1,
+			current_level: hw.audio_codec.get_line_input_mute().0 as u8,
+		}),
+		5 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("RightInMute"),
+			direction: common::audio::Direction::Input,
+			max_level: 1,
+			current_level: hw.audio_codec.get_line_input_mute().1 as u8,
+		}),
+		6 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("Sidetone"),
+			direction: common::audio::Direction::Output,
+			max_level: 5,
+			current_level: match hw.audio_codec.get_sidetone_level() {
+				tlv320aic23::Sidetone::ZeroDb => 5,
+				tlv320aic23::Sidetone::Minus6 => 4,
+				tlv320aic23::Sidetone::Minus9 => 3,
+				tlv320aic23::Sidetone::Minus12 => 2,
+				tlv320aic23::Sidetone::Minus18 => 1,
+				tlv320aic23::Sidetone::Disabled => 0,
+			},
+		}),
+		7 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("MicEnable"),
+			direction: common::audio::Direction::Input,
+			max_level: 1,
+			current_level: hw.audio_codec.get_audio_input() as u8,
+		}),
+		8 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("MicBoost"),
+			direction: common::audio::Direction::Input,
+			max_level: 1,
+			current_level: hw.audio_codec.get_microphone_boost() as u8,
+		}),
+		9 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("MicMute"),
+			direction: common::audio::Direction::Input,
+			max_level: 1,
+			current_level: hw.audio_codec.get_microphone_mute() as u8,
+		}),
+		10 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("Bypass"),
+			direction: common::audio::Direction::Input,
+			max_level: 1,
+			current_level: hw.audio_codec.get_bypass() as u8,
+		}),
+		11 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("DacEnable"),
+			direction: common::audio::Direction::Output,
+			max_level: 1,
+			current_level: hw.audio_codec.get_dac_selected() as u8,
+		}),
+		12 => FfiOption::Some(common::audio::MixerChannelInfo {
+			name: common::FfiString::new("DacMute"),
+			direction: common::audio::Direction::Output,
+			max_level: 1,
+			current_level: hw.audio_codec.get_dac_mute() as u8,
+		}),
+		_ => FfiOption::None,
+	}
 }
 
-extern "C" fn audio_mixer_channel_set_level(_audio_mixer_id: u8, _level: u8) -> ApiResult<()> {
-	ApiResult::Err(CError::Unimplemented)
+extern "C" fn audio_mixer_channel_set_level(audio_mixer_id: u8, level: u8) -> ApiResult<()> {
+	let FfiOption::Some(info) = audio_mixer_channel_get_info(audio_mixer_id) else {
+		return ApiResult::Err(neotron_common_bios::Error::InvalidDevice);
+	};
+
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+
+	if level > info.max_level {
+		return ApiResult::Err(neotron_common_bios::Error::UnsupportedConfiguration(0));
+	}
+
+	use tlv320aic23::Channel;
+
+	match audio_mixer_id {
+		0 => hw
+			.audio_codec
+			.set_headphone_output_volume(level, Channel::Left),
+		1 => hw
+			.audio_codec
+			.set_headphone_output_volume(level, Channel::Right),
+		2 => hw
+			.audio_codec
+			.set_line_input_volume_steps(level, Channel::Left),
+		3 => hw
+			.audio_codec
+			.set_line_input_volume_steps(level, Channel::Right),
+		4 => hw
+			.audio_codec
+			.set_line_input_mute(level == 1, Channel::Left),
+		5 => hw
+			.audio_codec
+			.set_line_input_mute(level == 1, Channel::Right),
+		6 => hw.audio_codec.set_sidetone_level(match level {
+			5 => tlv320aic23::Sidetone::ZeroDb,
+			4 => tlv320aic23::Sidetone::Minus6,
+			3 => tlv320aic23::Sidetone::Minus9,
+			2 => tlv320aic23::Sidetone::Minus12,
+			1 => tlv320aic23::Sidetone::Minus18,
+			_ => tlv320aic23::Sidetone::Disabled,
+		}),
+		7 => hw.audio_codec.set_audio_input(match level {
+			0 => tlv320aic23::AudioInput::LineInput,
+			_ => tlv320aic23::AudioInput::Microphone,
+		}),
+		8 => hw.audio_codec.set_microphone_boost(level == 1),
+		9 => hw.audio_codec.set_microphone_mute(level == 1),
+		10 => hw.audio_codec.set_bypass(level == 1),
+		11 => hw.audio_codec.set_dac_selected(level == 1),
+		12 => hw.audio_codec.set_dac_mute(level == 1),
+		_ => {
+			return ApiResult::Err(neotron_common_bios::Error::InvalidDevice);
+		}
+	};
+	if hw.audio_codec.sync(&mut hw.i2c.acquire_i2c()).is_ok() {
+		neotron_common_bios::FfiResult::Ok(())
+	} else {
+		ApiResult::Err(neotron_common_bios::Error::DeviceError(0))
+	}
 }
 
-extern "C" fn audio_output_set_config(_config: common::audio::Config) -> ApiResult<()> {
-	ApiResult::Err(CError::Unimplemented)
+extern "C" fn audio_output_set_config(config: common::audio::Config) -> ApiResult<()> {
+	// We can't support 8-bit samples with this CODEC. See `audio_output_data`
+	// if you add any more supported sample formats, so the playback routine
+	// does the right thing.
+	match config.sample_format {
+		common::audio::SampleFormat::SixteenBitStereo
+		| common::audio::SampleFormat::SixteenBitMono => {
+			// Format Ok
+		}
+		_ => {
+			return ApiResult::Err(CError::UnsupportedConfiguration(0));
+		}
+	}
+	let sample_rate = match config.sample_rate_hz {
+		48000 => tlv320aic23::CONFIG_USB_48K,
+		44100 => tlv320aic23::CONFIG_USB_44K1,
+		32000 => tlv320aic23::CONFIG_USB_32K,
+		8000 => tlv320aic23::CONFIG_USB_8K,
+		_ => {
+			return ApiResult::Err(CError::UnsupportedConfiguration(1));
+		}
+	};
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+	hw.audio_codec.set_sample_rate(
+		sample_rate,
+		tlv320aic23::LrSwap::Disabled,
+		tlv320aic23::LrPhase::RightOnHigh,
+		tlv320aic23::Mode::Controller,
+		tlv320aic23::InputBitLength::B16,
+		tlv320aic23::DataFormat::I2s,
+	);
+	hw.audio_config = config;
+	ApiResult::Ok(())
 }
 
 extern "C" fn audio_output_get_config() -> ApiResult<common::audio::Config> {
-	ApiResult::Err(CError::Unimplemented)
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+	let config = hw.audio_config.clone();
+	ApiResult::Ok(config)
 }
 
-unsafe extern "C" fn audio_output_data(_samples: FfiByteSlice) -> ApiResult<usize> {
-	ApiResult::Err(CError::Unimplemented)
+unsafe extern "C" fn audio_output_data(samples: FfiByteSlice) -> ApiResult<usize> {
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+	let samples = samples.as_slice();
+	// We only support these two kinds.
+	let count = match hw.audio_config.sample_format {
+		common::audio::SampleFormat::SixteenBitMono => {
+			hw.audio_player.play_samples_16bit_mono(samples)
+		}
+		common::audio::SampleFormat::SixteenBitStereo => {
+			hw.audio_player.play_samples_16bit_stereo(samples)
+		}
+		_ => {
+			return ApiResult::Err(CError::Unimplemented);
+		}
+	};
+	ApiResult::Ok(count)
 }
 
 extern "C" fn audio_output_get_space() -> ApiResult<usize> {
-	ApiResult::Ok(0)
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+	// The result is in samples, where each sample is 16-bit stereo (i.e.
+	// 32-bits) or 16-bit mono (i.e. 16-bit) depending on the audio
+	// configuration.
+	ApiResult::Ok(hw.audio_player.available_space())
 }
 
 extern "C" fn audio_input_set_config(_config: common::audio::Config) -> ApiResult<()> {
@@ -2039,8 +2383,34 @@ extern "C" fn bus_select(_periperal_id: FfiOption<u8>) {
 	// Do nothing
 }
 
-extern "C" fn bus_get_info(_periperal_id: u8) -> FfiOption<common::bus::PeripheralInfo> {
-	FfiOption::None
+extern "C" fn bus_get_info(periperal_id: u8) -> FfiOption<common::bus::PeripheralInfo> {
+	match periperal_id {
+		0 => FfiOption::Some(common::bus::PeripheralInfo {
+			name: "BMC".into(),
+			kind: common::bus::PeripheralKind::Reserved,
+		}),
+		1 => FfiOption::Some(common::bus::PeripheralInfo {
+			name: "SdCard".into(),
+			kind: common::bus::PeripheralKind::SdCard,
+		}),
+		2 => FfiOption::Some(common::bus::PeripheralInfo {
+			name: "Slot2".into(),
+			kind: common::bus::PeripheralKind::Slot,
+		}),
+		3 => FfiOption::Some(common::bus::PeripheralInfo {
+			name: "Slot3".into(),
+			kind: common::bus::PeripheralKind::Slot,
+		}),
+		4 => FfiOption::Some(common::bus::PeripheralInfo {
+			name: "Slot4".into(),
+			kind: common::bus::PeripheralKind::Slot,
+		}),
+		5 => FfiOption::Some(common::bus::PeripheralInfo {
+			name: "Slot5".into(),
+			kind: common::bus::PeripheralKind::Slot,
+		}),
+		_ => FfiOption::None,
+	}
 }
 
 extern "C" fn bus_write_read(
@@ -2132,12 +2502,13 @@ pub extern "C" fn block_write(
 
 /// Read one or more sectors to a block device.
 ///
-/// The function will block until all data is read. The array pointed
-/// to by `data` must be `num_blocks * block_size` in length, where
-/// `block_size` is given by `block_dev_get_info`.
+/// The function will block until all data is read. The array pointed to by
+/// `data` must be `num_blocks * block_size` in length, where `block_size` is
+/// given by `block_dev_get_info`.
 ///
-/// There are no requirements on the alignment of `data` but if it is
-/// aligned, the BIOS may be able to use a higher-performance code path.
+/// The API docs say there are no requirements on the alignment of `data` but we
+/// unsafely transmute it into a `[embedded_sdmmc::Block]` so it should match
+/// whatever that needs.
 pub extern "C" fn block_read(
 	device: u8,
 	block: common::block_dev::BlockIdx,
@@ -2164,7 +2535,10 @@ pub extern "C" fn block_read(
 				let spi = sdcard::FakeSpi(hw, false);
 				let cs = sdcard::FakeCs();
 				let delayer = sdcard::FakeDelayer();
-				let options = embedded_sdmmc::sdcard::AcquireOpts { use_crc: true };
+				let options = embedded_sdmmc::sdcard::AcquireOpts {
+					use_crc: true,
+					acquire_retries: 5,
+				};
 				let sdcard = embedded_sdmmc::SdCard::new_with_options(spi, cs, delayer, options);
 				unsafe {
 					sdcard.mark_card_as_init(info.card_type);
@@ -2220,8 +2594,9 @@ extern "C" fn block_dev_eject(_dev_id: u8) -> ApiResult<()> {
 /// Sleep the CPU until the next interrupt.
 extern "C" fn power_idle() {
 	if !INTERRUPT_PENDING.load(Ordering::Relaxed) {
-		defmt::debug!("Idle...");
-		cortex_m::asm::wfe();
+		unsafe {
+			core::arch::asm!("wfe");
+		}
 	}
 }
 

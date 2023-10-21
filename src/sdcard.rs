@@ -128,7 +128,7 @@ impl embedded_hal::blocking::delay::DelayUs<u8> for FakeDelayer {
 // -----------------------------------------------------------------------------
 
 /// How fast can the SD Card SPI CLK input go?
-const CLOCK_SD_CARD: fugit::Rate<u32, 1, 1> = fugit::Rate::<u32, 1, 1>::Hz(10_000_000);
+const CLOCK_SD_CARD: fugit::Rate<u32, 1, 1> = fugit::Rate::<u32, 1, 1>::Hz(25_000_000);
 
 /// How fast can the SD Card SPI CLK input go during the card init phase?
 const CLOCK_SD_CARD_INIT: fugit::Rate<u32, 1, 1> = fugit::Rate::<u32, 1, 1>::Hz(400_000);

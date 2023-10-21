@@ -5,21 +5,23 @@ resolver = "2"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 name = "neotron-pico-bios"
-version = "0.6.0"
+version = "0.7.0"
 
 [dependencies]
 # Useful Cortex-M specific functions (e.g. SysTick)
 cortex-m = "0.7"
-# The Raspberry Pi Pico HAL
-rp-pico = { version = "0.7", default-features = false, features = [
+# The Raspberry Pi Pico BSP
+rp-pico = { version = "0.8", default-features = false, features = [
     "rt",
     "critical-section-impl",
     "rom-func-cache"
 ] }
+# The Raspberry Pi RP2040 HAL (so we can turn defmt on)
+rp2040-hal = { version = "0.9", features = [ "defmt" ] }
 # Cortex-M run-time (or start-up) code
 cortex-m-rt = "0.7"
 # The BIOS to OS API
-neotron-common-bios = "0.11.0"
+neotron-common-bios = "0.11.1"
 # For the RP2040 bootloader
 rp2040-boot2 = "0.3.0"
 # For hardware abstraction traits
@@ -51,16 +53,18 @@ ds1307 = "0.5.0"
 # The Microchip MCP7940x RTC driver
 mcp794xx = "0.3.0"
 # I2C Bus Sharing
-shared-bus = "0.2"
+shared-bus = "0.3"
 # Gets us compare-swap atomic operations
 atomic-polyfill = "1.0.2"
 # SD Card driver
-embedded-sdmmc = { version = "0.5", default-features = false, features = [
+embedded-sdmmc = { version = "0.6", default-features = false, features = [
     "defmt-log"
 ] }
+# CODEC register control
+tlv320aic23 = "0.1.0"
 
 [build-dependencies]
-neotron-common-bios = "0.11.0"
+neotron-common-bios = "0.11.1"
 vte = "0.11"
 
 [[bin]]
@@ -82,3 +86,9 @@ opt-level = "s"
 
 [features]
 check-stack = []
+
+[patch.crates-io]
+# Patched to include the WriteIterRead trait on i2c
+rp2040-hal = { git = "https://github.com/rp-rs/rp-hal", rev = "9c17a2d" }
+# Patched to include the WriteIterRead trait on i2c
+shared-bus = { git = "https://github.com/thejpster/shared-bus", rev = "639a2e6" }
