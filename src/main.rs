@@ -2086,18 +2086,53 @@ unsafe extern "C" fn video_set_whole_palette(
 	}
 }
 
-extern "C" fn i2c_bus_get_info(_i2c_bus: u8) -> FfiOption<common::i2c::BusInfo> {
-	FfiOption::None
+extern "C" fn i2c_bus_get_info(i2c_bus: u8) -> FfiOption<common::i2c::BusInfo> {
+	match i2c_bus {
+		0 => FfiOption::Some(common::i2c::BusInfo {
+			name: "RP2040".into(),
+		}),
+		1 => FfiOption::Some(common::i2c::BusInfo {
+			name: "Pico-BMC".into(),
+		}),
+		_ => FfiOption::None,
+	}
 }
 
 extern "C" fn i2c_write_read(
-	_i2c_bus: u8,
-	_i2c_device_address: u8,
-	_tx: FfiByteSlice,
-	_tx2: FfiByteSlice,
-	_rx: FfiBuffer,
+	i2c_bus: u8,
+	i2c_device_address: u8,
+	tx: FfiByteSlice,
+	tx2: FfiByteSlice,
+	mut rx: FfiBuffer,
 ) -> ApiResult<()> {
+	let mut lock = HARDWARE.lock();
+	let hw = lock.as_mut().unwrap();
+	match i2c_bus {
+		0 => {
+			// Use RP2040 bus
+			let mut i2c = hw.i2c.acquire_i2c();
+			let tx_bytes = tx.as_slice();
+			let tx2_bytes = tx2.as_slice();
+			let tx_iter = tx_bytes.iter().chain(tx2_bytes).cloned();
+			let r = if let Some(rx_buf) = rx.as_mut_slice() {
+				i2c.write_iter_read(i2c_device_address, tx_iter, rx_buf)
+			} else {
+				i2c.write(i2c_device_address, tx_iter)
+			};
+			match r {
+				Ok(()) => ApiResult::Ok(()),
+				Err(e) => {
+					defmt::warn!("Error executing I2C: {:?}", e);
+					ApiResult::Err(CError::DeviceError(0))
+				}
+			}
+		}
+		1 => {
+			// TODO talk to Pico-BMC over SPI
 			ApiResult::Err(CError::Unimplemented)
+		}
+		_ => ApiResult::Err(CError::Unimplemented),
+	}
 }
 
 extern "C" fn audio_mixer_channel_get_info(
