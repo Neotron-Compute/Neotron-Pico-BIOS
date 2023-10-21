@@ -2383,8 +2383,34 @@ extern "C" fn bus_select(_periperal_id: FfiOption<u8>) {
 	// Do nothing
 }
 
-extern "C" fn bus_get_info(_periperal_id: u8) -> FfiOption<common::bus::PeripheralInfo> {
-	FfiOption::None
+extern "C" fn bus_get_info(periperal_id: u8) -> FfiOption<common::bus::PeripheralInfo> {
+	match periperal_id {
+		0 => FfiOption::Some(common::bus::PeripheralInfo {
+			name: "BMC".into(),
+			kind: common::bus::PeripheralKind::Reserved,
+		}),
+		1 => FfiOption::Some(common::bus::PeripheralInfo {
+			name: "SdCard".into(),
+			kind: common::bus::PeripheralKind::SdCard,
+		}),
+		2 => FfiOption::Some(common::bus::PeripheralInfo {
+			name: "Slot2".into(),
+			kind: common::bus::PeripheralKind::Slot,
+		}),
+		3 => FfiOption::Some(common::bus::PeripheralInfo {
+			name: "Slot3".into(),
+			kind: common::bus::PeripheralKind::Slot,
+		}),
+		4 => FfiOption::Some(common::bus::PeripheralInfo {
+			name: "Slot4".into(),
+			kind: common::bus::PeripheralKind::Slot,
+		}),
+		5 => FfiOption::Some(common::bus::PeripheralInfo {
+			name: "Slot5".into(),
+			kind: common::bus::PeripheralKind::Slot,
+		}),
+		_ => FfiOption::None,
+	}
 }
 
 extern "C" fn bus_write_read(
