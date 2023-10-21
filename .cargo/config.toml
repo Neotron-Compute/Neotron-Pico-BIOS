@@ -19,5 +19,4 @@ rustflags = [
 target = "thumbv6m-none-eabi" # Cortex-M0 and Cortex-M0+
 
 [env]
-DEFMT_LOG = { value = "info", force = true }
-
+DEFMT_LOG = { value = "info" }

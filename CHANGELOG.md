@@ -12,9 +12,11 @@ In this repository, changes are made in branches which are merged into **develop
 * Run SD Card at 25 MHz
 * Switch instructions to recommend `probe-rs` for flashing
 * Support reboot from OS
-* Updated to neotron-common-bios 0.11.1
+* Updated to `neotron-common-bios` 0.11.1
 * Get/set config in battery-backed RTC SRAM
 * Use `vte` crate for ANSI parsing for the BIOS logo
+* Support I2C access from the OS
+* Support changing the Audio CODEC settings
 
 ## v0.6.0 ([Source](https://github.com/neotron-compute/neotron-pico-bios/tree/v0.6.0) | [Release](https://github.com/neotron-compute/neotron-pico-bios/release/tag/v0.6.0))
 
