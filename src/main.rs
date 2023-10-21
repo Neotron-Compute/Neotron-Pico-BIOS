@@ -71,6 +71,7 @@ use defmt::info;
 use defmt_rtt as _;
 use ds1307::{Datelike, NaiveDateTime, Timelike};
 use embedded_hal::{
+	blocking::i2c::{WriteIter as _I2cWriteIter, WriteIterRead as _I2cWriteIterRead},
 	blocking::spi::{Transfer as _SpiTransfer, Write as _SpiWrite},
 	digital::v2::{InputPin, OutputPin},
 };
@@ -82,7 +83,10 @@ use rp_pico::{
 	hal::{
 		self,
 		clocks::ClocksManager,
-		gpio::{bank0, Function, Input, Output, Pin, PullUp, PushPull},
+		gpio::{
+			bank0::{self, Gpio16, Gpio18, Gpio19},
+			FunctionPio0, FunctionPio1, FunctionSioOutput, FunctionSpi, Pin, PullNone,
+		},
 		pac::{self, interrupt},
 		Clock,
 	},
@@ -107,14 +111,23 @@ use neotron_common_bios::{
 type Duration = fugit::Duration<u64, 1, 1_000_000>;
 
 /// The type of our IRQ input pin from the MCP23S17.
-type IrqPin = Pin<bank0::Gpio20, Input<PullUp>>;
+type IrqPin = Pin<bank0::Gpio20, rp_pico::hal::gpio::FunctionSioInput, rp_pico::hal::gpio::PullUp>;
 
 type I2cPins = (
-	Pin<bank0::Gpio14, Function<hal::gpio::I2C>>,
-	Pin<bank0::Gpio15, Function<hal::gpio::I2C>>,
+	Pin<bank0::Gpio14, rp_pico::hal::gpio::FunctionI2C, rp_pico::hal::gpio::PullNone>,
+	Pin<bank0::Gpio15, rp_pico::hal::gpio::FunctionI2C, rp_pico::hal::gpio::PullNone>,
 );
 
-type SpiBus = hal::Spi<hal::spi::Enabled, pac::SPI0, 8>;
+type SpiBus = hal::Spi<
+	hal::spi::Enabled,
+	pac::SPI0,
+	(
+		Pin<Gpio19, FunctionSpi, PullNone>,
+		Pin<Gpio16, FunctionSpi, PullNone>,
+		Pin<Gpio18, FunctionSpi, PullNone>,
+	),
+	8,
+>;
 
 /// What state our SD Card can be in
 #[derive(defmt::Format, Debug, Clone, PartialEq, Eq)]
@@ -202,30 +215,27 @@ impl UseAlt {
 /// order to demonstrate the hardware is in the right state.
 #[allow(unused)]
 struct Pins {
-	h_sync: Pin<bank0::Gpio0, Function<pac::PIO0>>,
-	v_sync: Pin<bank0::Gpio1, Function<pac::PIO0>>,
-	red0: Pin<bank0::Gpio2, Function<pac::PIO0>>,
-	red1: Pin<bank0::Gpio3, Function<pac::PIO0>>,
-	red2: Pin<bank0::Gpio4, Function<pac::PIO0>>,
-	red3: Pin<bank0::Gpio5, Function<pac::PIO0>>,
-	green0: Pin<bank0::Gpio6, Function<pac::PIO0>>,
-	green1: Pin<bank0::Gpio7, Function<pac::PIO0>>,
-	green2: Pin<bank0::Gpio8, Function<pac::PIO0>>,
-	green3: Pin<bank0::Gpio9, Function<pac::PIO0>>,
-	blue0: Pin<bank0::Gpio10, Function<pac::PIO0>>,
-	blue1: Pin<bank0::Gpio11, Function<pac::PIO0>>,
-	blue2: Pin<bank0::Gpio12, Function<pac::PIO0>>,
-	blue3: Pin<bank0::Gpio13, Function<pac::PIO0>>,
-	npower_save: Pin<bank0::Gpio23, Output<PushPull>>,
-	spi_cipo: Pin<bank0::Gpio16, Function<hal::gpio::Spi>>,
-	nspi_cs_io: Pin<bank0::Gpio17, Output<PushPull>>,
-	spi_clk: Pin<bank0::Gpio18, Function<hal::gpio::Spi>>,
-	spi_copi: Pin<bank0::Gpio19, Function<hal::gpio::Spi>>,
-	noutput_en: Pin<bank0::Gpio21, Output<PushPull>>,
-	i2s_adc_data: Pin<bank0::Gpio22, Function<pac::PIO1>>,
-	i2s_dac_data: Pin<bank0::Gpio26, Function<pac::PIO1>>,
-	i2s_bit_clock: Pin<bank0::Gpio27, Function<pac::PIO1>>,
-	i2s_lr_clock: Pin<bank0::Gpio28, Function<pac::PIO1>>,
+	h_sync: Pin<bank0::Gpio0, FunctionPio0, PullNone>,
+	v_sync: Pin<bank0::Gpio1, FunctionPio0, PullNone>,
+	red0: Pin<bank0::Gpio2, FunctionPio0, PullNone>,
+	red1: Pin<bank0::Gpio3, FunctionPio0, PullNone>,
+	red2: Pin<bank0::Gpio4, FunctionPio0, PullNone>,
+	red3: Pin<bank0::Gpio5, FunctionPio0, PullNone>,
+	green0: Pin<bank0::Gpio6, FunctionPio0, PullNone>,
+	green1: Pin<bank0::Gpio7, FunctionPio0, PullNone>,
+	green2: Pin<bank0::Gpio8, FunctionPio0, PullNone>,
+	green3: Pin<bank0::Gpio9, FunctionPio0, PullNone>,
+	blue0: Pin<bank0::Gpio10, FunctionPio0, PullNone>,
+	blue1: Pin<bank0::Gpio11, FunctionPio0, PullNone>,
+	blue2: Pin<bank0::Gpio12, FunctionPio0, PullNone>,
+	blue3: Pin<bank0::Gpio13, FunctionPio0, PullNone>,
+	npower_save: Pin<bank0::Gpio23, FunctionSioOutput, PullNone>,
+	nspi_cs_io: Pin<bank0::Gpio17, FunctionSioOutput, PullNone>,
+	noutput_en: Pin<bank0::Gpio21, FunctionSioOutput, PullNone>,
+	i2s_adc_data: Pin<bank0::Gpio22, FunctionPio1, PullNone>,
+	i2s_dac_data: Pin<bank0::Gpio26, FunctionPio1, PullNone>,
+	i2s_bit_clock: Pin<bank0::Gpio27, FunctionPio1, PullNone>,
+	i2s_lr_clock: Pin<bank0::Gpio28, FunctionPio1, PullNone>,
 }
 
 // -----------------------------------------------------------------------------
@@ -840,13 +850,13 @@ impl Hardware {
 		let raw_i2c = hal::i2c::I2C::i2c1(
 			i2c,
 			{
-				let mut pin = hal_pins.gpio14.into_mode();
+				let mut pin = hal_pins.gpio14.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			{
-				let mut pin = hal_pins.gpio15.into_mode();
+				let mut pin = hal_pins.gpio15.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
@@ -858,7 +868,7 @@ impl Hardware {
 		let i2c = shared_bus::BusManagerSimple::new(raw_i2c);
 		let proxy = i2c.acquire_i2c();
 		let mut external_rtc = rtc::Rtc::new(proxy);
-		let timer = hal::timer::Timer::new(timer, resets);
+		let timer = hal::timer::Timer::new(timer, resets, &clocks);
 		// Do a conversion from external RTC time (chrono::NaiveDateTime) to a format we can track
 		let ticks_at_boot_us = match external_rtc.get_time(i2c.acquire_i2c()) {
 			Ok(time) => {
@@ -885,127 +895,109 @@ impl Hardware {
 		let pins = Pins {
 			// Disable power save mode to force SMPS into low-efficiency, low-noise mode.
 			npower_save: {
-				let mut pin = hal_pins.b_power_save.into_push_pull_output();
+				let mut pin = hal_pins.b_power_save.reconfigure();
 				pin.set_high().unwrap();
 				pin
 			},
 			// Give H-Sync, V-Sync and 12 RGB colour pins to PIO0 to output video
 			h_sync: {
-				let mut pin = hal_pins.gpio0.into_mode();
+				let mut pin = hal_pins.gpio0.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			v_sync: {
-				let mut pin = hal_pins.gpio1.into_mode();
+				let mut pin = hal_pins.gpio1.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			red0: {
-				let mut pin = hal_pins.gpio2.into_mode();
+				let mut pin = hal_pins.gpio2.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			red1: {
-				let mut pin = hal_pins.gpio3.into_mode();
+				let mut pin = hal_pins.gpio3.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			red2: {
-				let mut pin = hal_pins.gpio4.into_mode();
+				let mut pin = hal_pins.gpio4.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			red3: {
-				let mut pin = hal_pins.gpio5.into_mode();
+				let mut pin = hal_pins.gpio5.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			green0: {
-				let mut pin = hal_pins.gpio6.into_mode();
+				let mut pin = hal_pins.gpio6.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			green1: {
-				let mut pin = hal_pins.gpio7.into_mode();
+				let mut pin = hal_pins.gpio7.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			green2: {
-				let mut pin = hal_pins.gpio8.into_mode();
+				let mut pin = hal_pins.gpio8.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			green3: {
-				let mut pin = hal_pins.gpio9.into_mode();
+				let mut pin = hal_pins.gpio9.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			blue0: {
-				let mut pin = hal_pins.gpio10.into_mode();
+				let mut pin = hal_pins.gpio10.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			blue1: {
-				let mut pin = hal_pins.gpio11.into_mode();
+				let mut pin = hal_pins.gpio11.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			blue2: {
-				let mut pin = hal_pins.gpio12.into_mode();
+				let mut pin = hal_pins.gpio12.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			blue3: {
-				let mut pin = hal_pins.gpio13.into_mode();
-				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-				pin
-			},
-			spi_cipo: {
-				let mut pin = hal_pins.gpio16.into_mode();
+				let mut pin = hal_pins.gpio13.reconfigure();
 				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
 				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			nspi_cs_io: {
-				let mut pin = hal_pins.gpio17.into_push_pull_output();
+				let mut pin = hal_pins.gpio17.reconfigure();
 				pin.set_high().unwrap();
-				pin
-			},
-			spi_clk: {
-				let mut pin = hal_pins.gpio18.into_mode();
-				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-				pin
-			},
-			spi_copi: {
-				let mut pin = hal_pins.gpio19.into_mode();
-				pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
-				pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 				pin
 			},
 			noutput_en: {
-				let mut pin = hal_pins.gpio21.into_push_pull_output();
+				let mut pin = hal_pins.gpio21.reconfigure();
 				pin.set_high().unwrap();
 				pin
 			},
-			i2s_adc_data: hal_pins.gpio22.into_mode(),
-			i2s_dac_data: hal_pins.gpio26.into_mode(),
-			i2s_bit_clock: hal_pins.gpio27.into_mode(),
-			i2s_lr_clock: hal_pins.gpio28.into_mode(),
+			i2s_adc_data: hal_pins.gpio22.reconfigure(),
+			i2s_dac_data: hal_pins.gpio26.reconfigure(),
+			i2s_bit_clock: hal_pins.gpio27.reconfigure(),
+			i2s_lr_clock: hal_pins.gpio28.reconfigure(),
 		};
 
 		let mut audio_codec = tlv320aic23::Codec::new(tlv320aic23::BusAddress::CsLow);
@@ -1040,6 +1032,25 @@ impl Hardware {
 
 		let audio_player = i2s::init(pio1, resets);
 
+		let spi_copi = {
+			let mut pin = hal_pins.gpio19.reconfigure();
+			pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+			pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+			pin
+		};
+		let spi_cipo = {
+			let mut pin = hal_pins.gpio16.reconfigure();
+			pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+			pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+			pin
+		};
+		let spi_clk = {
+			let mut pin = hal_pins.gpio18.reconfigure();
+			pin.set_drive_strength(hal::gpio::OutputDriveStrength::EightMilliAmps);
+			pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+			pin
+		};
+
 		(
 			Hardware {
 				pins,
@@ -1048,7 +1059,7 @@ impl Hardware {
 				// edge.
 				//
 				// SPI clock speed here is irrelevant - we change it depending on the device.
-				spi_bus: hal::Spi::new(spi).init(
+				spi_bus: hal::Spi::new(spi, (spi_copi, spi_cipo, spi_clk)).init(
 					resets,
 					clocks.peripheral_clock.freq(),
 					2_000_000.Hz(),
@@ -1073,7 +1084,7 @@ impl Hardware {
 				audio_player,
 				audio_config,
 			},
-			hal_pins.gpio20.into_pull_up_input(),
+			hal_pins.gpio20.reconfigure(),
 		)
 	}
 
@@ -1084,7 +1095,7 @@ impl Hardware {
 	/// chip-select signal.
 	fn with_io_cs<F, T>(&mut self, func: F) -> T
 	where
-		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>) -> T,
+		F: FnOnce(&mut SpiBus) -> T,
 	{
 		self.spi_bus
 			.set_baudrate(self.clocks.peripheral_clock.freq(), Self::CLOCK_IO);
@@ -1172,7 +1183,7 @@ impl Hardware {
 	/// SPI bus object), then de-activates the CS pin.
 	fn with_bus_cs<F>(&mut self, cs: u8, clock_speed: fugit::Rate<u32, 1, 1>, func: F)
 	where
-		F: FnOnce(&mut hal::Spi<hal::spi::Enabled, pac::SPI0, 8_u8>, &mut [u8]),
+		F: FnOnce(&mut SpiBus, &mut [u8]),
 	{
 		// Only CS0..CS7 is valid
 		let cs = cs & 0b111;
@@ -2086,7 +2097,7 @@ extern "C" fn i2c_write_read(
 	_tx2: FfiByteSlice,
 	_rx: FfiBuffer,
 ) -> ApiResult<()> {
-	ApiResult::Err(CError::Unimplemented)
+			ApiResult::Err(CError::Unimplemented)
 }
 
 extern "C" fn audio_mixer_channel_get_info(
