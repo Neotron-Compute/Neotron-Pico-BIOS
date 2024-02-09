@@ -1063,7 +1063,7 @@ impl Hardware {
 					resets,
 					clocks.peripheral_clock.freq(),
 					2_000_000.Hz(),
-					&embedded_hal::spi::MODE_0,
+					embedded_hal::spi::MODE_0,
 				),
 				delay,
 				led_state: 0,
@@ -2624,9 +2624,7 @@ extern "C" fn power_control(power_mode: common::PowerMode) -> ! {
 			// Reboot to USB bootloader with no GPIOs and both USB interfaces
 			// enabled.
 			hal::rom_data::reset_to_usb_boot(0, 0);
-			loop {
-				core::unreachable!()
-			}
+			core::unreachable!()
 		}
 		_ => {
 			// Anything else causes a reset
