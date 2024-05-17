@@ -62,6 +62,7 @@ mod vga;
 use core::{
 	convert::{TryFrom, TryInto},
 	fmt::Write,
+	ptr::{addr_of, addr_of_mut},
 	sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
@@ -333,10 +334,10 @@ static API_CALLS: common::Api = common::Api {
 const SECONDS_BETWEEN_UNIX_AND_NEOTRON_EPOCH: i64 = 946684800;
 
 extern "C" {
-	static mut _flash_os_start: u32;
-	static mut _flash_os_len: u32;
-	static mut _ram_os_start: u32;
-	static mut _ram_os_len: u32;
+	static _flash_os_start: u32;
+	static _flash_os_len: u32;
+	static _ram_os_start: u32;
+	static _ram_os_len: u32;
 }
 
 /// What we paint Core 0's stack with
@@ -710,11 +711,10 @@ fn paint_stacks() {
 		static mut _stack_start: usize;
 	}
 	unsafe {
-		let stack_len =
-			(&_stack_start as *const usize as usize) - (&__sheap as *const usize as usize);
+		let stack_len = (addr_of!(_stack_start) as usize) - (addr_of!(__sheap) as usize);
 		// But not the top 64 words, because we're using the stack right now!
 		let stack = core::slice::from_raw_parts_mut(
-			&mut __sheap as *mut usize,
+			addr_of_mut!(__sheap),
 			(stack_len / core::mem::size_of::<usize>()) - 256,
 		);
 		info!("Painting Core 1 stack: {:?}", stack.as_ptr_range());
@@ -744,10 +744,9 @@ fn check_stacks() {
 		static mut __sheap: usize;
 		static mut _stack_start: usize;
 	}
-	let stack_len =
-		unsafe { (&_stack_start as *const usize as usize) - (&__sheap as *const usize as usize) };
+	let stack_len = unsafe { (addr_of!(_stack_start) as usize) - (addr_of!(__sheap) as usize) };
 	check_stack(
-		unsafe { &__sheap as *const usize },
+		unsafe { addr_of!(__sheap) },
 		stack_len,
 		CORE0_STACK_PAINT_WORD,
 	);
@@ -1896,8 +1895,8 @@ pub extern "C" fn memory_get_region(region: u8) -> FfiOption<common::MemoryRegio
 		0 => {
 			// Application Region
 			FfiOption::Some(MemoryRegion {
-				start: unsafe { &mut _ram_os_start as *mut u32 } as *mut u8,
-				length: unsafe { &mut _ram_os_len as *const u32 } as usize,
+				start: unsafe { addr_of!(_ram_os_start) } as *mut u8,
+				length: unsafe { addr_of!(_ram_os_len) } as usize,
 				kind: common::MemoryKind::Ram.into(),
 			})
 		}

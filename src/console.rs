@@ -304,6 +304,12 @@ impl TextConsole {
 	}
 }
 
+impl Default for TextConsole {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 unsafe impl Sync for TextConsole {}
 
 impl core::fmt::Write for &TextConsole {

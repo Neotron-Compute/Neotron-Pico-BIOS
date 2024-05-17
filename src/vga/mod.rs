@@ -42,6 +42,7 @@ mod rgb;
 
 use core::{
 	cell::{RefCell, UnsafeCell},
+	ptr::addr_of_mut,
 	sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering},
 };
 use defmt::{debug, trace};
@@ -1935,13 +1936,16 @@ pub fn init(
 	// No-one else is looking at this right now.
 	TEXT_COLOUR_LOOKUP.init(&VIDEO_PALETTE);
 
-	crate::multicore::launch_core1_with_stack(
-		core1_main,
-		unsafe { &mut super::CORE1_STACK },
-		ppb,
-		fifo,
-		psm,
-	);
+	unsafe {
+		crate::multicore::launch_core1_with_stack(
+			core1_main,
+			addr_of_mut!(super::CORE1_STACK) as *mut usize,
+			super::CORE1_STACK.len(),
+			ppb,
+			fifo,
+			psm,
+		);
+	}
 
 	debug!("Core 1 running");
 }
