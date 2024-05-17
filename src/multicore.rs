@@ -65,7 +65,8 @@ static CORE1_ENTRY_FUNCTION: [u16; 2] = [
 /// Starts core 1 running the given function, with the given stack.
 pub fn launch_core1_with_stack(
 	main_func: unsafe extern "C" fn() -> u32,
-	stack: &mut [usize],
+	stack: *mut usize,
+	stack_len: usize,
 	ppb: &mut crate::pac::PPB,
 	fifo: &mut rp_pico::hal::sio::SioFifo,
 	psm: &mut crate::pac::PSM,
@@ -80,25 +81,30 @@ pub fn launch_core1_with_stack(
 
 	defmt::debug!("Setting up stack...");
 
-	// Gets popped into `r0` by CORE1_ENTRY_FUNCTION. This is the `main`
-	// function we want to run. It appears in the call to `core1_wrapper` as
-	// the first argument.
-	stack[stack.len() - 3] = main_func as *const () as usize;
-	// Gets popped into `r1` by CORE1_ENTRY_FUNCTION. This is the top of stack
-	// for Core 1. It appears in the call to `core1_wrapper` as the second
-	// argument.
-	stack[stack.len() - 2] = stack.as_ptr() as *const _ as usize;
-	// Gets popped into `pc` by CORE1_ENTRY_FUNCTION. This is the function
-	// `CORE1_ENTRY_FUNCTION` will jump to, passing the above two values as
-	// arguments.
-	stack[stack.len() - 1] = core1_wrapper as *const () as usize;
-	// Point into the top of the stack (so there are three values pushed onto
-	// it, i.e. at/above it)
-	let stack_ptr = unsafe { stack.as_mut_ptr().add(stack.len() - 3) };
+	let stack_ptr = unsafe {
+		// Gets popped into `r0` by CORE1_ENTRY_FUNCTION. This is the `main`
+		// function we want to run. It appears in the call to `core1_wrapper` as
+		// the first argument.
+		stack
+			.add(stack_len - 3)
+			.write_volatile(main_func as *const () as usize);
+		// Gets popped into `r1` by CORE1_ENTRY_FUNCTION. This is the top of stack
+		// for Core 1. It appears in the call to `core1_wrapper` as the second
+		// argument.
+		stack.add(stack_len - 2).write_volatile(stack as usize);
+		// Gets popped into `pc` by CORE1_ENTRY_FUNCTION. This is the function
+		// `CORE1_ENTRY_FUNCTION` will jump to, passing the above two values as
+		// arguments.
+		stack
+			.add(stack_len - 1)
+			.write_volatile(core1_wrapper as *const () as usize);
+		// Point into the top of the stack (so there are three values pushed onto
+		// it, i.e. at/above it)
+		stack.add(stack_len - 3)
+	};
 
 	defmt::debug!("Stack ptr is 0x{:x}", stack_ptr);
-	defmt::debug!("Stack bottom is 0x{:x}", stack.as_ptr());
-	defmt::debug!("Stack top is 0x{:x}", &stack[stack.len() - 4..stack.len()]);
+	defmt::debug!("Stack bottom is 0x{:x}", stack);
 
 	// This is the launch sequence we send to core1, to get it to leave the
 	// boot ROM and run our code.

@@ -42,6 +42,7 @@ mod rgb;
 
 use core::{
 	cell::{RefCell, UnsafeCell},
+	ptr::addr_of_mut,
 	sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering},
 };
 use defmt::{debug, trace};
@@ -201,12 +202,10 @@ impl RenderEngine {
 		// Pick a buffer to render into based on the line number we are drawing.
 		// It's safe to write to this buffer because it's the the other one that
 		// is currently being DMA'd out to the Pixel SM.
-		let scan_line_buffer = unsafe {
-			if (current_line_num & 1) == 0 {
-				&mut PIXEL_DATA_BUFFER_EVEN
-			} else {
-				&mut PIXEL_DATA_BUFFER_ODD
-			}
+		let scan_line_buffer = if (current_line_num & 1) == 0 {
+			&PIXEL_DATA_BUFFER_EVEN
+		} else {
+			&PIXEL_DATA_BUFFER_ODD
 		};
 
 		match self.current_video_mode.format() {
@@ -243,18 +242,14 @@ impl RenderEngine {
 	///
 	/// The `current_line_num` goes from `0..NUM_LINES`.
 	#[link_section = ".data"]
-	pub fn draw_next_line_chunky1(
-		&mut self,
-		scan_line_buffer: &mut LineBuffer,
-		current_line_num: u16,
-	) {
+	pub fn draw_next_line_chunky1(&mut self, scan_line_buffer: &LineBuffer, current_line_num: u16) {
 		let base_ptr = self.current_video_ptr as *const u8;
 		let line_len_bytes = self.current_video_mode.line_size_bytes();
 		let is_double = self.current_video_mode.is_horiz_2x();
 		let offset = usize::from(current_line_num) * line_len_bytes;
 		let line_start = unsafe { base_ptr.add(offset) };
 		// Get a pointer into our scan-line buffer
-		let mut scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
+		let mut scan_line_buffer_ptr = scan_line_buffer.pixel_ptr();
 		let black_pixel = RGBColour(VIDEO_PALETTE[0].load(Ordering::Relaxed));
 		let white_pixel = RGBColour(VIDEO_PALETTE[15].load(Ordering::Relaxed));
 		if is_double {
@@ -361,18 +356,14 @@ impl RenderEngine {
 	///
 	/// The `current_line_num` goes from `0..NUM_LINES`.
 	#[link_section = ".data"]
-	pub fn draw_next_line_chunky2(
-		&mut self,
-		scan_line_buffer: &mut LineBuffer,
-		current_line_num: u16,
-	) {
+	pub fn draw_next_line_chunky2(&mut self, scan_line_buffer: &LineBuffer, current_line_num: u16) {
 		let is_double = self.current_video_mode.is_horiz_2x();
 		let base_ptr = self.current_video_ptr as *const u8;
 		let line_len_bytes = self.current_video_mode.line_size_bytes();
 		let offset = usize::from(current_line_num) * line_len_bytes;
 		let line_start = unsafe { base_ptr.add(offset) };
 		// Get a pointer into our scan-line buffer
-		let mut scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
+		let mut scan_line_buffer_ptr = scan_line_buffer.pixel_ptr();
 		let pixel_colours = [
 			RGBColour(VIDEO_PALETTE[0].load(Ordering::Relaxed)),
 			RGBColour(VIDEO_PALETTE[1].load(Ordering::Relaxed)),
@@ -446,18 +437,14 @@ impl RenderEngine {
 	///
 	/// The `current_line_num` goes from `0..NUM_LINES`.
 	#[link_section = ".data"]
-	pub fn draw_next_line_chunky4(
-		&mut self,
-		scan_line_buffer: &mut LineBuffer,
-		current_line_num: u16,
-	) {
+	pub fn draw_next_line_chunky4(&mut self, scan_line_buffer: &LineBuffer, current_line_num: u16) {
 		let is_double = self.current_video_mode.is_horiz_2x();
 		let base_ptr = self.current_video_ptr as *const u8;
 		let line_len_bytes = self.current_video_mode.line_size_bytes();
 		let line_start_offset_bytes = usize::from(current_line_num) * line_len_bytes;
 		let line_start_bytes = unsafe { base_ptr.add(line_start_offset_bytes) };
 		// Get a pointer into our scan-line buffer
-		let mut scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
+		let mut scan_line_buffer_ptr = scan_line_buffer.pixel_ptr();
 		let palette_ptr = VIDEO_PALETTE.as_ptr() as *const RGBColour;
 		if is_double {
 			// Double-width mode.
@@ -466,7 +453,7 @@ impl RenderEngine {
 				unsafe {
 					let chunky_pixels = line_start_bytes.add(col).read() as usize;
 					let left = palette_ptr.add((chunky_pixels >> 4) & 0x0F).read();
-					let right = palette_ptr.add((chunky_pixels >> 0) & 0x0F).read();
+					let right = palette_ptr.add(chunky_pixels & 0x0F).read();
 					scan_line_buffer_ptr.write(RGBPair::from_pixels(left, left));
 					scan_line_buffer_ptr
 						.add(1)
@@ -604,7 +591,7 @@ impl RenderEngine {
 	pub fn draw_next_line_text<const GLYPH_HEIGHT: usize>(
 		&mut self,
 		font: &Font,
-		scan_line_buffer: &mut LineBuffer,
+		scan_line_buffer: &LineBuffer,
 		current_line_num: u16,
 	) {
 		// Convert our position in scan-lines to a text row, and a line within each glyph on that row
@@ -630,7 +617,7 @@ impl RenderEngine {
 		let font_ptr = unsafe { font.data.as_ptr().add(font_row) };
 
 		// Get a pointer into our scan-line buffer
-		let mut scan_line_buffer_ptr = scan_line_buffer.pixels.as_mut_ptr();
+		let mut scan_line_buffer_ptr = scan_line_buffer.pixel_ptr();
 
 		// Convert from characters to coloured pixels, using the font as a look-up table.
 		for col in 0..self.num_text_cols {
@@ -675,15 +662,50 @@ struct LineBuffer {
 	/// Must be one less than the number of pixel-pairs in `pixels`
 	length: u32,
 	/// Pixels to be displayed, grouped into pairs (to save FIFO space and reduce DMA bandwidth)
-	pixels: [RGBPair; MAX_NUM_PIXEL_PAIRS_PER_LINE],
+	pixels: UnsafeCell<[RGBPair; MAX_NUM_PIXEL_PAIRS_PER_LINE]>,
 }
 
 impl LineBuffer {
-	/// Convert the line buffer to a 32-bit address that the DMA engine understands.
+	/// Make a new LineBuffer
+	///
+	/// Use this for the even lines, so you get a checkerboard
+	const fn new_even() -> LineBuffer {
+		LineBuffer {
+			length: (MAX_NUM_PIXEL_PAIRS_PER_LINE as u32) - 1,
+			pixels: UnsafeCell::new(
+				[RGBPair::from_pixels(RGBColour::WHITE, RGBColour::BLACK);
+					MAX_NUM_PIXEL_PAIRS_PER_LINE],
+			),
+		}
+	}
+
+	/// Make a new LineBuffer
+	///
+	/// Use this for the odd lines, so you get a checkerboard
+	const fn new_odd() -> LineBuffer {
+		LineBuffer {
+			length: (MAX_NUM_PIXEL_PAIRS_PER_LINE as u32) - 1,
+			pixels: UnsafeCell::new(
+				[RGBPair::from_pixels(RGBColour::BLACK, RGBColour::WHITE);
+					MAX_NUM_PIXEL_PAIRS_PER_LINE],
+			),
+		}
+	}
+
+	/// Get a pointer to the entire linebuffer.
+	///
+	/// This produces a 32-bit address that the DMA engine understands.
 	fn as_ptr(&self) -> u32 {
 		self as *const _ as usize as u32
 	}
+
+	/// Get a pointer to the pixel data
+	fn pixel_ptr(&self) -> *mut RGBPair {
+		self.pixels.get() as *mut RGBPair
+	}
 }
+
+unsafe impl Sync for LineBuffer {}
 
 /// The kind of IRQ we want to raise
 #[derive(Debug, Copy, Clone)]
@@ -1682,22 +1704,14 @@ const PIXEL_DMA_CHAN: usize = 1;
 /// Gets read by DMA, which pushes them into the pixel state machine's FIFO.
 ///
 /// Gets written to by `RenderEngine` running on Core 1.
-static mut PIXEL_DATA_BUFFER_EVEN: LineBuffer = LineBuffer {
-	length: (MAX_NUM_PIXEL_PAIRS_PER_LINE as u32) - 1,
-	pixels: [RGBPair::from_pixels(RGBColour::WHITE, RGBColour::BLACK);
-		MAX_NUM_PIXEL_PAIRS_PER_LINE],
-};
+static PIXEL_DATA_BUFFER_EVEN: LineBuffer = LineBuffer::new_even();
 
 /// One scan-line's worth of 12-bit pixels, used for the odd scan-lines (1, 3, 5 ... NUM_LINES-1).
 ///
 /// Gets read by DMA, which pushes them into the pixel state machine's FIFO.
 ///
 /// Gets written to by `RenderEngine` running on Core 1.
-static mut PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer {
-	length: (MAX_NUM_PIXEL_PAIRS_PER_LINE as u32) - 1,
-	pixels: [RGBPair::from_pixels(RGBColour::BLACK, RGBColour::WHITE);
-		MAX_NUM_PIXEL_PAIRS_PER_LINE],
-};
+static PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer::new_odd();
 
 /// Holds the colour look-up table for text mode.
 ///
@@ -1896,7 +1910,7 @@ pub fn init(
 		.write(|w| unsafe { w.bits(pixel_fifo.fifo_address() as usize as u32) });
 	dma.ch(PIXEL_DMA_CHAN)
 		.ch_trans_count()
-		.write(|w| unsafe { w.bits(PIXEL_DATA_BUFFER_EVEN.pixels.len() as u32 + 1) });
+		.write(|w| unsafe { w.bits(MAX_NUM_PIXEL_PAIRS_PER_LINE as u32 + 1) });
 
 	// Enable the DMA
 	dma.multi_chan_trigger()
@@ -1922,13 +1936,16 @@ pub fn init(
 	// No-one else is looking at this right now.
 	TEXT_COLOUR_LOOKUP.init(&VIDEO_PALETTE);
 
-	crate::multicore::launch_core1_with_stack(
-		core1_main,
-		unsafe { &mut super::CORE1_STACK },
-		ppb,
-		fifo,
-		psm,
-	);
+	unsafe {
+		crate::multicore::launch_core1_with_stack(
+			core1_main,
+			addr_of_mut!(super::CORE1_STACK) as *mut usize,
+			super::CORE1_STACK.len(),
+			ppb,
+			fifo,
+			psm,
+		);
+	}
 
 	debug!("Core 1 running");
 }

@@ -4,6 +4,7 @@ on: [push, pull_request]
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
 
 jobs:
   clippy-check:
@@ -15,15 +16,11 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          components: clippy
-          target: thumbv6m-none-eabi
+      - name: Add targets/components
+        run: |
+          rustup component add clippy
+          rustup target add thumbv6m-none-eabi
 
       - name: Run Clippy
-        uses: actions-rs/clippy-check@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --all-features --target=thumbv6m-none-eabi
+        run: |
+          cargo clippy --target=thumbv6m-none-eabi --all-features
