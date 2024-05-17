@@ -29,6 +29,16 @@ jobs:
           cargo build --release --verbose
           elf2uf2-rs ./target/thumbv6m-none-eabi/release/neotron-pico-bios
 
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        if: ${{success()}}
+        with:
+          name: Artifacts
+          if-no-files-found: error
+          path: |
+            ./target/thumbv6m-none-eabi/release/neotron-pico-bios
+            ./target/thumbv6m-none-eabi/release/neotron-pico-bios.uf2
+
       - name: Upload files to Release
         if: github.event_name == 'push' && startswith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
