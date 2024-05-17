@@ -12,11 +12,9 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          components: rustfmt
+      - name: Add components
+        run: |
+          rustup component add rustfmt
 
       - name: Check Format
         run: cargo fmt -- --check
