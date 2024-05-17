@@ -139,14 +139,24 @@ impl Rtc {
 				driver.set_datetime(&new_time).map_err(|e| match e {
 					ds1307::Error::I2C(bus_error) => Error::Bus(bus_error),
 					ds1307::Error::InvalidInputData => Error::DriverBug,
-				})
+				})?;
+				driver.set_running().map_err(|e| match e {
+					ds1307::Error::I2C(bus_error) => Error::Bus(bus_error),
+					ds1307::Error::InvalidInputData => Error::DriverBug,
+				})?;
+				Ok(())
 			}
 			Self::Mcp7940n => {
 				let mut driver = mcp794xx::Mcp794xx::new_mcp7940n(bus);
 				driver.set_datetime(&new_time).map_err(|e| match e {
 					mcp794xx::Error::Comm(bus_error) => Error::Bus(bus_error),
 					mcp794xx::Error::InvalidInputData => Error::DriverBug,
-				})
+				})?;
+				driver.enable().map_err(|e| match e {
+					mcp794xx::Error::Comm(bus_error) => Error::Bus(bus_error),
+					mcp794xx::Error::InvalidInputData => Error::DriverBug,
+				})?;
+				Ok(())
 			}
 			Self::None => Err(Error::NoRtcFound),
 		}
