@@ -72,11 +72,11 @@ pub fn launch_core1_with_stack(
 ) {
 	defmt::debug!("Resetting CPU1...");
 
-	psm.frce_off.modify(|_, w| w.proc1().set_bit());
-	while !psm.frce_off.read().proc1().bit_is_set() {
+	psm.frce_off().modify(|_, w| w.proc1().set_bit());
+	while !psm.frce_off().read().proc1().bit_is_set() {
 		cortex_m::asm::nop();
 	}
-	psm.frce_off.modify(|_, w| w.proc1().clear_bit());
+	psm.frce_off().modify(|_, w| w.proc1().clear_bit());
 
 	defmt::debug!("Setting up stack...");
 
@@ -106,7 +106,7 @@ pub fn launch_core1_with_stack(
 		0,
 		0,
 		1,
-		ppb.vtor.read().bits() as usize as u32,
+		ppb.vtor().read().bits() as usize as u32,
 		stack_ptr as usize as u32,
 		// Have to add 1 to convert from an array pointer to a thumb instruction pointer
 		(CORE1_ENTRY_FUNCTION.as_ptr() as usize as u32) + 1,

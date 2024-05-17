@@ -486,17 +486,17 @@ impl RenderEngine {
 
 			// Set up the interpolator. This is safe because core1 has its own.
 			let sio = unsafe { &*rp_pico::pac::SIO::ptr() };
-			sio.interp0_base0.write(|w| {
+			sio.interp0_base0().write(|w| {
 				unsafe { w.bits(palette_ptr as u32) };
 				w
 			});
-			sio.interp0_base1.write(|w| {
+			sio.interp0_base1().write(|w| {
 				unsafe { w.bits(palette_ptr as u32) };
 				w
 			});
 			// lane0 will pull out the higher of the two 4-bit chunky pixels, but shifted
 			// by 2 bits to account for the 32-bit palette entry
-			sio.interp0_ctrl_lane0.write(|w| {
+			sio.interp0_ctrl_lane0().write(|w| {
 				w.shift().variant(4);
 				w.mask_lsb().variant(2);
 				w.mask_msb().variant(5);
@@ -504,7 +504,7 @@ impl RenderEngine {
 			});
 			// lane1 will pull out the lower of the two 4-bit chunky pixels, but shifted
 			// by 2 bits to account for the 32-bit palette entry
-			sio.interp0_ctrl_lane1.write(|w| {
+			sio.interp0_ctrl_lane1().write(|w| {
 				w.shift().variant(0);
 				w.mask_lsb().variant(2);
 				w.mask_msb().variant(5);
@@ -519,72 +519,72 @@ impl RenderEngine {
 					// First two pixels
 					// Shift up by 2 bits before we load, to account for the 32
 					// bit size of each palette entry.
-					sio.interp0_accum0.write(|w| {
+					sio.interp0_accum0().write(|w| {
 						w.bits(chunky_pixels << 2);
 						w
 					});
-					sio.interp0_accum1.write(|w| {
+					sio.interp0_accum1().write(|w| {
 						w.bits(chunky_pixels << 2);
 						w
 					});
 					// now we get the palette address for the left pixel
-					let left_addr = sio.interp0_peek_lane0.read().bits() as usize as *const u16;
+					let left_addr = sio.interp0_peek_lane0().read().bits() as usize as *const u16;
 					// and we get the palette address for the right pixel
-					let right_addr = sio.interp0_peek_lane1.read().bits() as usize as *const u16;
+					let right_addr = sio.interp0_peek_lane1().read().bits() as usize as *const u16;
 					// read from the palette, pair up, and put in the buffer
 					let pair = RGBPair::from_pixels(RGBColour(*left_addr), RGBColour(*right_addr));
 					scan_line_buffer_ptr.write(pair);
 					scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
 
 					// Second two pixels
-					sio.interp0_accum0.write(|w| {
+					sio.interp0_accum0().write(|w| {
 						w.bits(chunky_pixels >> 6);
 						w
 					});
-					sio.interp0_accum1.write(|w| {
+					sio.interp0_accum1().write(|w| {
 						w.bits(chunky_pixels >> 6);
 						w
 					});
 					// now we get the palette address for the left pixel
-					let left_addr = sio.interp0_peek_lane0.read().bits() as usize as *const u16;
+					let left_addr = sio.interp0_peek_lane0().read().bits() as usize as *const u16;
 					// and we get the palette address for the right pixel
-					let right_addr = sio.interp0_peek_lane1.read().bits() as usize as *const u16;
+					let right_addr = sio.interp0_peek_lane1().read().bits() as usize as *const u16;
 					// read from the palette, pair up, and put in the buffer
 					let pair = RGBPair::from_pixels(RGBColour(*left_addr), RGBColour(*right_addr));
 					scan_line_buffer_ptr.write(pair);
 					scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
 
 					// Third two pixels
-					sio.interp0_accum0.write(|w| {
+					sio.interp0_accum0().write(|w| {
 						w.bits(chunky_pixels >> 14);
 						w
 					});
-					sio.interp0_accum1.write(|w| {
+					sio.interp0_accum1().write(|w| {
 						w.bits(chunky_pixels >> 14);
 						w
 					});
 					// now we get the palette address for the left pixel
-					let left_addr = sio.interp0_peek_lane0.read().bits() as usize as *const u16;
+					let left_addr = sio.interp0_peek_lane0().read().bits() as usize as *const u16;
 					// and we get the palette address for the right pixel
-					let right_addr = sio.interp0_peek_lane1.read().bits() as usize as *const u16;
+					let right_addr = sio.interp0_peek_lane1().read().bits() as usize as *const u16;
 					// read from the palette, pair up, and put in the buffer
 					let pair = RGBPair::from_pixels(RGBColour(*left_addr), RGBColour(*right_addr));
 					scan_line_buffer_ptr.write(pair);
 					scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
 
 					// Fourth two pixels
-					sio.interp0_accum0.write(|w| {
+					sio.interp0_accum0().write(|w| {
 						w.bits(chunky_pixels >> 22);
 						w
 					});
-					sio.interp0_accum1.write(|w| {
+					sio.interp0_accum1().write(|w| {
 						w.bits(chunky_pixels >> 22);
 						w
 					});
 					// now we get the palette address for the left pixel
-					let left_addr = sio.interp0_peek_lane0.read().bits() as usize as *const u16;
+					let left_addr = sio.interp0_peek_lane0().read().bits() as usize as *const u16;
 					// and we get the palette address for the right pixel
-					let right_addr = sio.interp0_peek_lane1.read().bits() as usize as *const u16;
+					let right_addr = sio.interp0_peek_lane1().read().bits() as usize as *const u16;
 					// read from the palette, pair up, and put in the buffer
 					let pair = RGBPair::from_pixels(RGBColour(*left_addr), RGBColour(*right_addr));
 					scan_line_buffer_ptr.write(pair);
@@ -1816,13 +1816,14 @@ pub fn init(
 	// very similar idea to me, but wrote it up far better than I ever could.
 
 	let timing_installed = pio.install(&timing_program.program).unwrap();
-	let (mut timing_sm, _, timing_fifo) = hal::pio::PIOBuilder::from_program(timing_installed)
-		.buffers(hal::pio::Buffers::OnlyTx)
-		.out_pins(0, 2) // H-Sync is GPIO0, V-Sync is GPIO1
-		.autopull(true)
-		.out_shift_direction(hal::pio::ShiftDirection::Right)
-		.pull_threshold(32)
-		.build(sm0);
+	let (mut timing_sm, _, timing_fifo) =
+		hal::pio::PIOBuilder::from_installed_program(timing_installed)
+			.buffers(hal::pio::Buffers::OnlyTx)
+			.out_pins(0, 2) // H-Sync is GPIO0, V-Sync is GPIO1
+			.autopull(true)
+			.out_shift_direction(hal::pio::ShiftDirection::Right)
+			.pull_threshold(32)
+			.build(sm0);
 	timing_sm.set_pindirs([(0, hal::pio::PinDir::Output), (1, hal::pio::PinDir::Output)]);
 
 	// Important notes!
@@ -1833,13 +1834,14 @@ pub fn init(
 	// each line differs by some number of 151.2 MHz clock cycles).
 
 	let pixels_installed = pio.install(&pixel_program.program).unwrap();
-	let (mut pixel_sm, _, pixel_fifo) = hal::pio::PIOBuilder::from_program(pixels_installed)
-		.buffers(hal::pio::Buffers::OnlyTx)
-		.out_pins(2, 12) // Red0 is GPIO2, Blue3 is GPIO13
-		.autopull(true)
-		.out_shift_direction(hal::pio::ShiftDirection::Right)
-		.pull_threshold(32) // We read all 32-bits in each FIFO word
-		.build(sm1);
+	let (mut pixel_sm, _, pixel_fifo) =
+		hal::pio::PIOBuilder::from_installed_program(pixels_installed)
+			.buffers(hal::pio::Buffers::OnlyTx)
+			.out_pins(2, 12) // Red0 is GPIO2, Blue3 is GPIO13
+			.autopull(true)
+			.out_shift_direction(hal::pio::ShiftDirection::Right)
+			.pull_threshold(32) // We read all 32-bits in each FIFO word
+			.build(sm1);
 	pixel_sm.set_pindirs((2..=13).map(|x| (x, hal::pio::PinDir::Output)));
 
 	pio.irq1().enable_sm_interrupt(1);
@@ -1847,7 +1849,7 @@ pub fn init(
 	// Read from the timing buffer and write to the timing FIFO. We get an
 	// IRQ when the transfer is complete (i.e. when line has been fully
 	// loaded).
-	dma.ch[TIMING_DMA_CHAN].ch_ctrl_trig.write(|w| {
+	dma.ch(TIMING_DMA_CHAN).ch_ctrl_trig().write(|w| {
 		w.data_size().size_word();
 		w.incr_read().set_bit();
 		w.incr_write().clear_bit();
@@ -1861,18 +1863,18 @@ pub fn init(
 		w.sniff_en().clear_bit();
 		w
 	});
-	dma.ch[TIMING_DMA_CHAN]
-		.ch_read_addr
+	dma.ch(TIMING_DMA_CHAN)
+		.ch_read_addr()
 		.write(|w| unsafe { w.bits(TIMING_BUFFER.visible_line.data.as_ptr() as usize as u32) });
-	dma.ch[TIMING_DMA_CHAN]
-		.ch_write_addr
+	dma.ch(TIMING_DMA_CHAN)
+		.ch_write_addr()
 		.write(|w| unsafe { w.bits(timing_fifo.fifo_address() as usize as u32) });
-	dma.ch[TIMING_DMA_CHAN]
-		.ch_trans_count
+	dma.ch(TIMING_DMA_CHAN)
+		.ch_trans_count()
 		.write(|w| unsafe { w.bits(TIMING_BUFFER.visible_line.data.len() as u32) });
 
 	// Read from the pixel buffer (even first) and write to the pixel FIFO
-	dma.ch[PIXEL_DMA_CHAN].ch_ctrl_trig.write(|w| {
+	dma.ch(PIXEL_DMA_CHAN).ch_ctrl_trig().write(|w| {
 		w.data_size().size_word();
 		w.incr_read().set_bit();
 		w.incr_write().clear_bit();
@@ -1886,18 +1888,18 @@ pub fn init(
 		w.sniff_en().clear_bit();
 		w
 	});
-	dma.ch[PIXEL_DMA_CHAN]
-		.ch_read_addr
+	dma.ch(PIXEL_DMA_CHAN)
+		.ch_read_addr()
 		.write(|w| unsafe { w.bits(PIXEL_DATA_BUFFER_EVEN.as_ptr()) });
-	dma.ch[PIXEL_DMA_CHAN]
-		.ch_write_addr
+	dma.ch(PIXEL_DMA_CHAN)
+		.ch_write_addr()
 		.write(|w| unsafe { w.bits(pixel_fifo.fifo_address() as usize as u32) });
-	dma.ch[PIXEL_DMA_CHAN]
-		.ch_trans_count
+	dma.ch(PIXEL_DMA_CHAN)
+		.ch_trans_count()
 		.write(|w| unsafe { w.bits(PIXEL_DATA_BUFFER_EVEN.pixels.len() as u32 + 1) });
 
 	// Enable the DMA
-	dma.multi_chan_trigger
+	dma.multi_chan_trigger()
 		.write(|w| unsafe { w.bits((1 << PIXEL_DMA_CHAN) | (1 << TIMING_DMA_CHAN)) });
 
 	debug!("DMA set-up complete");
@@ -2093,7 +2095,7 @@ unsafe fn PIO0_IRQ_1() {
 	let dma = unsafe { &*crate::pac::DMA::ptr() };
 
 	// Clear the interrupt
-	pio.irq.write_with_zero(|w| w.irq().bits(1 << 1));
+	pio.irq().write_with_zero(|w| w.irq().bits(1 << 1));
 
 	// This is now the line we are currently playing
 	let current_timing_line = NEXT_SCAN_LINE.load(Ordering::Relaxed);
@@ -2112,13 +2114,13 @@ unsafe fn PIO0_IRQ_1() {
 	if current_timing_line <= TIMING_BUFFER.visible_lines_ends_at {
 		if (current_timing_line & 1) == 1 {
 			// Load the odd line into the Pixel SM FIFO for immediate playback
-			dma.ch[PIXEL_DMA_CHAN]
-				.ch_al3_read_addr_trig
+			dma.ch(PIXEL_DMA_CHAN)
+				.ch_al3_read_addr_trig()
 				.write(|w| w.bits(PIXEL_DATA_BUFFER_ODD.as_ptr()))
 		} else {
 			// Load the even line into the Pixel SM FIFO for immediate playback
-			dma.ch[PIXEL_DMA_CHAN]
-				.ch_al3_read_addr_trig
+			dma.ch(PIXEL_DMA_CHAN)
+				.ch_al3_read_addr_trig()
 				.write(|w| w.bits(PIXEL_DATA_BUFFER_EVEN.as_ptr()))
 		}
 		// The data will start pouring into the FIFO, but the output is corked until
@@ -2148,8 +2150,8 @@ unsafe fn PIO0_IRQ_1() {
 	// Start transferring the next block of timing info into the FIFO, ready for
 	// the next line. We will be back in this interrupt once it starts actually
 	// playing.
-	dma.ch[TIMING_DMA_CHAN]
-		.ch_al3_read_addr_trig
+	dma.ch(TIMING_DMA_CHAN)
+		.ch_al3_read_addr_trig()
 		.write(|w| w.bits(buffer as *const _ as usize as u32));
 }
 

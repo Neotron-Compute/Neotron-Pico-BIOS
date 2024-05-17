@@ -370,7 +370,7 @@ fn main() -> ! {
 	reset_dma_engine(&mut pp);
 
 	// Reset the spinlocks.
-	pp.SIO.spinlock[31].reset();
+	pp.SIO.spinlock(31).reset();
 
 	paint_stacks();
 	check_stacks();
@@ -539,14 +539,16 @@ fn stuff_running(p: &mut pac::Peripherals) -> bool {
 	// Look at scratch register 7 and see what we left ourselves. If it's zero,
 	// this was a full clean boot-up. If it's 0xDEADC0DE, this means we were
 	// running and Core 0 restarted without restarting everything else.
-	let scratch = p.WATCHDOG.scratch7.read().bits();
+	let scratch = p.WATCHDOG.scratch7().read().bits();
 	defmt::info!("WD Scratch is 0x{:08x}", scratch);
 	if scratch == 0xDEADC0DE {
 		// we need a hard reset
 		true
 	} else {
 		// set the marker so we know Core 0 has booted up
-		p.WATCHDOG.scratch7.write(|w| unsafe { w.bits(0xDEADC0DE) });
+		p.WATCHDOG
+			.scratch7()
+			.write(|w| unsafe { w.bits(0xDEADC0DE) });
 		false
 	}
 }
@@ -555,12 +557,11 @@ fn stuff_running(p: &mut pac::Peripherals) -> bool {
 /// next boot.
 fn clear_scratch() {
 	let p = unsafe { pac::Peripherals::steal() };
-	p.WATCHDOG.scratch7.write(|w| unsafe { w.bits(0) });
+	p.WATCHDOG.scratch7().write(|w| unsafe { w.bits(0) });
 }
 
 /// Do a full watchdog reboot
 fn watchdog_reboot() -> ! {
-	use embedded_hal::watchdog::WatchdogEnable;
 	clear_scratch();
 	if let Some(hw) = HARDWARE.lock().as_mut() {
 		hw.watchdog
@@ -730,10 +731,10 @@ fn paint_stacks() {
 
 /// Reset the DMA Peripheral.
 fn reset_dma_engine(pp: &mut pac::Peripherals) {
-	pp.RESETS.reset.modify(|_r, w| w.dma().set_bit());
+	pp.RESETS.reset().modify(|_r, w| w.dma().set_bit());
 	cortex_m::asm::nop();
-	pp.RESETS.reset.modify(|_r, w| w.dma().clear_bit());
-	while pp.RESETS.reset_done.read().dma().bit_is_clear() {}
+	pp.RESETS.reset().modify(|_r, w| w.dma().clear_bit());
+	while pp.RESETS.reset_done().read().dma().bit_is_clear() {}
 }
 
 /// Measure how much stack space remains unused.
@@ -843,7 +844,7 @@ impl Hardware {
 		// pin 25 to track render loop timing. This avoids trying to 'move' the pin
 		// over to Core 1.
 		let _pico_led = hal_pins.gpio25.into_push_pull_output();
-		let raw_i2c = hal::i2c::I2C::i2c1(
+		let raw_i2c = hal::i2c::I2C::i2c1_with_external_pull_up(
 			i2c,
 			{
 				let mut pin = hal_pins.gpio14.reconfigure();

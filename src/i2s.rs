@@ -163,7 +163,7 @@ pub fn init(pio: super::pac::PIO1, resets: &mut super::pac::RESETS) -> Player {
 
 	let samples_installed = pio.install(&samples_program.program).unwrap();
 	let (mut samples_sm, _sample_rx_fifo, pio_tx_fifo) =
-		rp_pico::hal::pio::PIOBuilder::from_program(samples_installed)
+		rp_pico::hal::pio::PIOBuilder::from_installed_program(samples_installed)
 			.buffers(rp_pico::hal::pio::Buffers::RxTx)
 			.out_pins(26, 1) // Data is GPIO26
 			.in_pin_base(25)
