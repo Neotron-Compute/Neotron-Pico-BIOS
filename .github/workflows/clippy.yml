@@ -21,7 +21,5 @@ jobs:
           rustup target add thumbv6m-none-eabi
 
       - name: Run Clippy
-        uses: actions-rs/clippy-check@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --all-features --target=thumbv6m-none-eabi
+        run: |
+          cargo clippy --target=thumbv6m-none-eabi --all-features
