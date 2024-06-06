@@ -20,9 +20,13 @@ jobs:
         with:
           tool: elf2uf2-rs@2.0.0
 
-      - name: Add targets
+      - name: Install Rust
         run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
           rustup target add thumbv6m-none-eabi
+          echo CARGO_INCREMENTAL=0 >> $GITHUB_ENV
+          echo CARGO_TERM_COLOR=always >> $GITHUB_ENV
 
       - name: Build neotron-pico-bios
         run: |
