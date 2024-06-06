@@ -124,8 +124,9 @@ The Neotron BIOS uses the [defmt](https://crates.io/crates/defmt) crate to provi
    connected VGA display and some start-up tones on any connected PC Speaker. No
    OS will be booted, as we haven't flashed the OS yet. Grab a compatible OS
    release from <https://github.com/Neotron-Compute/Neotron-OS/releases>. You
-   need the `flash1002` variant for the Neotron Pico, because the BIOS expects
-   the OS to live in flash at address `0x1002_0000`.
+   need the `thumbv6m-none-eabi-flash1002` variant for the Neotron Pico, because
+   we have an ARMv6-M CPU that executes Thumb-2 instructions, and the BIOS
+   expects the OS to live in flash at address `0x1002_0000`.
 
 ## Multiple Probes
 
