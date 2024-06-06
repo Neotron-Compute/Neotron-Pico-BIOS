@@ -240,6 +240,17 @@ impl Rtc {
 			Self::None => Err(Error::NoRtcFound),
 		}
 	}
+
+	/// Get the name of the RTC we found
+	///
+	/// Returns `None` if no RTC was found
+	pub fn get_kind(&self) -> Option<&'static str> {
+		match self {
+			Self::Ds1307 => Some("DS1307"),
+			Self::Mcp7940n => Some("MCP7940N"),
+			Self::None => None,
+		}
+	}
 }
 
 // -----------------------------------------------------------------------------

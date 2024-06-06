@@ -14,7 +14,7 @@
 // -----------------------------------------------------------------------------
 // Licence Statement
 // -----------------------------------------------------------------------------
-// Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2023
+// Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2024
 //
 // This program is free software: you can redistribute it and/or modify it under
 // the terms of the GNU General Public License as published by the Free Software
@@ -64,12 +64,14 @@ use core::{
 	fmt::Write,
 	ptr::{addr_of, addr_of_mut},
 	sync::atomic::{AtomicBool, AtomicU32, Ordering},
+	u32,
 };
 
 // Third Party Stuff
+use chrono::DateTime;
 use defmt::info;
 use defmt_rtt as _;
-use ds1307::{Datelike, NaiveDateTime, Timelike};
+use ds1307::{Datelike, Timelike};
 use embedded_hal::{
 	blocking::i2c::{
 		Read as _I2cRead, WriteIter as _I2cWriteIter, WriteIterRead as _I2cWriteIterRead,
@@ -255,17 +257,6 @@ static HARDWARE: NeoMutex<Option<Hardware>> = NeoMutex::new(None);
 
 /// The pin we use for external interrupt input
 static IRQ_PIN: NeoMutex<Option<IrqPin>> = NeoMutex::new(None);
-
-/// This is our Operating System. It must be compiled separately.
-///
-/// The RP2040 requires an OS linked at `0x1002_0000` and compiled for the
-/// `thumbv6m-none-eabi` target. You should therefore use the binary
-/// `thumbv6m-none-eabi-flash1002-libneotron_os.bin` from
-/// <https://github.com/Neotron-Compute/Neotron-OS/releases>
-#[link_section = ".flash_os"]
-#[used]
-pub static OS_IMAGE: [u8; include_bytes!("thumbv6m-none-eabi-flash1002-libneotron_os.bin").len()] =
-	*include_bytes!("thumbv6m-none-eabi-flash1002-libneotron_os.bin");
 
 /// Tracks if we have had an IO interrupt.
 ///
@@ -526,8 +517,22 @@ fn main() -> ! {
 	sign_on();
 
 	// Now jump to the OS
-	let code: &common::OsStartFn = unsafe { ::core::mem::transmute(&_flash_os_start) };
-	code(&API_CALLS);
+	unsafe {
+		let entry_fn_addr: *const usize = addr_of!(_flash_os_start) as *const usize;
+		info!("entry_fn_addr = 0x{:08x}", entry_fn_addr);
+		let entry_fn = entry_fn_addr.read_volatile();
+		info!("entry_fn = 0x{:08x}", entry_fn);
+		if entry_fn != 0xFFFF_FFFF && entry_fn != 0x0000_0000 {
+			// looks like it's not blank at least - let's jump to it
+			let code: common::OsStartFn = core::mem::transmute(entry_fn);
+			code(&API_CALLS);
+		} else {
+			// flash looks blank - sit at the splash screen
+			loop {
+				cortex_m::asm::wfe();
+			}
+		}
+	}
 }
 
 /// Check if the rest of the system appears to be running already.
@@ -583,7 +588,7 @@ fn sign_on() {
 	static LOGO_ANSI_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/logo.bytes"));
 	static COPYRIGHT_TEXT: &str = "\
 		\n\
-		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2023\n\
+		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2024\n\
 		This program is free software under GPL v3 (or later)\n\
 		You are entitled to the Complete and Corresponding Source for this BIOS\n\
 		\n\
@@ -673,6 +678,19 @@ fn sign_on() {
 		false,
 	));
 
+	let _ = writeln!(&tc);
+
+	// Show the time.
+	if let Some(hw) = HARDWARE.lock().as_mut() {
+		if let Some(rtc_kind) = hw.rtc.get_kind() {
+			let _ = writeln!(&tc, "RTC : Found {}", rtc_kind);
+		} else {
+			let _ = writeln!(&tc, "RTC : None");
+		}
+	}
+
+	// Do a delay.
+	//
 	// This is in 100ms units
 	let mut countdown = 15;
 	loop {
@@ -702,6 +720,8 @@ fn sign_on() {
 			countdown -= 1;
 		}
 	}
+
+	write!(&tc, "Looking for OS at 0x1002_0000....").unwrap();
 }
 
 /// Paint the Core 0 and Core 1 stacks
@@ -891,8 +911,8 @@ impl Hardware {
 					time.minute(),
 					time.second()
 				);
-				let ticks_at_boot_us =
-					time.timestamp_micros() - (SECONDS_BETWEEN_UNIX_AND_NEOTRON_EPOCH * 1_000_000);
+				let ticks_at_boot_us = time.and_utc().timestamp_micros()
+					- (SECONDS_BETWEEN_UNIX_AND_NEOTRON_EPOCH * 1_000_000);
 				defmt::info!("Ticks at boot: {}", ticks_at_boot_us);
 				ticks_at_boot_us
 			}
@@ -1739,12 +1759,12 @@ pub extern "C" fn time_clock_set(time: common::Time) {
 	hw.bootup_at = ticks_at_boot;
 
 	// 5. Convert to calendar time
-	if let Some(new_time) = NaiveDateTime::from_timestamp_opt(
+	if let Some(new_time) = DateTime::from_timestamp(
 		i64::from(time.secs) + SECONDS_BETWEEN_UNIX_AND_NEOTRON_EPOCH,
 		time.nsecs,
 	) {
 		// 6. Update the hardware RTC as well
-		match hw.rtc.set_time(hw.i2c.acquire_i2c(), new_time) {
+		match hw.rtc.set_time(hw.i2c.acquire_i2c(), new_time.naive_utc()) {
 			Ok(_) => {
 				defmt::info!("Time set in RTC OK");
 			}
