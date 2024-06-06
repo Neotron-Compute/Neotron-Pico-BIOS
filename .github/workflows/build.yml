@@ -31,7 +31,8 @@ jobs:
       - name: Build neotron-pico-bios
         run: |
           cargo build --release --verbose
-          elf2uf2-rs ./target/thumbv6m-none-eabi/release/neotron-pico-bios
+          mv ./target/thumbv6m-none-eabi/release/neotron-pico-bios ./target/thumbv6m-none-eabi/release/neotron-pico-bios.elf
+          elf2uf2-rs ./target/thumbv6m-none-eabi/release/neotron-pico-bios.elf
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -40,7 +41,7 @@ jobs:
           name: Artifacts
           if-no-files-found: error
           path: |
-            ./target/thumbv6m-none-eabi/release/neotron-pico-bios
+            ./target/thumbv6m-none-eabi/release/neotron-pico-bios.elf
             ./target/thumbv6m-none-eabi/release/neotron-pico-bios.uf2
 
       - name: Upload files to Release
@@ -48,7 +49,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            ./target/thumbv6m-none-eabi/release/neotron-pico-bios
+            ./target/thumbv6m-none-eabi/release/neotron-pico-bios.elf
             ./target/thumbv6m-none-eabi/release/neotron-pico-bios.uf2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
