@@ -62,6 +62,8 @@ embedded-sdmmc = { version = "0.6", default-features = false, features = [
 ] }
 # CODEC register control
 tlv320aic23 = "0.1.0"
+# Calendar/Date/Time functions and types 
+chrono = { version = "0.4.38", default-features = false }
 
 [build-dependencies]
 neotron-common-bios = "0.12.0"

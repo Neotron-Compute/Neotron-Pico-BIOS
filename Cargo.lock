@@ -630,6 +630,7 @@ name = "neotron-pico-bios"
 version = "0.7.0"
 dependencies = [
  "atomic-polyfill",
+ "chrono",
  "cortex-m",
  "cortex-m-rt",
  "critical-section",

@@ -68,9 +68,10 @@ use core::{
 };
 
 // Third Party Stuff
+use chrono::DateTime;
 use defmt::info;
 use defmt_rtt as _;
-use ds1307::{Datelike, NaiveDateTime, Timelike};
+use ds1307::{Datelike, Timelike};
 use embedded_hal::{
 	blocking::i2c::{
 		Read as _I2cRead, WriteIter as _I2cWriteIter, WriteIterRead as _I2cWriteIterRead,
@@ -677,6 +678,19 @@ fn sign_on() {
 		false,
 	));
 
+	let _ = writeln!(&tc);
+
+	// Show the time.
+	if let Some(hw) = HARDWARE.lock().as_mut() {
+		if let Some(rtc_kind) = hw.rtc.get_kind() {
+			let _ = writeln!(&tc, "RTC : Found {}", rtc_kind);
+		} else {
+			let _ = writeln!(&tc, "RTC : None");
+		}
+	}
+
+	// Do a delay.
+	//
 	// This is in 100ms units
 	let mut countdown = 15;
 	loop {
@@ -707,7 +721,7 @@ fn sign_on() {
 		}
 	}
 
-	write!(&tc, "Now starting OS (if present)...").unwrap();
+	write!(&tc, "Looking for OS at 0x1002_0000....").unwrap();
 }
 
 /// Paint the Core 0 and Core 1 stacks
@@ -897,8 +911,8 @@ impl Hardware {
 					time.minute(),
 					time.second()
 				);
-				let ticks_at_boot_us =
-					time.timestamp_micros() - (SECONDS_BETWEEN_UNIX_AND_NEOTRON_EPOCH * 1_000_000);
+				let ticks_at_boot_us = time.and_utc().timestamp_micros()
+					- (SECONDS_BETWEEN_UNIX_AND_NEOTRON_EPOCH * 1_000_000);
 				defmt::info!("Ticks at boot: {}", ticks_at_boot_us);
 				ticks_at_boot_us
 			}
@@ -1745,12 +1759,12 @@ pub extern "C" fn time_clock_set(time: common::Time) {
 	hw.bootup_at = ticks_at_boot;
 
 	// 5. Convert to calendar time
-	if let Some(new_time) = NaiveDateTime::from_timestamp_opt(
+	if let Some(new_time) = DateTime::from_timestamp(
 		i64::from(time.secs) + SECONDS_BETWEEN_UNIX_AND_NEOTRON_EPOCH,
 		time.nsecs,
 	) {
 		// 6. Update the hardware RTC as well
-		match hw.rtc.set_time(hw.i2c.acquire_i2c(), new_time) {
+		match hw.rtc.set_time(hw.i2c.acquire_i2c(), new_time.naive_utc()) {
 			Ok(_) => {
 				defmt::info!("Time set in RTC OK");
 			}
