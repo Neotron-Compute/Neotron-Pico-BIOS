@@ -14,7 +14,7 @@
 // -----------------------------------------------------------------------------
 // Licence Statement
 // -----------------------------------------------------------------------------
-// Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2023
+// Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2024
 //
 // This program is free software: you can redistribute it and/or modify it under
 // the terms of the GNU General Public License as published by the Free Software
@@ -64,6 +64,7 @@ use core::{
 	fmt::Write,
 	ptr::{addr_of, addr_of_mut},
 	sync::atomic::{AtomicBool, AtomicU32, Ordering},
+	u32,
 };
 
 // Third Party Stuff
@@ -255,17 +256,6 @@ static HARDWARE: NeoMutex<Option<Hardware>> = NeoMutex::new(None);
 
 /// The pin we use for external interrupt input
 static IRQ_PIN: NeoMutex<Option<IrqPin>> = NeoMutex::new(None);
-
-/// This is our Operating System. It must be compiled separately.
-///
-/// The RP2040 requires an OS linked at `0x1002_0000` and compiled for the
-/// `thumbv6m-none-eabi` target. You should therefore use the binary
-/// `thumbv6m-none-eabi-flash1002-libneotron_os.bin` from
-/// <https://github.com/Neotron-Compute/Neotron-OS/releases>
-#[link_section = ".flash_os"]
-#[used]
-pub static OS_IMAGE: [u8; include_bytes!("thumbv6m-none-eabi-flash1002-libneotron_os.bin").len()] =
-	*include_bytes!("thumbv6m-none-eabi-flash1002-libneotron_os.bin");
 
 /// Tracks if we have had an IO interrupt.
 ///
@@ -526,8 +516,22 @@ fn main() -> ! {
 	sign_on();
 
 	// Now jump to the OS
-	let code: &common::OsStartFn = unsafe { ::core::mem::transmute(&_flash_os_start) };
-	code(&API_CALLS);
+	unsafe {
+		let entry_fn_addr: *const usize = addr_of!(_flash_os_start) as *const usize;
+		info!("entry_fn_addr = 0x{:08x}", entry_fn_addr);
+		let entry_fn = entry_fn_addr.read_volatile();
+		info!("entry_fn = 0x{:08x}", entry_fn);
+		if entry_fn != 0xFFFF_FFFF && entry_fn != 0x0000_0000 {
+			// looks like it's not blank at least - let's jump to it
+			let code: common::OsStartFn = core::mem::transmute(entry_fn);
+			code(&API_CALLS);
+		} else {
+			// flash looks blank - sit at the splash screen
+			loop {
+				cortex_m::asm::wfe();
+			}
+		}
+	}
 }
 
 /// Check if the rest of the system appears to be running already.
@@ -583,7 +587,7 @@ fn sign_on() {
 	static LOGO_ANSI_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/logo.bytes"));
 	static COPYRIGHT_TEXT: &str = "\
 		\n\
-		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2023\n\
+		Copyright © Jonathan 'theJPster' Pallant and the Neotron Developers, 2024\n\
 		This program is free software under GPL v3 (or later)\n\
 		You are entitled to the Complete and Corresponding Source for this BIOS\n\
 		\n\
@@ -702,6 +706,8 @@ fn sign_on() {
 			countdown -= 1;
 		}
 	}
+
+	write!(&tc, "Now starting OS (if present)...").unwrap();
 }
 
 /// Paint the Core 0 and Core 1 stacks

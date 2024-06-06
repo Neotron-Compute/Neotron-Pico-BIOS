@@ -82,64 +82,55 @@ Currently the BIOS uses Core 0 for running the Neotron OS (and application code)
 
 The Neotron BIOS uses the [defmt](https://crates.io/crates/defmt) crate to provide structured logging over the SWD interface. The easiest way to flash and debug your Neotron Pico BIOS is with a second Raspberry Pi Pico, or the official Raspberry Pi Debug Probe.
 
-1. If your BMC has not been programmed, do that first.
+1. If your BMC has not been programmed, [do that first](https://github.com/Neotron-Compute/Neotron-BMC/blob/v0.5.2/neotron-bmc-pico/README.md).
 
-2. Connect your *Debugger* Pico to the three *DEBUG* pins on the *Neotron* Pico, following the instructions for your particular debugging device or firmware.
+1. Connect your *Debug Probe* to the three *DEBUG* pins on the *Raspberry Pi Pico* fitted to your Neotron Pico, following the instructions for your particular debugging device or firmware.
 
-3. If your *Debugger* Pico was a bare Pi Pico (and not a Debug Probe) then flash it with <https://github.com/raspberrypi/picoprobe> or <https://github.com/majbthrd/DapperMime> firmware (e.g. by copying the UF2 file to the USB Mass Storage device)
+1. On your PC, install the [*probe-rs*](https://github.com/probe-rs), a microcontroller flashing tool. See website for instructions.
 
-4. On your PC, install [*probe-rs*](https://github.com/probe-rs), a microcontroller flashing tool.
-
-   ```sh
-   cargo install probe-rs --features=cli
-   ```
-
-5. Build the Neotron OS:
-    We use the "neotron-flash-1002.ld" linker script to link it at `0x1002_0000`.
-
-    ```console
-    user@host ~/neotron-os $ cargo build --bin=flash1002 --release --target=thumbv6m-none-eabi
-    user@host ~/neotron-os $ arm-none-eabi-objcopy -O binary ./target/thumbv6m-none-eabi/release/flash1002 ../neotron-pico-bios/src/thumbv6m-none-eabi-flash1002-libneotron_os.bin
-    ```
-
-6. Power on your Neotron Pico into bootloader mode by applying 12V, holding down
+1. Power on your Neotron Pico into bootloader mode by applying 12V, holding down
    the "BOOTSEL" button on the Raspberry Pi Pico and then and tapping the On/Off
    button on the Neotron.
 
-   If you don't put the RP2040 into bootloader mode then when `probe-rs` resets
-   the chip after programming, the firmware will detect it has had an incomplete
-   reset and cause a full reset. This makes the video output more reliable, but
-   the full reset will immediately disconnect `probe-rs` so you won't see any
-   log messages. Booting the RP2040 in USB bootloader mode avoids this issue by
-   making the `probe-rs` triggered reset look more like a full reset.
+   If you don't put the Raspberry Pi Pico into bootloader mode then when
+   `probe-rs` resets the chip after programming, the firmware will detect it has
+   had an incomplete reset and cause a full reset. This makes the video output
+   more reliable, but the full reset will immediately disconnect `probe-rs` so
+   you won't see any log messages. Booting the RP2040 in USB bootloader mode
+   avoids this issue by making the `probe-rs` triggered reset look more like a
+   full reset.
 
-7. Build and load the Neotron BIOS, and view the debug output stream, with `cargo run --release`.
+1. Flash the BIOS.
 
-    ```console
-    user@host ~/neotron-pico-bios $ DEFMT_LOG=debug cargo run --release
-      Compiling neotron-pico-bios v0.1.0 (/home/jonathan/Documents/neotron/neotron-pico-bios)
-        Finished release [optimized + debuginfo] target(s) in 0.76s
-        Running `probe-rs run --chip RP2040 target/thumbv6m-none-eabi/release/neotron-pico-bios`
-    (HOST) INFO  flashing program (7.30 KiB)
-    (HOST) INFO  success!
-    ────────────────────────────────────────────────────────────────────────────────
-    INFO  Neotron BIOS starting...
-    └─ neotron_pico_bios::__cortex_m_rt_main @ src/main.rs:79
-    INFO  Clocks OK
-    └─ neotron_pico_bios::__cortex_m_rt_main @ src/main.rs:102
-    INFO  Pins OK
-    └─ neotron_pico_bios::__cortex_m_rt_main @ src/main.rs:121
-    DEBUG Loop...
-    └─ neotron_pico_bios::__cortex_m_rt_main @ src/main.rs:128
-    ```
+    1. You can compile from source and flash all-in-one:
 
-    You should see your Neotron Pico boot, both over RTT in the `probe-rs` output, and also on the VGA output.
+        ```bash
+        cargo run --release
+        ```
+
+    1. You can download the `neotron-pico-bios.elf` file from [Github
+    Releases](https://github.com/Neotron-Compute/Neotron-Pico-BIOS/releases) and
+    flash with `probe-rs`:
+
+        ```bash
+        probe-rs run --chip RP2040 ~/Downloads/neotron-pico-bios
+        ```
+
+    1. You can download the `neotron-pico-bios.uf2` file from [Github
+    Releases](https://github.com/Neotron-Compute/Neotron-Pico-BIOS/releases) and
+    flash by copying to the RP2040 bootloader's fake USB Mass Storage Device. You will need to connect a USB cable to the Raspberry Pi Pico's external USB micro-AB port, and ensure that the USB Host Power jumper near the 12V input is NOT fitted.
+
+1. Now when you reset your board, you will see the BIOS splash screen on any
+   connected VGA display and some start-up tones on any connected PC Speaker. No
+   OS will be booted, as we haven't flashed the OS yet. Grab a compatible OS
+   release from <https://github.com/Neotron-Compute/Neotron-OS/releases>. You
+   need the `flash1002` variant for the Neotron Pico, because the BIOS expects
+   the OS to live in flash at address `0x1002_0000`.
 
 ## Multiple Probes
 
 If you have multiple `probe-rs` compatible probes attached to your computer,
 you will receive an error message.
-
 
 You will need to check what probes are available and edit `.cargo/config.toml` to add the appropriate `--probe VID:PID` argument.
 
@@ -165,7 +156,7 @@ See [CHANGELOG.md](./CHANGELOG.md)
 ## Licence
 
 ```text
-Neotron-Pico-BIOS Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2023
+Neotron-Pico-BIOS Copyright (c) Jonathan 'theJPster' Pallant and the Neotron Developers, 2024
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
