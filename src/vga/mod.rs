@@ -251,7 +251,7 @@ impl RenderEngine {
 		// Get a pointer into our scan-line buffer
 		let mut scan_line_buffer_ptr = scan_line_buffer.pixel_ptr();
 		let black_pixel = RGBColour(VIDEO_PALETTE[0].load(Ordering::Relaxed));
-		let white_pixel = RGBColour(VIDEO_PALETTE[15].load(Ordering::Relaxed));
+		let white_pixel = RGBColour(VIDEO_PALETTE[1].load(Ordering::Relaxed));
 		if is_double {
 			// double-width mode.
 			// sixteen RGB pixels (eight pairs) per byte
