@@ -64,7 +64,6 @@ use core::{
 	fmt::Write,
 	ptr::{addr_of, addr_of_mut},
 	sync::atomic::{AtomicBool, AtomicU32, Ordering},
-	u32,
 };
 
 // Third Party Stuff
@@ -1704,9 +1703,9 @@ pub extern "C" fn serial_read(
 /// Gregorian calendar. It simply stores time as an incrementing number of
 /// seconds since some epoch, and the number of milliseconds since that second
 /// began. A day is assumed to be exactly 86,400 seconds long. This is a lot
-/// like POSIX time, except we have a different epoch
-/// - the Neotron epoch is 2000-01-01T00:00:00Z. It is highly recommend that you
-/// store UTC in the BIOS and use the OS to handle time-zones.
+/// like POSIX time, except we have a different epoch - the Neotron epoch is
+/// 2000-01-01T00:00:00Z. It is highly recommend that you store UTC in the BIOS
+/// and use the OS to handle time-zones.
 ///
 /// If the BIOS does not have a battery-backed clock, or if that battery has
 /// failed to keep time, the system starts up assuming it is the epoch.
