@@ -1,13 +1,13 @@
 //! Code to set up a PIO to generate I2S Audio
 
-use rp_pico::hal::{pac::interrupt, prelude::*};
+use crate::hal::{pac::interrupt, prelude::*};
 
 /// Holds the objects we need to read from the RAM fifo and write to the PIO hardware FIFO.
 static mut PLAYBACK_TO_PIO: Option<PlaybackToPio> = None;
 
 /// The reader end of the RAM FIFO and the writer end of the PIO hardware FIFO.
 struct PlaybackToPio {
-	pio_fifo: rp_pico::hal::pio::Tx<(rp_pico::pac::PIO1, rp_pico::hal::pio::SM0)>,
+	pio_fifo: crate::hal::pio::Tx<(crate::pac::PIO1, crate::hal::pio::SM0)>,
 	ram_fifo: heapless::spsc::Consumer<'static, u32, 1024>,
 }
 
@@ -163,20 +163,20 @@ pub fn init(pio: super::pac::PIO1, resets: &mut super::pac::RESETS) -> Player {
 
 	let samples_installed = pio.install(&samples_program.program).unwrap();
 	let (mut samples_sm, _sample_rx_fifo, pio_tx_fifo) =
-		rp_pico::hal::pio::PIOBuilder::from_installed_program(samples_installed)
-			.buffers(rp_pico::hal::pio::Buffers::RxTx)
+		crate::hal::pio::PIOBuilder::from_installed_program(samples_installed)
+			.buffers(crate::hal::pio::Buffers::RxTx)
 			.out_pins(26, 1) // Data is GPIO26
 			.in_pin_base(25)
 			.autopull(false)
 			.autopush(false)
-			.out_shift_direction(rp_pico::hal::pio::ShiftDirection::Left)
-			.in_shift_direction(rp_pico::hal::pio::ShiftDirection::Left)
+			.out_shift_direction(crate::hal::pio::ShiftDirection::Left)
+			.in_shift_direction(crate::hal::pio::ShiftDirection::Left)
 			.build(sm0);
 	samples_sm.set_pindirs([
-		(25, rp_pico::hal::pio::PinDir::Input),
-		(26, rp_pico::hal::pio::PinDir::Output),
-		(27, rp_pico::hal::pio::PinDir::Input),
-		(28, rp_pico::hal::pio::PinDir::Input),
+		(25, crate::hal::pio::PinDir::Input),
+		(26, crate::hal::pio::PinDir::Output),
+		(27, crate::hal::pio::PinDir::Input),
+		(28, crate::hal::pio::PinDir::Input),
 	]);
 
 	let _running_sam = samples_sm.start();
@@ -184,7 +184,7 @@ pub fn init(pio: super::pac::PIO1, resets: &mut super::pac::RESETS) -> Player {
 	static mut SAMPLE_QUEUE: heapless::spsc::Queue<u32, 1024> = heapless::spsc::Queue::new();
 	let (q_producer, q_consumer) = unsafe { SAMPLE_QUEUE.split() };
 
-	pio_tx_fifo.enable_tx_not_full_interrupt(rp_pico::hal::pio::PioIRQ::Irq0);
+	pio_tx_fifo.enable_tx_not_full_interrupt(crate::hal::pio::PioIRQ::Irq0);
 
 	critical_section::with(|_| unsafe {
 		PLAYBACK_TO_PIO.replace(PlaybackToPio {
@@ -194,7 +194,7 @@ pub fn init(pio: super::pac::PIO1, resets: &mut super::pac::RESETS) -> Player {
 	});
 
 	unsafe {
-		rp_pico::hal::pac::NVIC::unmask(rp_pico::hal::pac::Interrupt::PIO1_IRQ_0);
+		cortex_m::peripheral::NVIC::unmask(crate::pac::Interrupt::PIO1_IRQ_0);
 	}
 
 	Player { fifo: q_producer }
