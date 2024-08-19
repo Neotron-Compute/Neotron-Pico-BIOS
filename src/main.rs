@@ -83,7 +83,7 @@ use hal::{
 };
 use panic_probe as _;
 use pc_keyboard::{KeyCode, ScancodeSet};
-use rp2040_hal as hal;
+use rp235x_hal as hal;
 
 // Other Neotron Crates
 use mutex::NeoMutex;
@@ -172,7 +172,7 @@ struct Hardware {
 	/// The time we started up at, in microseconds since the Neotron epoch
 	bootup_at: Duration,
 	/// A 1 MHz Timer
-	timer: hal::timer::Timer,
+	timer: hal::timer::Timer<hal::timer::CopyableTimer0>,
 	/// the state of our SD Card
 	card_state: CardState,
 	/// Tracks all the clocks in the RP2040
@@ -235,12 +235,10 @@ struct Pins {
 // Static and Const Data
 // -----------------------------------------------------------------------------
 
-/// The linker will place this boot block at the start of our program image. We
-/// need this to help the ROM bootloader get our code up and running.
-#[link_section = ".boot2"]
-#[no_mangle]
+/// Tell the Boot ROM about our application
+#[link_section = ".start_block"]
 #[used]
-pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
+pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 
 /// Version string auto-generated in build.rs
 static VERSION: &str = include_str!(concat!(env!("OUT_DIR"), "/version.txt"));
@@ -386,7 +384,7 @@ fn main() -> ! {
 		.map_err(|_x| false)
 		.unwrap();
 	// Step 2. Configure watchdog tick generation to tick over every microsecond.
-	watchdog.enable_tick_generation((XOSC_CRYSTAL_FREQ / 1_000_000) as u8);
+	watchdog.enable_tick_generation((XOSC_CRYSTAL_FREQ / 1_000_000) as u16);
 	// Step 3. Create a clocks manager.
 	let mut clocks = hal::clocks::ClocksManager::new(pp.CLOCKS);
 	// Step 4. Set up the system PLL.
@@ -452,7 +450,7 @@ fn main() -> ! {
 		sio.gpio_bank0,
 		pp.SPI0,
 		pp.I2C1,
-		pp.TIMER,
+		pp.TIMER0,
 		pp.PIO1,
 		clocks,
 		delay,
@@ -849,7 +847,7 @@ impl Hardware {
 		sio: hal::sio::SioGpioBank0,
 		spi: pac::SPI0,
 		i2c: pac::I2C1,
-		timer: pac::TIMER,
+		timer: pac::TIMER0,
 		pio1: pac::PIO1,
 		clocks: ClocksManager,
 		delay: cortex_m::delay::Delay,
@@ -897,7 +895,7 @@ impl Hardware {
 		}
 
 		let mut external_rtc = rtc::Rtc::new(proxy);
-		let timer = hal::timer::Timer::new(timer, resets, &clocks);
+		let timer = hal::timer::Timer::new_timer0(timer, resets, &clocks);
 		// Do a conversion from external RTC time (chrono::NaiveDateTime) to a format we can track
 		let ticks_at_boot_us = match external_rtc.get_time(i2c.acquire_i2c()) {
 			Ok(time) => {
@@ -2628,8 +2626,13 @@ extern "C" fn power_control(power_mode: common::FfiPowerMode) -> ! {
 		Ok(common::PowerMode::Bootloader) => {
 			// Reboot to USB bootloader with no GPIOs and both USB interfaces
 			// enabled.
-			hal::rom_data::reset_to_usb_boot(0, 0);
-			core::unreachable!()
+			hal::reboot::reboot(
+				hal::reboot::RebootKind::BootSel {
+					picoboot_disabled: false,
+					msd_disabled: false,
+				},
+				hal::reboot::RebootArch::Arm,
+			);
 		}
 		_ => {
 			// Anything else causes a reset

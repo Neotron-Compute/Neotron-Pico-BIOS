@@ -19,8 +19,8 @@ jobs:
       - name: Add targets/components
         run: |
           rustup component add clippy
-          rustup target add thumbv6m-none-eabi
+          rustup target add thumbv8m.main-none-eabihf
 
       - name: Run Clippy
         run: |
-          cargo clippy --target=thumbv6m-none-eabi --all-features
+          cargo clippy --target=thumbv8m.main-none-eabihf --all-features

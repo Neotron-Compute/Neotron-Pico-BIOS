@@ -8,24 +8,18 @@
 
 MEMORY {
     /*
-     * This is bootloader for the RP2040. It must live at the start of the
-       external flash chip.
+     * The Pico 2 has 4096 KiB of external Flash Memory. We allow ourselves 128
+     * KiB for the BIOS, leaving the rest for the OS and any user applications.
      */
-    BOOT2 : ORIGIN = 0x10000000, LENGTH = 0x100
+    FLASH : ORIGIN = 0x10000000, LENGTH = 128K
     /*
-     * The Pico has 2048 KiB of external Flash Memory. We allow ourselves 128
-     * KiB for the BIOS, leaving the rest
-     * for the OS and any user applications.
+     * This is the remainder of the 4096 KiB flash chip.
      */
-    FLASH : ORIGIN = 0x10000100, LENGTH = 128K - 0x100
-    /*
-     * This is the remainder of the 2048 KiB flash chip.
-     */
-    FLASH_OS : ORIGIN = 0x10020000, LENGTH = 2048K - 128K
+    FLASH_OS : ORIGIN = 0x10020000, LENGTH = 4096K - 128K
     /*
      * This is the bottom of the four striped banks of SRAM in the RP2040.
      */
-    RAM_OS : ORIGIN = 0x20000000, LENGTH = 0x42000 - 0x9690
+    RAM_OS : ORIGIN = 0x20000000, LENGTH = 0x82000 - 0x9690
     /*
      * This is the top of the four striped banks of SRAM in the RP2040, plus
      * SRAM_BANK4 and SRAM_BANK5.
@@ -36,7 +30,7 @@ MEMORY {
      * 0x9690 should be the (size of .data + size of .bss + size of .uninit +
      * 0x2000 for the stack).
      */
-    RAM : ORIGIN = 0x20042000 - 0x9690, LENGTH = 0x9690
+    RAM : ORIGIN = 0x20082000 - 0x9690, LENGTH = 0x9690
 }
 
 /*
@@ -48,17 +42,55 @@ _ram_os_start = ORIGIN(RAM_OS);
 _ram_os_len = LENGTH(RAM_OS);
 
 SECTIONS {
-    /* ### RP2040 Boot loader */
-    .boot2 ORIGIN(BOOT2) :
+    /* ### Boot ROM info
+     *
+     * Goes after .vector_table, to keep it in the first 4K of flash
+     * where the Boot ROM (and picotool) can find it
+     */
+    .start_block : ALIGN(4)
     {
-        KEEP(*(.boot2));
-    } > BOOT2
+        __start_block_addr = .;
+        KEEP(*(.start_block));
+    } > FLASH
 
-    /* ### Neotron OS */
-    .flash_os ORIGIN(FLASH_OS) :
+} INSERT AFTER .vector_table;
+
+/* move .text to start /after/ the boot info */
+_stext = ADDR(.start_block) + SIZEOF(.start_block);
+
+SECTIONS {
+    /* ### Picotool 'Binary Info' Entries
+     *
+     * Picotool looks through this block (as we have pointers to it in our
+     * header) to find interesting information.
+     */
+    .bi_entries : ALIGN(4)
     {
-        KEEP(*(.flash_os));
-    } > FLASH_OS
-} INSERT BEFORE .text;
+        /* We put this in the header */
+        __bi_entries_start = .;
+        /* Here are the entries */
+        KEEP(*(.bi_entries));
+        /* Keep this block a nice round size */
+        . = ALIGN(4);
+        /* We put this in the header */
+        __bi_entries_end = .;
+    } > FLASH
+} INSERT AFTER .text;
+
+SECTIONS {
+    /* ### Boot ROM extra info
+     *
+     * Goes after everything in our program, so it can contain a signature.
+     */
+    .end_block : ALIGN(4)
+    {
+        __end_block_addr = .;
+        KEEP(*(.end_block));
+    } > FLASH
+
+} INSERT AFTER .uninit;
+
+PROVIDE(start_to_end = __end_block_addr - __start_block_addr);
+PROVIDE(end_to_start = __start_block_addr - __end_block_addr);
 
 

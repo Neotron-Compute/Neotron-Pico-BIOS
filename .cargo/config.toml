@@ -1,8 +1,6 @@
-[target.thumbv6m-none-eabi]
-# This will make a UF2 and copy it to the RP2040's Mass Storage Device bootloader
-# runner = "elf2uf2-rs -d"
-# This will flash over SWD with any compatible probe it finds.
-runner = "probe-rs run --chip RP2040 --speed 10000"
+[target.thumbv8m.main-none-eabihf]
+# This will load the binary with picotool
+runner = "picotool load -v -u -x -t elf"
 rustflags = [
   # This is needed if your flash or ram addresses are not aligned to 0x10000 in memory.x
   # See https://github.com/rust-embedded/cortex-m-quickstart/pull/95
@@ -16,7 +14,7 @@ rustflags = [
 ]
 
 [build]
-target = "thumbv6m-none-eabi" # Cortex-M0 and Cortex-M0+
+target = "thumbv8m.main-none-eabihf" # Cortex-M33
 
 [env]
 DEFMT_LOG = { value = "info" }
