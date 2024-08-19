@@ -68,7 +68,7 @@ pub fn launch_core1_with_stack(
 	stack: *mut usize,
 	stack_len: usize,
 	ppb: &mut crate::pac::PPB,
-	fifo: &mut rp_pico::hal::sio::SioFifo,
+	fifo: &mut crate::hal::sio::SioFifo,
 	psm: &mut crate::pac::PSM,
 ) {
 	defmt::debug!("Resetting CPU1...");
@@ -118,8 +118,8 @@ pub fn launch_core1_with_stack(
 		(CORE1_ENTRY_FUNCTION.as_ptr() as usize as u32) + 1,
 	];
 
-	let enabled = crate::pac::NVIC::is_enabled(crate::pac::Interrupt::SIO_IRQ_PROC0);
-	crate::pac::NVIC::mask(crate::pac::Interrupt::SIO_IRQ_PROC0);
+	let enabled = cortex_m::peripheral::NVIC::is_enabled(crate::pac::Interrupt::SIO_IRQ_PROC0);
+	cortex_m::peripheral::NVIC::mask(crate::pac::Interrupt::SIO_IRQ_PROC0);
 
 	'outer: loop {
 		for cmd in cmd_sequence.iter() {
@@ -154,7 +154,7 @@ pub fn launch_core1_with_stack(
 	}
 
 	if enabled {
-		unsafe { crate::pac::NVIC::unmask(crate::pac::Interrupt::SIO_IRQ_PROC0) };
+		unsafe { cortex_m::peripheral::NVIC::unmask(crate::pac::Interrupt::SIO_IRQ_PROC0) };
 	}
 
 	defmt::debug!("Waiting for Core 1 to start...");

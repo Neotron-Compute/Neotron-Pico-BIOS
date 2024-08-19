@@ -649,7 +649,6 @@ dependencies = [
  "pc-keyboard",
  "pio",
  "pio-proc",
- "rp-pico",
  "rp2040-boot2",
  "rp2040-hal",
  "shared-bus",
@@ -915,18 +914,6 @@ name = "regex-syntax"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adad44e29e4c806119491a7f06f03de4d1af22c3a680dd47f1e6e179439d1f56"
-
-[[package]]
-name = "rp-pico"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9342d3ac7011ac688300979e9b52a81f0add1d05feb02868cf94bfee0705b28"
-dependencies = [
- "cortex-m-rt",
- "fugit",
- "rp2040-hal",
- "usb-device",
-]
 
 [[package]]
 name = "rp2040-boot2"

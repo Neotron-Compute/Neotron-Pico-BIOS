@@ -33,14 +33,6 @@
 #![no_std]
 #![no_main]
 
-// The boot2 feature of rp-pico is temporarily disabled, so the version
-// of rp2040-boot2 can be overridden. Therefore, BOOT2_FIRMWARE needs to be
-// defined here.
-#[link_section = ".boot2"]
-#[no_mangle]
-#[used]
-pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
-
 // -----------------------------------------------------------------------------
 // Sub-modules
 // -----------------------------------------------------------------------------
@@ -79,10 +71,7 @@ use embedded_hal::{
 	digital::v2::{InputPin, OutputPin},
 };
 use fugit::RateExtU32;
-use panic_probe as _;
-use pc_keyboard::{KeyCode, ScancodeSet};
-use rp2040_hal::{
-	self as hal,
+use hal::{
 	clocks::ClocksManager,
 	entry,
 	gpio::{
@@ -92,6 +81,9 @@ use rp2040_hal::{
 	pac::{self, interrupt},
 	Clock,
 };
+use panic_probe as _;
+use pc_keyboard::{KeyCode, ScancodeSet};
+use rp2040_hal as hal;
 
 // Other Neotron Crates
 use mutex::NeoMutex;
@@ -243,6 +235,13 @@ struct Pins {
 // Static and Const Data
 // -----------------------------------------------------------------------------
 
+/// The linker will place this boot block at the start of our program image. We
+/// need this to help the ROM bootloader get our code up and running.
+#[link_section = ".boot2"]
+#[no_mangle]
+#[used]
+pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
+
 /// Version string auto-generated in build.rs
 static VERSION: &str = include_str!(concat!(env!("OUT_DIR"), "/version.txt"));
 
@@ -336,6 +335,8 @@ const CORE0_STACK_PAINT_WORD: usize = 0xBBBB_BBBB;
 /// What we paint Core 1's stack with
 const CORE1_STACK_PAINT_WORD: usize = 0xCCCC_CCCC;
 
+const XOSC_CRYSTAL_FREQ: u32 = 12_000_000;
+
 // -----------------------------------------------------------------------------
 // Functions
 // -----------------------------------------------------------------------------
@@ -349,7 +350,7 @@ fn main() -> ! {
 	// Grab the singleton containing all the RP2040 peripherals
 	let mut pp = pac::Peripherals::take().unwrap();
 	// Grab the singleton containing all the generic Cortex-M peripherals
-	let cp = pac::CorePeripherals::take().unwrap();
+	let cp = cortex_m::Peripherals::take().unwrap();
 
 	// Check if stuff is running that shouldn't be. If so, do a full watchdog reboot.
 	if stuff_running(&mut pp) {
@@ -381,11 +382,11 @@ fn main() -> ! {
 	// MHz standard VGA pixel clock).
 
 	// Step 1. Turn on the crystal.
-	let xosc = hal::xosc::setup_xosc_blocking(pp.XOSC, rp_pico::XOSC_CRYSTAL_FREQ.Hz())
+	let xosc = hal::xosc::setup_xosc_blocking(pp.XOSC, XOSC_CRYSTAL_FREQ.Hz())
 		.map_err(|_x| false)
 		.unwrap();
 	// Step 2. Configure watchdog tick generation to tick over every microsecond.
-	watchdog.enable_tick_generation((rp_pico::XOSC_CRYSTAL_FREQ / 1_000_000) as u8);
+	watchdog.enable_tick_generation((XOSC_CRYSTAL_FREQ / 1_000_000) as u8);
 	// Step 3. Create a clocks manager.
 	let mut clocks = hal::clocks::ClocksManager::new(pp.CLOCKS);
 	// Step 4. Set up the system PLL.
@@ -503,7 +504,7 @@ fn main() -> ! {
 	// We do this last so that the interrupt can't go off while
 	// it is in the middle of being configured.
 	unsafe {
-		pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
+		cortex_m::peripheral::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
 		cortex_m::interrupt::enable();
 	}
 

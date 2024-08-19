@@ -40,6 +40,7 @@ mod rgb;
 // Imports
 // -----------------------------------------------------------------------------
 
+use crate::hal::{self, pac::interrupt, pio::PIOExt};
 use core::{
 	cell::{RefCell, UnsafeCell},
 	ptr::addr_of_mut,
@@ -47,7 +48,6 @@ use core::{
 };
 use defmt::{debug, trace};
 use neotron_common_bios::video::{Attr, GlyphAttr, TextBackgroundColour, TextForegroundColour};
-use rp2040_hal::{self as hal, pac::interrupt, pio::PIOExt};
 
 pub use rgb::{RGBColour, RGBPair};
 
@@ -472,7 +472,7 @@ impl RenderEngine {
 			// per word
 
 			// Set up the interpolator. This is safe because core1 has its own.
-			let sio = unsafe { &*rp_pico::pac::SIO::ptr() };
+			let sio = unsafe { &*crate::pac::SIO::ptr() };
 			sio.interp0_base0().write(|w| {
 				unsafe { w.bits(palette_ptr as u32) };
 				w
@@ -484,17 +484,21 @@ impl RenderEngine {
 			// lane0 will pull out the higher of the two 4-bit chunky pixels, but shifted
 			// by 2 bits to account for the 32-bit palette entry
 			sio.interp0_ctrl_lane0().write(|w| {
-				w.shift().variant(4);
-				w.mask_lsb().variant(2);
-				w.mask_msb().variant(5);
+				unsafe {
+					w.shift().bits(4);
+					w.mask_lsb().bits(2);
+					w.mask_msb().bits(5);
+				}
 				w
 			});
 			// lane1 will pull out the lower of the two 4-bit chunky pixels, but shifted
 			// by 2 bits to account for the 32-bit palette entry
 			sio.interp0_ctrl_lane1().write(|w| {
-				w.shift().variant(0);
-				w.mask_lsb().variant(2);
-				w.mask_msb().variant(5);
+				unsafe {
+					w.shift().bits(0);
+					w.mask_lsb().bits(2);
+					w.mask_msb().bits(5);
+				}
 				w
 			});
 			let line_start_words = line_start_bytes as *const u32;
@@ -2063,8 +2067,8 @@ unsafe extern "C" fn core1_main() -> u32 {
 		core::arch::asm!("cpsie i");
 	}
 	// We are on Core 1, so these interrupts will run on Core 1
-	crate::pac::NVIC::unpend(crate::pac::Interrupt::PIO0_IRQ_1);
-	crate::pac::NVIC::unmask(crate::pac::Interrupt::PIO0_IRQ_1);
+	cortex_m::peripheral::NVIC::unpend(crate::pac::Interrupt::PIO0_IRQ_1);
+	cortex_m::peripheral::NVIC::unmask(crate::pac::Interrupt::PIO0_IRQ_1);
 
 	loop {
 		// Wait for a free DMA buffer. Can't do a compare-and-swap on ARMv6-M :/
