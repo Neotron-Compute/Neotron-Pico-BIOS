@@ -470,6 +470,19 @@ impl RenderEngine {
 			//
 			// two RGB pixels (one pair) per byte eight RGB pixels (four pairs)
 			// per word
+			//
+			// We give the interpolator `palette_ptr` and `chunky_pixels`.
+			//
+			// We want to know the corresponding palette addresses for each of
+			// the eight 4-bit pixels in `chunky_pixels`. For each pixel `p` in
+			// the 32-bit word `pppppppp` we want `palette_ptr.offset(p)`, which
+			// is `palette_ptr + (p * 2)`.
+			//
+			// The interpolator calculates `palette_ptr + ((w >> 3) & 0b11110)`
+			// for our left pixel and `palette_ptr + ((w << 1) & 0b11110)` for
+			// our right pixel so we can pull out two pixels for each
+			// interpolator write.
+			let palette_ptr = VIDEO_PALETTE.as_ptr() as *const RGBColour;
 
 			// Set up the interpolator. This is safe because core1 has its own.
 			let sio = unsafe { &*crate::pac::SIO::ptr() };
@@ -481,23 +494,21 @@ impl RenderEngine {
 				unsafe { w.bits(palette_ptr as u32) };
 				w
 			});
-			// lane0 will pull out the higher of the two 4-bit chunky pixels, but shifted
-			// by 2 bits to account for the 32-bit palette entry
+			// lane0 will pull out the palette address of the higher of the two 4-bit chunky pixels in the bottom byte
 			sio.interp0_ctrl_lane0().write(|w| {
 				unsafe {
-					w.shift().bits(4);
-					w.mask_lsb().bits(2);
-					w.mask_msb().bits(5);
+					w.shift().bits(3);
+					w.mask_lsb().bits(1);
+					w.mask_msb().bits(4);
 				}
 				w
 			});
-			// lane1 will pull out the lower of the two 4-bit chunky pixels, but shifted
-			// by 2 bits to account for the 32-bit palette entry
+			// lane1 will pull out the palette address of the higher of the two 4-bit chunky pixels in the bottom byte
 			sio.interp0_ctrl_lane1().write(|w| {
 				unsafe {
-					w.shift().bits(0);
-					w.mask_lsb().bits(2);
-					w.mask_msb().bits(5);
+					w.shift().bits(31);
+					w.mask_lsb().bits(1);
+					w.mask_msb().bits(4);
 				}
 				w
 			});
@@ -505,17 +516,18 @@ impl RenderEngine {
 			let line_len_words = line_len_bytes / 4;
 			for col in 0..line_len_words {
 				unsafe {
-					let chunky_pixels = line_start_words.add(col).read();
+					let mut chunky_pixels = line_start_words.add(col).read();
 
-					// First two pixels
-					// Shift up by 2 bits before we load, to account for the 32
-					// bit size of each palette entry.
+					// ========================================================
+					// First byte (containing two 4-bit pixels)
+					// ========================================================
+
 					sio.interp0_accum0().write(|w| {
-						w.bits(chunky_pixels << 2);
+						w.bits(chunky_pixels);
 						w
 					});
 					sio.interp0_accum1().write(|w| {
-						w.bits(chunky_pixels << 2);
+						w.bits(chunky_pixels);
 						w
 					});
 					// now we get the palette address for the left pixel
@@ -527,13 +539,17 @@ impl RenderEngine {
 					scan_line_buffer_ptr.write(pair);
 					scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
 
-					// Second two pixels
+					// ========================================================
+					// Second byte (containing two 4-bit pixels)
+					// ========================================================
+
+					chunky_pixels >>= 8;
 					sio.interp0_accum0().write(|w| {
-						w.bits(chunky_pixels >> 6);
+						w.bits(chunky_pixels);
 						w
 					});
 					sio.interp0_accum1().write(|w| {
-						w.bits(chunky_pixels >> 6);
+						w.bits(chunky_pixels);
 						w
 					});
 					// now we get the palette address for the left pixel
@@ -545,13 +561,17 @@ impl RenderEngine {
 					scan_line_buffer_ptr.write(pair);
 					scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
 
-					// Third two pixels
+					// ========================================================
+					// Third byte (containing two 4-bit pixels)
+					// ========================================================
+
+					chunky_pixels >>= 8;
 					sio.interp0_accum0().write(|w| {
-						w.bits(chunky_pixels >> 14);
+						w.bits(chunky_pixels);
 						w
 					});
 					sio.interp0_accum1().write(|w| {
-						w.bits(chunky_pixels >> 14);
+						w.bits(chunky_pixels);
 						w
 					});
 					// now we get the palette address for the left pixel
@@ -563,13 +583,17 @@ impl RenderEngine {
 					scan_line_buffer_ptr.write(pair);
 					scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
 
-					// Fourth two pixels
+					// ========================================================
+					// Fourth byte (containing two 4-bit pixels)
+					// ========================================================
+
+					chunky_pixels >>= 8;
 					sio.interp0_accum0().write(|w| {
-						w.bits(chunky_pixels >> 22);
+						w.bits(chunky_pixels);
 						w
 					});
 					sio.interp0_accum1().write(|w| {
-						w.bits(chunky_pixels >> 22);
+						w.bits(chunky_pixels);
 						w
 					});
 					// now we get the palette address for the left pixel
