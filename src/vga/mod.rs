@@ -1013,12 +1013,14 @@ struct Chunky4ColourLookup {
 }
 
 impl Chunky4ColourLookup {
+	/// Create a blank look-up table.
 	const fn blank() -> Chunky4ColourLookup {
 		Chunky4ColourLookup {
 			entries: [const { AtomicU32::new(0) }; 256],
 		}
 	}
 
+	/// Initialise this look-up table from the palette.
 	fn init(&self, palette: &[AtomicU16]) {
 		let palette = &palette[0..16];
 		for (left_idx, left_colour) in palette.iter().enumerate() {
@@ -1032,6 +1034,10 @@ impl Chunky4ColourLookup {
 		}
 	}
 
+	/// Update a look-up table entry.
+	///
+	/// The `updated_palette_entry` is an index from 0..16 into the main palette
+	/// (given as `palette`).
 	fn update_index(&self, updated_palette_entry: u8, palette: &[AtomicU16]) {
 		let palette = &palette[0..16];
 		let updated_palette_entry = usize::from(updated_palette_entry);
@@ -1049,6 +1055,7 @@ impl Chunky4ColourLookup {
 		}
 	}
 
+	/// Turn a pair of chunky4 pixels (in a `u8`), into a pair of RGB pixels.
 	#[inline]
 	fn lookup(&self, pixel_pair: u8) -> RGBPair {
 		let index = usize::from(pixel_pair);
@@ -1091,7 +1098,7 @@ pub static GLYPH_ATTR_ARRAY: TextBuffer = TextBuffer::new();
 /// Copied at the start of every frame by the code on Core 1.
 pub static VIDEO_MODE: VideoMode = VideoMode::new();
 
-/// Holds 16 palette entries, paired with every other one of 16 palette entries.
+/// Holds 16 palette entries, paired with every other of 16 palette entries.
 ///
 /// Allows a fast lookup of an RGB pixel pair given two 4-bpp pixels packed into a byte.
 static CHUNKY4_COLOUR_LOOKUP: Chunky4ColourLookup = Chunky4ColourLookup::blank();
