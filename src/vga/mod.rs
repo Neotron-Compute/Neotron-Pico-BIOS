@@ -445,8 +445,8 @@ impl RenderEngine {
 		let line_start_bytes = unsafe { base_ptr.add(line_start_offset_bytes) };
 		// Get a pointer into our scan-line buffer
 		let mut scan_line_buffer_ptr = scan_line_buffer.pixel_ptr();
-		let palette_ptr = VIDEO_PALETTE.as_ptr() as *const RGBColour;
 		if is_double {
+			let palette_ptr = VIDEO_PALETTE.as_ptr() as *const RGBColour;
 			// Double-width mode.
 			// four RGB pixels (two pairs) per byte
 			for col in 0..line_len_bytes {
@@ -462,146 +462,10 @@ impl RenderEngine {
 				}
 			}
 		} else {
-			// Single-width mode - using the interpolator.
-			//
-			// It's able to shift and mask out the 4 bits we want from the
-			// chunky byte, and add the palette pointer, all in a single clock
-			// cycle.
-			//
-			// two RGB pixels (one pair) per byte eight RGB pixels (four pairs)
-			// per word
-			//
-			// We give the interpolator `palette_ptr` and `chunky_pixels`.
-			//
-			// We want to know the corresponding palette addresses for each of
-			// the eight 4-bit pixels in `chunky_pixels`. For each pixel `p` in
-			// the 32-bit word `pppppppp` we want `palette_ptr.offset(p)`, which
-			// is `palette_ptr + (p * 2)`.
-			//
-			// The interpolator calculates `palette_ptr + ((w >> 3) & 0b11110)`
-			// for our left pixel and `palette_ptr + ((w << 1) & 0b11110)` for
-			// our right pixel so we can pull out two pixels for each
-			// interpolator write.
-			let palette_ptr = VIDEO_PALETTE.as_ptr() as *const RGBColour;
-
-			// Set up the interpolator. This is safe because core1 has its own.
-			let sio = unsafe { &*crate::pac::SIO::ptr() };
-			sio.interp0_base0().write(|w| {
-				unsafe { w.bits(palette_ptr as u32) };
-				w
-			});
-			sio.interp0_base1().write(|w| {
-				unsafe { w.bits(palette_ptr as u32) };
-				w
-			});
-			// lane0 will pull out the palette address of the higher of the two 4-bit chunky pixels in the bottom byte
-			sio.interp0_ctrl_lane0().write(|w| {
+			for col in 0..line_len_bytes {
 				unsafe {
-					w.shift().bits(3);
-					w.mask_lsb().bits(1);
-					w.mask_msb().bits(4);
-				}
-				w
-			});
-			// lane1 will pull out the palette address of the higher of the two 4-bit chunky pixels in the bottom byte
-			sio.interp0_ctrl_lane1().write(|w| {
-				unsafe {
-					w.shift().bits(31);
-					w.mask_lsb().bits(1);
-					w.mask_msb().bits(4);
-				}
-				w
-			});
-			let line_start_words = line_start_bytes as *const u32;
-			let line_len_words = line_len_bytes / 4;
-			for col in 0..line_len_words {
-				unsafe {
-					let mut chunky_pixels = line_start_words.add(col).read();
-
-					// ========================================================
-					// First byte (containing two 4-bit pixels)
-					// ========================================================
-
-					sio.interp0_accum0().write(|w| {
-						w.bits(chunky_pixels);
-						w
-					});
-					sio.interp0_accum1().write(|w| {
-						w.bits(chunky_pixels);
-						w
-					});
-					// now we get the palette address for the left pixel
-					let left_addr = sio.interp0_peek_lane0().read().bits() as usize as *const u16;
-					// and we get the palette address for the right pixel
-					let right_addr = sio.interp0_peek_lane1().read().bits() as usize as *const u16;
-					// read from the palette, pair up, and put in the buffer
-					let pair = RGBPair::from_pixels(RGBColour(*left_addr), RGBColour(*right_addr));
-					scan_line_buffer_ptr.write(pair);
-					scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
-
-					// ========================================================
-					// Second byte (containing two 4-bit pixels)
-					// ========================================================
-
-					chunky_pixels >>= 8;
-					sio.interp0_accum0().write(|w| {
-						w.bits(chunky_pixels);
-						w
-					});
-					sio.interp0_accum1().write(|w| {
-						w.bits(chunky_pixels);
-						w
-					});
-					// now we get the palette address for the left pixel
-					let left_addr = sio.interp0_peek_lane0().read().bits() as usize as *const u16;
-					// and we get the palette address for the right pixel
-					let right_addr = sio.interp0_peek_lane1().read().bits() as usize as *const u16;
-					// read from the palette, pair up, and put in the buffer
-					let pair = RGBPair::from_pixels(RGBColour(*left_addr), RGBColour(*right_addr));
-					scan_line_buffer_ptr.write(pair);
-					scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
-
-					// ========================================================
-					// Third byte (containing two 4-bit pixels)
-					// ========================================================
-
-					chunky_pixels >>= 8;
-					sio.interp0_accum0().write(|w| {
-						w.bits(chunky_pixels);
-						w
-					});
-					sio.interp0_accum1().write(|w| {
-						w.bits(chunky_pixels);
-						w
-					});
-					// now we get the palette address for the left pixel
-					let left_addr = sio.interp0_peek_lane0().read().bits() as usize as *const u16;
-					// and we get the palette address for the right pixel
-					let right_addr = sio.interp0_peek_lane1().read().bits() as usize as *const u16;
-					// read from the palette, pair up, and put in the buffer
-					let pair = RGBPair::from_pixels(RGBColour(*left_addr), RGBColour(*right_addr));
-					scan_line_buffer_ptr.write(pair);
-					scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
-
-					// ========================================================
-					// Fourth byte (containing two 4-bit pixels)
-					// ========================================================
-
-					chunky_pixels >>= 8;
-					sio.interp0_accum0().write(|w| {
-						w.bits(chunky_pixels);
-						w
-					});
-					sio.interp0_accum1().write(|w| {
-						w.bits(chunky_pixels);
-						w
-					});
-					// now we get the palette address for the left pixel
-					let left_addr = sio.interp0_peek_lane0().read().bits() as usize as *const u16;
-					// and we get the palette address for the right pixel
-					let right_addr = sio.interp0_peek_lane1().read().bits() as usize as *const u16;
-					// read from the palette, pair up, and put in the buffer
-					let pair = RGBPair::from_pixels(RGBColour(*left_addr), RGBColour(*right_addr));
+					let pixel_pair = line_start_bytes.add(col).read();
+					let pair = CHUNKY4_COLOUR_LOOKUP.lookup(pixel_pair);
 					scan_line_buffer_ptr.write(pair);
 					scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
 				}
@@ -1143,6 +1007,63 @@ impl TextBuffer {
 
 unsafe impl Sync for TextBuffer {}
 
+/// See [`CHUNKY4_COLOUR_LOOKUP`]
+struct Chunky4ColourLookup {
+	entries: [AtomicU32; 256],
+}
+
+impl Chunky4ColourLookup {
+	/// Create a blank look-up table.
+	const fn blank() -> Chunky4ColourLookup {
+		Chunky4ColourLookup {
+			entries: [const { AtomicU32::new(0) }; 256],
+		}
+	}
+
+	/// Initialise this look-up table from the palette.
+	fn init(&self, palette: &[AtomicU16]) {
+		let palette = &palette[0..16];
+		for (left_idx, left_colour) in palette.iter().enumerate() {
+			for (right_idx, right_colour) in palette.iter().enumerate() {
+				let left_colour = left_colour.load(Ordering::Relaxed);
+				let right_colour = right_colour.load(Ordering::Relaxed);
+				let index = (left_idx << 4) + right_idx;
+				let pair = RGBPair::from_pixels(RGBColour(left_colour), RGBColour(right_colour));
+				self.entries[index].store(pair.0, Ordering::Relaxed);
+			}
+		}
+	}
+
+	/// Update a look-up table entry.
+	///
+	/// The `updated_palette_entry` is an index from 0..16 into the main palette
+	/// (given as `palette`).
+	fn update_index(&self, updated_palette_entry: u8, palette: &[AtomicU16]) {
+		let palette = &palette[0..16];
+		let updated_palette_entry = usize::from(updated_palette_entry);
+		for (left_idx, left_colour) in palette.iter().enumerate() {
+			for (right_idx, right_colour) in palette.iter().enumerate() {
+				if left_idx == updated_palette_entry || right_idx == updated_palette_entry {
+					let left_colour = left_colour.load(Ordering::Relaxed);
+					let right_colour = right_colour.load(Ordering::Relaxed);
+					let index = (left_idx << 4) + right_idx;
+					let pair =
+						RGBPair::from_pixels(RGBColour(left_colour), RGBColour(right_colour));
+					self.entries[index].store(pair.0, Ordering::Relaxed);
+				}
+			}
+		}
+	}
+
+	/// Turn a pair of chunky4 pixels (in a `u8`), into a pair of RGB pixels.
+	#[inline]
+	fn lookup(&self, pixel_pair: u8) -> RGBPair {
+		let index = usize::from(pixel_pair);
+		let raw = self.entries[index].load(Ordering::Relaxed);
+		RGBPair(raw)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Static and Const Data
 // -----------------------------------------------------------------------------
@@ -1176,6 +1097,11 @@ pub static GLYPH_ATTR_ARRAY: TextBuffer = TextBuffer::new();
 ///
 /// Copied at the start of every frame by the code on Core 1.
 pub static VIDEO_MODE: VideoMode = VideoMode::new();
+
+/// Holds 16 palette entries, paired with every other of 16 palette entries.
+///
+/// Allows a fast lookup of an RGB pixel pair given two 4-bpp pixels packed into a byte.
+static CHUNKY4_COLOUR_LOOKUP: Chunky4ColourLookup = Chunky4ColourLookup::blank();
 
 /// Holds the 256-entry palette for indexed colour modes.
 ///
@@ -1963,6 +1889,7 @@ pub fn init(
 
 	// No-one else is looking at this right now.
 	TEXT_COLOUR_LOOKUP.init(&VIDEO_PALETTE);
+	CHUNKY4_COLOUR_LOOKUP.init(&VIDEO_PALETTE);
 
 	unsafe {
 		crate::multicore::launch_core1_with_stack(
@@ -2059,6 +1986,7 @@ pub fn set_palette(index: u8, colour: RGBColour) {
 	// Update the text cache
 	if index <= 15 {
 		TEXT_COLOUR_LOOKUP.update_index(index, &VIDEO_PALETTE);
+		CHUNKY4_COLOUR_LOOKUP.update_index(index, &VIDEO_PALETTE);
 	}
 }
 

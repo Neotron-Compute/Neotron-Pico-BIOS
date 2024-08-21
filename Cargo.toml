@@ -9,7 +9,7 @@ version = "0.7.0"
 
 [dependencies]
 # Useful Cortex-M specific functions (e.g. SysTick)
-cortex-m = "0.7"
+cortex-m = {version = "0.7", features = ["inline-asm"]}
 # The Raspberry Pi RP2040 HAL (so we can turn defmt on)
 rp2040-hal = { version = "0.10", features = [ "defmt", "rt", "critical-section-impl", "rom-func-cache" ] }
 # Cortex-M run-time (or start-up) code
