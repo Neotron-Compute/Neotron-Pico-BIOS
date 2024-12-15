@@ -803,7 +803,7 @@ impl ScanlineTimingBuffer {
 		if vsync {
 			value |= 1 << 1;
 		}
-		value |= (period - 6) << 2;
+		value |= (period - FIXED_CLOCKS_PER_TIMING_PULSE) << 2;
 		value | command << 16
 	}
 }
@@ -1690,6 +1690,9 @@ static PIXEL_DATA_BUFFER_ODD: LineBuffer = LineBuffer::new_odd();
 /// ```
 static TEXT_COLOUR_LOOKUP: TextColourLookup = TextColourLookup::blank();
 
+/// How many fixed clock cycles there are per timing pulse.
+const FIXED_CLOCKS_PER_TIMING_PULSE: u32 = 5;
+
 // -----------------------------------------------------------------------------
 // Functions
 // -----------------------------------------------------------------------------
@@ -1710,28 +1713,41 @@ pub fn init(
 	let (mut pio, sm0, sm1, _sm2, _sm3) = pio.split(resets);
 
 	// This program runs the timing loop. We post timing data (i.e. the length
-	// of each period, along with what the H-Sync and V-Sync pins should do)
-	// and it sets the GPIO pins and busy-waits the appropriate amount of
-	// time. It also takes an extra 'instruction' which we can use to trigger
-	// the appropriate interrupts.
+	// of each period, along with what the H-Sync and V-Sync pins should do) and
+	// it sets the GPIO pins and busy-waits the appropriate amount of time. It
+	// also takes an extra 'instruction' which we can use to trigger the
+	// appropriate interrupts.
+	//
+	// Note that the timing period value should be:
+	//
+	// timing_period = actual_timing_period - FIXED_CLOCKS_PER_TIMING_PULSE
+	//
+	// This is because there are unavoidable clock cycles within the algorithm.
+	// Currently FIXED_CLOCKS_PER_TIMING_PULSE should be set to 5.
 	//
 	// Post <value:32> where value: <clock_cycles:14> <hsync:1> <vsync:1>
 	// <instruction:16>
 	//
 	// The SM will execute the instruction (typically either a NOP or an IRQ),
-	// set the H-Sync and V-Sync pins as desired, then wait the given number
-	// of clock cycles.
+	// set the H-Sync and V-Sync pins as desired, then wait the given number of
+	// clock cycles.
 	//
 	// Note: autopull should be set to 32-bits, OSR is set to shift right.
 	let timing_program = pio_proc::pio_asm!(
 		".wrap_target"
-		// Step 1. Push next 2 bits of OSR into `pins`, to set H-Sync and V-Sync
+		// Step 1. Push next 2 bits of OSR into `pins`, to set H-Sync and V-Sync.
+		//         Takes 1 clock cycle.
 		"out pins, 2"
 		// Step 2. Push last 14 bits of OSR into X for the timing loop.
+		//         Takes 1 clock cycle.
 		"out x, 14"
-		// Step 3. Execute bottom 16-bits of OSR as an instruction. This take two cycles.
+		// Step 3. Execute bottom 16-bits of OSR as an instruction.
+		//         This take two cycles, always.
 		"out exec, 16"
 		// Spin until X is zero
+		// Takes X + 1 clock cycles because the branch is conditioned on the initial value of the register.
+		// i.e. X = 0 => 1 clock cycle (the jmp when x = 0)
+		// i.e. X = 1 => 2 clock cycles (the jmp when x = 1 and again when x = 0)
 		"loop0:"
 			"jmp x-- loop0"
 		".wrap"
