@@ -685,7 +685,7 @@ impl ScanlineTimingBuffer {
 				// Back porch. Adjusted by a few clocks to account for interrupt +
 				// PIO SM start latency.
 				Self::make_timing(
-					(timings.2 * Self::CLOCKS_PER_PIXEL) - 5,
+					(timings.2 * Self::CLOCKS_PER_PIXEL) - 10,
 					hsync.disabled(),
 					vsync.disabled(),
 					RaiseIrq::None,
@@ -694,7 +694,7 @@ impl ScanlineTimingBuffer {
 				// moving. Adjusted to compensate for changes made to previous
 				// period to ensure scan-line remains at correct length.
 				Self::make_timing(
-					(timings.3 * Self::CLOCKS_PER_PIXEL) + 5,
+					(timings.3 * Self::CLOCKS_PER_PIXEL) + 10,
 					hsync.disabled(),
 					vsync.disabled(),
 					RaiseIrq::Irq0,
