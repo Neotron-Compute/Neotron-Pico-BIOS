@@ -8,56 +8,31 @@ name = "neotron-pico-bios"
 version = "0.7.0"
 
 [dependencies]
-# Useful Cortex-M specific functions (e.g. SysTick)
-cortex-m = {version = "0.7", features = ["inline-asm"]}
-# The Raspberry Pi RP2040 HAL (so we can turn defmt on)
-rp2040-hal = { version = "0.10", features = [ "defmt", "rt", "critical-section-impl", "rom-func-cache" ] }
-# Cortex-M run-time (or start-up) code
-cortex-m-rt = "0.7"
-# The BIOS to OS API
-neotron-common-bios = "0.12.0"
-# For the RP2040 bootloader
-rp2040-boot2 = "0.3.0"
-# For hardware abstraction traits
-embedded-hal = "0.2"
-# Gives us formatted PC-side logging
-defmt = "=0.3.2"
-# Sends defmt logs to the SWD debugger
-defmt-rtt = "0.4"
-# Send panics to the debugger
-panic-probe = "0.2"
-# RP2040 PIO assembler
-pio = "0.2.1"
-# Macros for RP2040 PIO assembler
-pio-proc = "0.2"
-# Hardware locks for sharing data with interrupts
-critical-section = "1.0"
-# Commands for talking to a Neotron BMC. The tag is for the repo as a whole, of which the commands crate is a small part.
-neotron-bmc-commands = { version = "0.2.0" }
-# Protocol for talking to a Neotron BMC. The tag is for the repo as a whole, of which the protocol crate is a small part.
-neotron-bmc-protocol = { version = "0.1.0", features = ["defmt"] }
-# Time and frequency related functions
-fugit = "0.3"
-# PS/2 scancode decoding
-pc-keyboard = "0.7.0"
-# Useful queues and other structures
-heapless = "0.7"
-# The Dallas DS1307 RTC driver
-ds1307 = "0.5.0"
-# The Microchip MCP7940x RTC driver
-mcp794xx = "0.3.0"
-# I2C Bus Sharing
-shared-bus = "0.3"
-# Gets us compare-swap atomic operations
-atomic-polyfill = "1.0.2"
-# SD Card driver
-embedded-sdmmc = { version = "0.6", default-features = false, features = [
-    "defmt-log"
-] }
-# CODEC register control
-tlv320aic23 = "0.1.0"
-# Calendar/Date/Time functions and types 
-chrono = { version = "0.4.38", default-features = false }
+chrono = { version = "0.4.38", default-features = false } # Calendar/Date/Time functions and types 
+cortex-m = {version = "0.7", features = ["inline-asm"]} # Useful Cortex-M specific functions (e.g. SysTick)
+cortex-m-rt = "0.7" # Cortex-M run-time (or start-up) code
+critical-section = "1.0" # Hardware locks for sharing data with interrupts
+defmt = "=0.3.2" # Gives us formatted PC-side logging
+defmt-rtt = "0.4" # Sends defmt logs to the SWD debugger
+ds1307 = "0.5.0" # The Dallas DS1307 RTC driver
+embedded-hal = "0.2" # For hardware abstraction traits
+embedded-sdmmc = { version = "0.6", default-features = false, features = [ "defmt-log" ] } # SD Card driver
+fugit = "0.3" # Time and frequency related functions
+grounded = { version = "0.2.0", features = ["critical-section"] }
+heapless = "0.7" # Useful queues and other structures
+mcp794xx = "0.3.0" # The Microchip MCP7940x RTC driver
+neotron-bmc-commands = { version = "0.2.0" } # Commands for talking to a Neotron BMC. The tag is for the repo as a whole, of which the commands crate is a small part.
+neotron-bmc-protocol = { version = "0.1.0", features = ["defmt"] } # Protocol for talking to a Neotron BMC. The tag is for the repo as a whole, of which the protocol crate is a small part.
+neotron-common-bios = "0.12.0" # The BIOS to OS API
+panic-probe = "0.2" # Send panics to the debugger
+pc-keyboard = "0.7.0" # PS/2 scancode decoding
+pio = "0.2.1" # RP2040 PIO assembler
+pio-proc = "0.2" # Macros for RP2040 PIO assembler
+portable-atomic = { version = "1.10.0", features = ["critical-section"] } # Atomic CAS for non-CAS CPUs
+rp2040-boot2 = "0.3.0" # For the RP2040 bootloader
+rp2040-hal = { version = "0.10", features = [ "defmt", "rt", "critical-section-impl", "rom-func-cache" ] } # The Raspberry Pi RP2040 HAL (so we can turn defmt on)
+shared-bus = "0.3" # I2C Bus Sharing
+tlv320aic23 = "0.1.0" # CODEC register control
 
 [build-dependencies]
 neotron-common-bios = "0.12.0"

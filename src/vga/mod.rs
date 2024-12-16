@@ -49,6 +49,7 @@ use core::{
 use defmt::{debug, trace};
 use neotron_common_bios::video::{Attr, GlyphAttr, TextBackgroundColour, TextForegroundColour};
 
+use portable_atomic::AtomicUsize;
 pub use rgb::{RGBColour, RGBPair};
 
 // -----------------------------------------------------------------------------
@@ -178,17 +179,7 @@ impl RenderEngine {
 		let modeinfo = VIDEO_MODE.get_mode();
 		self.current_video_ptr = modeinfo.ptr;
 		self.current_video_mode = modeinfo.mode;
-		match self.current_video_mode.timing() {
-			neotron_common_bios::video::Timing::T640x400 => unsafe {
-				TIMING_BUFFER = TimingBuffer::make_640x400();
-			},
-			neotron_common_bios::video::Timing::T640x480 => unsafe {
-				TIMING_BUFFER = TimingBuffer::make_640x480();
-			},
-			neotron_common_bios::video::Timing::T800x600 => {
-				panic!("Can't do 800x600");
-			}
-		}
+		CURRENT_TIMING_MODE.store(self.current_video_mode.timing() as usize, Ordering::Relaxed);
 		self.num_text_cols = self.current_video_mode.text_width().unwrap_or(0) as usize;
 		self.num_text_rows = self.current_video_mode.text_height().unwrap_or(0) as usize;
 	}
@@ -1629,10 +1620,17 @@ static VIDEO_PALETTE: [AtomicU16; 256] = [
 /// This is to make more efficient use of DMA and FIFO resources.
 const MAX_NUM_PIXEL_PAIRS_PER_LINE: usize = MAX_NUM_PIXELS_PER_LINE / 2;
 
-/// Stores our timing data which we DMA into the timing PIO State Machine.
+/// Stores timing data which we DMA into the timing PIO State Machine.
 ///
-/// Default value must match [`RenderEngine::new`]
-static mut TIMING_BUFFER: TimingBuffer = TimingBuffer::make_640x480();
+/// Must match the `Timing` enum, except we don't support 800x600.
+#[link_section = ".data"]
+static TIMING_BUFFER: [TimingBuffer; 2] =
+	[TimingBuffer::make_640x480(), TimingBuffer::make_640x400()];
+
+/// Tracks which timing mode we use
+///
+/// Ensure this matches the default chosen in [`RenderEngine::new()`]
+static CURRENT_TIMING_MODE: AtomicUsize = AtomicUsize::new(0);
 
 /// Tracks which scan-line will be shown next.
 ///
@@ -1831,15 +1829,16 @@ pub fn init(
 		w.sniff_en().clear_bit();
 		w
 	});
+	let timing_buffer = &TIMING_BUFFER[0];
 	dma.ch(TIMING_DMA_CHAN)
 		.ch_read_addr()
-		.write(|w| unsafe { w.bits(TIMING_BUFFER.visible_line.data.as_ptr() as usize as u32) });
+		.write(|w| unsafe { w.bits(&raw const timing_buffer.visible_line.data as u32) });
 	dma.ch(TIMING_DMA_CHAN)
 		.ch_write_addr()
 		.write(|w| unsafe { w.bits(timing_fifo.fifo_address() as usize as u32) });
 	dma.ch(TIMING_DMA_CHAN)
 		.ch_trans_count()
-		.write(|w| unsafe { w.bits(TIMING_BUFFER.visible_line.data.len() as u32) });
+		.write(|w| unsafe { w.bits(timing_buffer.visible_line.data.len() as u32) });
 
 	// Read from the pixel buffer (even first) and write to the pixel FIFO
 	dma.ch(PIXEL_DMA_CHAN).ch_ctrl_trig().write(|w| {
@@ -1881,26 +1880,18 @@ pub fn init(
 	// cannot be reconfigured at a later time, but they do keep on running
 	// as-is.
 
-	debug!(
-		"Core 1 stack: {:08x}, {} bytes",
-		unsafe { super::CORE1_STACK.as_ptr() },
-		unsafe { super::CORE1_STACK.len() * core::mem::size_of::<usize>() }
-	);
+	let stack_start = addr_of_mut!(super::CORE1_STACK);
+	let stack_end = unsafe { stack_start.add(1) };
+	let stack_start = stack_start as *mut usize;
+	let stack_end = stack_end as *mut usize;
+	let stack_len = unsafe { stack_end.offset_from(stack_start) } as usize;
+	debug!("Core 1 stack @ {:?}", stack_start..stack_end);
 
 	// No-one else is looking at this right now.
 	TEXT_COLOUR_LOOKUP.init(&VIDEO_PALETTE);
 	CHUNKY4_COLOUR_LOOKUP.init(&VIDEO_PALETTE);
 
-	unsafe {
-		crate::multicore::launch_core1_with_stack(
-			core1_main,
-			addr_of_mut!(super::CORE1_STACK) as *mut usize,
-			super::CORE1_STACK.len(),
-			ppb,
-			fifo,
-			psm,
-		);
-	}
+	crate::multicore::launch_core1_with_stack(core1_main, stack_start, stack_len, ppb, fifo, psm);
 
 	debug!("Core 1 running");
 }
@@ -2070,10 +2061,13 @@ unsafe fn PIO0_IRQ_1() {
 	// Clear the interrupt
 	pio.irq().write_with_zero(|w| w.irq().bits(1 << 1));
 
+	// Current mode
+	let current_mode = CURRENT_TIMING_MODE.load(Ordering::Relaxed);
+	let timing_data = &TIMING_BUFFER[current_mode];
 	// This is now the line we are currently playing
 	let current_timing_line = NEXT_SCAN_LINE.load(Ordering::Relaxed);
 	// This is the line we should cue up to play next
-	let next_timing_line = if current_timing_line == TIMING_BUFFER.back_porch_ends_at {
+	let next_timing_line = if current_timing_line == timing_data.back_porch_ends_at {
 		// Wrap around
 		0
 	} else {
@@ -2084,7 +2078,7 @@ unsafe fn PIO0_IRQ_1() {
 	// Are we in the visible portion *right* now? If so, copy some pixels into
 	// the Pixel SM FIFO using DMA. Hopefully the main thread has them ready for
 	// us (though we're playing them, ready or not).
-	if current_timing_line <= TIMING_BUFFER.visible_lines_ends_at {
+	if current_timing_line <= timing_data.visible_lines_ends_at {
 		if (current_timing_line & 1) == 1 {
 			// Load the odd line into the Pixel SM FIFO for immediate playback
 			dma.ch(PIXEL_DMA_CHAN)
@@ -2106,26 +2100,26 @@ unsafe fn PIO0_IRQ_1() {
 
 	// Work out what sort of sync pulses we need on the *next* scan-line, and
 	// also tell the main thread what to draw ready for the *next* scan-line.
-	let buffer = if next_timing_line <= TIMING_BUFFER.visible_lines_ends_at {
+	let buffer = if next_timing_line <= timing_data.visible_lines_ends_at {
 		// A visible line is *up next* so start drawing it *right now*.
 		DRAW_THIS_LINE.store(true, Ordering::Release);
-		&TIMING_BUFFER.visible_line
-	} else if next_timing_line <= TIMING_BUFFER.front_porch_end_at {
+		&raw const timing_data.visible_line
+	} else if next_timing_line <= timing_data.front_porch_end_at {
 		// VGA front porch before VGA sync pulse
-		&TIMING_BUFFER.vblank_porch_buffer
-	} else if next_timing_line <= TIMING_BUFFER.sync_pulse_ends_at {
+		&raw const timing_data.vblank_porch_buffer
+	} else if next_timing_line <= timing_data.sync_pulse_ends_at {
 		// Sync pulse
-		&TIMING_BUFFER.vblank_sync_buffer
+		&raw const timing_data.vblank_sync_buffer
 	} else {
 		// VGA back porch following VGA sync pulse.
-		&TIMING_BUFFER.vblank_porch_buffer
+		&raw const timing_data.vblank_porch_buffer
 	};
 	// Start transferring the next block of timing info into the FIFO, ready for
 	// the next line. We will be back in this interrupt once it starts actually
 	// playing.
 	dma.ch(TIMING_DMA_CHAN)
 		.ch_al3_read_addr_trig()
-		.write(|w| w.bits(buffer as *const _ as usize as u32));
+		.write(|w| w.bits(buffer as u32));
 }
 
 // -----------------------------------------------------------------------------
