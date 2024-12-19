@@ -27,7 +27,7 @@
 // Imports
 // -----------------------------------------------------------------------------
 
-use portable_atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::Hardware;
 
