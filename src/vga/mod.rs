@@ -42,14 +42,14 @@ mod rgb;
 
 use crate::hal::{self, pac::interrupt, pio::PIOExt};
 use core::{
-	cell::{RefCell, UnsafeCell},
+	cell::UnsafeCell,
 	ptr::addr_of_mut,
 	sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering},
 };
 use defmt::{debug, trace};
 use neotron_common_bios::video::{Attr, GlyphAttr, TextBackgroundColour, TextForegroundColour};
 
-use portable_atomic::AtomicUsize;
+use core::sync::atomic::{AtomicU8, AtomicUsize};
 pub use rgb::{RGBColour, RGBPair};
 
 // -----------------------------------------------------------------------------
@@ -71,7 +71,8 @@ pub struct ModeInfo {
 /// Holds a video mode and a pointer, but as an atomic value suitable for use in
 /// a `static`.
 pub struct VideoMode {
-	inner: critical_section::Mutex<RefCell<ModeInfo>>,
+	raw_mode: AtomicU8,
+	raw_ptr: AtomicUsize,
 }
 
 unsafe impl Sync for VideoMode {}
@@ -79,14 +80,14 @@ unsafe impl Sync for VideoMode {}
 impl VideoMode {
 	/// Construct a new [`NewModeWrapper`] with the given mode.
 	const fn new() -> VideoMode {
+		let mode = neotron_common_bios::video::Mode::new(
+			neotron_common_bios::video::Timing::T640x480,
+			neotron_common_bios::video::Format::Text8x16,
+		);
+		let ptr = 0;
 		VideoMode {
-			inner: critical_section::Mutex::new(RefCell::new(ModeInfo {
-				mode: neotron_common_bios::video::Mode::new(
-					neotron_common_bios::video::Timing::T640x480,
-					neotron_common_bios::video::Format::Text8x16,
-				),
-				ptr: core::ptr::null_mut(),
-			})),
+			raw_mode: AtomicU8::new(mode.as_u8()),
+			raw_ptr: AtomicUsize::new(ptr),
 		}
 	}
 
@@ -95,17 +96,19 @@ impl VideoMode {
 		if modeinfo.ptr.is_null() {
 			modeinfo.ptr = GLYPH_ATTR_ARRAY.as_ptr() as *mut u32;
 		}
-		critical_section::with(|cs| {
-			self.inner.replace(cs, modeinfo);
-		})
+		self.raw_mode
+			.store(modeinfo.mode.as_u8(), Ordering::Relaxed);
+		self.raw_ptr.store(modeinfo.ptr as usize, Ordering::Relaxed);
 	}
 
 	/// Get the current video mode.
 	pub fn get_mode(&self) -> ModeInfo {
-		let mut modeinfo = critical_section::with(|cs| {
-			let info = self.inner.borrow_ref(cs);
-			*info
-		});
+		let raw_mode = self.raw_mode.load(Ordering::Relaxed);
+		let raw_ptr = self.raw_ptr.load(Ordering::Relaxed);
+		let mut modeinfo = ModeInfo {
+			mode: unsafe { neotron_common_bios::video::Mode::from_u8(raw_mode) },
+			ptr: raw_ptr as *mut u32,
+		};
 		if modeinfo.ptr.is_null() {
 			modeinfo.ptr = GLYPH_ATTR_ARRAY.as_ptr() as *mut u32;
 		}
@@ -176,10 +179,19 @@ impl RenderEngine {
 		self.frame_count += 1;
 
 		// Update video mode only on first line of video
-		let modeinfo = VIDEO_MODE.get_mode();
-		self.current_video_ptr = modeinfo.ptr;
-		self.current_video_mode = modeinfo.mode;
+		loop {
+			let modeinfo = VIDEO_MODE.get_mode();
+			self.current_video_ptr = modeinfo.ptr;
+			self.current_video_mode = modeinfo.mode;
+			let modeinfo2 = VIDEO_MODE.get_mode();
+			// make sure we get these two as a pair and they can't update one without the other
+			if modeinfo.mode == modeinfo2.mode {
+				break;
+			}
+		}
+		// Tell the ISR to now generate our newly chosen timing
 		CURRENT_TIMING_MODE.store(self.current_video_mode.timing() as usize, Ordering::Relaxed);
+		// set up our text console to be the right size
 		self.num_text_cols = self.current_video_mode.text_width().unwrap_or(0) as usize;
 		self.num_text_rows = self.current_video_mode.text_height().unwrap_or(0) as usize;
 	}
