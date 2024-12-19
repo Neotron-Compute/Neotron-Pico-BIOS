@@ -465,13 +465,40 @@ impl RenderEngine {
 				}
 			}
 		} else {
-			for col in 0..line_len_bytes {
-				unsafe {
-					let pixel_pair = line_start_bytes.add(col).read();
-					let pair = CHUNKY4_COLOUR_LOOKUP.lookup(pixel_pair);
-					scan_line_buffer_ptr.write(pair);
-					scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
-				}
+			// // This code optimises poorly, leaving a load from the literal pool in the middle of the for loop.
+			//
+			// for col in 0..line_len_bytes {
+			// 	unsafe {
+			// 		let pixel_pair = line_start_bytes.add(col).read();
+			// 		let pair = CHUNKY4_COLOUR_LOOKUP.lookup(pixel_pair);
+			// 		scan_line_buffer_ptr.write(pair);
+			// 		scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
+			// 	}
+			// }
+
+			// So I wrote it by hand in assembly instead, saving two clock cycles per loop
+			unsafe {
+				core::arch::asm!(
+					"0:",
+					// load a byte from line_start_bytes
+					"ldrb	{tmp}, [{lsb}]",
+					// multiply it by sizeof(u32)
+					"lsls	{tmp}, {tmp}, #0x2",
+					// load a 32-bit word from CHUNKY4_COLOUR_LOOKUP[lsb]
+					"ldr	{tmp}, [{chunky}, {tmp}]",
+					// store the 32-bit word to the scanline buffer, and increment
+					"stm	{slbp}!, {{ {tmp} }}",
+					// increment the lsb
+					"adds	{lsb}, {lsb}, #0x1",
+					// loop until we're done
+					"cmp	{lsb}, {lsb_max}",
+					"bne	0b",
+					lsb = in(reg) line_start_bytes,
+					lsb_max = in(reg) line_start_bytes.add(line_len_bytes),
+					chunky = in(reg) core::ptr::addr_of!(CHUNKY4_COLOUR_LOOKUP),
+					tmp = in(reg) 0,
+					slbp = in(reg) scan_line_buffer_ptr,
+				);
 			}
 		}
 	}
