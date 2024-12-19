@@ -742,9 +742,13 @@ fn paint_stacks() {
 			*b = CORE0_STACK_PAINT_WORD;
 		}
 
-		info!("Painting Core 1 stack: {:?}", CORE1_STACK.as_ptr_range());
-		for b in CORE1_STACK.iter_mut() {
-			*b = CORE1_STACK_PAINT_WORD;
+		let stack_start = addr_of_mut!(CORE1_STACK) as *mut usize;
+		let stack_end = addr_of_mut!(CORE1_STACK).add(1) as *mut usize;
+		info!("Painting Core 1 stack @ {:?}", stack_start..stack_end);
+		let mut p = stack_start;
+		while p != stack_end {
+			p.write_volatile(CORE1_STACK_PAINT_WORD);
+			p = p.add(1);
 		}
 	}
 }
@@ -764,17 +768,12 @@ fn check_stacks() {
 		static mut __sheap: usize;
 		static mut _stack_start: usize;
 	}
-	let stack_len = unsafe { (addr_of!(_stack_start) as usize) - (addr_of!(__sheap) as usize) };
-	check_stack(
-		unsafe { addr_of!(__sheap) },
-		stack_len,
-		CORE0_STACK_PAINT_WORD,
-	);
-	check_stack(
-		unsafe { CORE1_STACK.as_ptr() },
-		unsafe { CORE1_STACK.len() * core::mem::size_of::<usize>() },
-		CORE1_STACK_PAINT_WORD,
-	);
+	let stack_len = (addr_of!(_stack_start) as usize) - (addr_of!(__sheap) as usize);
+	check_stack(addr_of!(__sheap), stack_len, CORE0_STACK_PAINT_WORD);
+	let stack_start = addr_of!(CORE1_STACK) as *const usize;
+	let stack_end = unsafe { addr_of!(CORE1_STACK).add(1) } as *const usize;
+	let stack_len = unsafe { stack_end.offset_from(stack_start) } as usize;
+	check_stack(stack_start, stack_len, CORE1_STACK_PAINT_WORD);
 }
 
 /// Dummy stack checker that does nothing
@@ -1915,8 +1914,8 @@ pub extern "C" fn memory_get_region(region: u8) -> FfiOption<common::MemoryRegio
 		0 => {
 			// Application Region
 			FfiOption::Some(MemoryRegion {
-				start: unsafe { addr_of!(_ram_os_start) } as *mut u8,
-				length: unsafe { addr_of!(_ram_os_len) } as usize,
+				start: addr_of!(_ram_os_start) as *mut u8,
+				length: addr_of!(_ram_os_len) as usize,
 				kind: common::MemoryKind::Ram.into(),
 			})
 		}
@@ -2663,17 +2662,7 @@ extern "C" fn compare_and_swap_bool(value: &AtomicBool, old_value: bool, new_val
 /// This should only be when the MCP23S17 has driven our IRQ pin low.
 #[interrupt]
 fn IO_IRQ_BANK0() {
-	// The `#[interrupt]` attribute covertly converts this to `&'static mut
-	// Option<IrqPin>`
-	static mut LOCAL_IRQ_PIN: Option<IrqPin> = None;
-
-	// This is one-time lazy initialisation. We steal the variables given to us
-	// via `IRQ_PIN`.
-	if LOCAL_IRQ_PIN.is_none() {
-		let mut lock = IRQ_PIN.lock();
-		*LOCAL_IRQ_PIN = lock.take();
-	}
-	if let Some(pin) = LOCAL_IRQ_PIN {
+	if let Some(pin) = IRQ_PIN.lock().as_mut() {
 		let is_low = pin.is_low().unwrap();
 		INTERRUPT_PENDING.store(is_low, Ordering::Relaxed);
 		pin.clear_interrupt(hal::gpio::Interrupt::EdgeLow);

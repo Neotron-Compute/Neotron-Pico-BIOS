@@ -27,7 +27,7 @@
 // Imports
 // -----------------------------------------------------------------------------
 
-use atomic_polyfill::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::Hardware;
 
@@ -38,7 +38,7 @@ use super::Hardware;
 /// A type that `embedded-sdmmc` can use to talk over our SPI bus.
 pub(crate) struct FakeSpi<'a>(pub(crate) &'a mut Hardware, pub bool);
 
-impl<'a> embedded_hal::blocking::spi::Transfer<u8> for FakeSpi<'a> {
+impl embedded_hal::blocking::spi::Transfer<u8> for FakeSpi<'_> {
 	type Error = core::convert::Infallible;
 
 	fn transfer<'w>(&mut self, words: &'w mut [u8]) -> Result<&'w [u8], Self::Error> {
@@ -68,7 +68,7 @@ impl<'a> embedded_hal::blocking::spi::Transfer<u8> for FakeSpi<'a> {
 	}
 }
 
-impl<'a> embedded_hal::blocking::spi::Write<u8> for FakeSpi<'a> {
+impl embedded_hal::blocking::spi::Write<u8> for FakeSpi<'_> {
 	type Error = core::convert::Infallible;
 
 	fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {

@@ -3,14 +3,14 @@
 //! Unlock the cortex-m mutex, it panics on collision, rather than disabling
 //! interrupts while the lock is held.
 
-use atomic_polyfill::{AtomicBool, Ordering};
+use portable_atomic::{AtomicBool, Ordering};
 
 /// A simple no-std mutex.
 ///
 /// Uses critical-section to hold an atomic bool, for when you don't have
 /// atomic-compare-swap.
 pub struct NeoMutex<T> {
-	locked: atomic_polyfill::AtomicBool,
+	locked: AtomicBool,
 	value: core::cell::UnsafeCell<T>,
 }
 
@@ -48,13 +48,13 @@ pub struct NeoMutexGuard<'a, T> {
 	parent: &'a NeoMutex<T>,
 }
 
-impl<'a, T> Drop for NeoMutexGuard<'a, T> {
+impl<T> Drop for NeoMutexGuard<'_, T> {
 	fn drop(&mut self) {
 		self.parent.locked.store(false, Ordering::Release);
 	}
 }
 
-impl<'a, T> core::ops::Deref for NeoMutexGuard<'a, T> {
+impl<T> core::ops::Deref for NeoMutexGuard<'_, T> {
 	type Target = T;
 
 	fn deref(&self) -> &Self::Target {
@@ -62,7 +62,7 @@ impl<'a, T> core::ops::Deref for NeoMutexGuard<'a, T> {
 	}
 }
 
-impl<'a, T> core::ops::DerefMut for NeoMutexGuard<'a, T> {
+impl<T> core::ops::DerefMut for NeoMutexGuard<'_, T> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		unsafe { &mut *self.parent.value.get() }
 	}

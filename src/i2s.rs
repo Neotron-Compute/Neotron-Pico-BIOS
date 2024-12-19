@@ -1,15 +1,21 @@
 //! Code to set up a PIO to generate I2S Audio
 
+use core::cell::UnsafeCell;
+
+use grounded::uninit::GroundedCell;
+
 use crate::hal::{pac::interrupt, prelude::*};
 
 /// Holds the objects we need to read from the RAM fifo and write to the PIO hardware FIFO.
-static mut PLAYBACK_TO_PIO: Option<PlaybackToPio> = None;
+static PLAYBACK_TO_PIO: GroundedCell<PlaybackToPio> = GroundedCell::uninit();
 
 /// The reader end of the RAM FIFO and the writer end of the PIO hardware FIFO.
 struct PlaybackToPio {
 	pio_fifo: crate::hal::pio::Tx<(crate::pac::PIO1, crate::hal::pio::SM0)>,
 	ram_fifo: heapless::spsc::Consumer<'static, u32, 1024>,
 }
+
+unsafe impl Sync for PlaybackToPio {}
 
 /// Used to 'play' samples by writing them to the RAM FIFO.
 ///
@@ -181,17 +187,21 @@ pub fn init(pio: super::pac::PIO1, resets: &mut super::pac::RESETS) -> Player {
 
 	let _running_sam = samples_sm.start();
 
-	static mut SAMPLE_QUEUE: heapless::spsc::Queue<u32, 1024> = heapless::spsc::Queue::new();
+	static SAMPLE_QUEUE: QueueWrapper = QueueWrapper::new();
+	// # Safety
+	// Interrupts are disabled at this point, so we can split the queue.
 	let (q_producer, q_consumer) = unsafe { SAMPLE_QUEUE.split() };
 
 	pio_tx_fifo.enable_tx_not_full_interrupt(crate::hal::pio::PioIRQ::Irq0);
 
-	critical_section::with(|_| unsafe {
-		PLAYBACK_TO_PIO.replace(PlaybackToPio {
+	// # Safety
+	// the PIO interrupt is currently disabled, so this is OK
+	unsafe {
+		PLAYBACK_TO_PIO.get().write(PlaybackToPio {
 			pio_fifo: pio_tx_fifo,
 			ram_fifo: q_consumer,
 		});
-	});
+	}
 
 	unsafe {
 		cortex_m::peripheral::NVIC::unmask(crate::pac::Interrupt::PIO1_IRQ_0);
@@ -199,6 +209,28 @@ pub fn init(pio: super::pac::PIO1, resets: &mut super::pac::RESETS) -> Player {
 
 	Player { fifo: q_producer }
 }
+
+struct QueueWrapper(UnsafeCell<heapless::spsc::Queue<u32, 1024>>);
+
+impl QueueWrapper {
+	const fn new() -> QueueWrapper {
+		QueueWrapper(UnsafeCell::new(heapless::spsc::Queue::new()))
+	}
+
+	/// Only call this when interrupts are off and the queue isn't being used
+	unsafe fn split(
+		&self,
+	) -> (
+		heapless::spsc::Producer<'_, u32, 1024>,
+		heapless::spsc::Consumer<'_, u32, 1024>,
+	) {
+		let ptr = self.0.get();
+		let queue_ref = unsafe { &mut *ptr };
+		queue_ref.split()
+	}
+}
+
+unsafe impl Sync for QueueWrapper {}
 
 /// Called when the PIO1 IRQ fires.
 ///
@@ -209,9 +241,7 @@ fn PIO1_IRQ_0() {
 	// This is the only function (apart from `init`) which accesses this
 	// variable, and `init()` is sure to disable interrupts until the global is
 	// set up, so this is safe.
-	let Some(fifo) = (unsafe { PLAYBACK_TO_PIO.as_mut() }) else {
-		return;
-	};
+	let fifo = unsafe { &mut *PLAYBACK_TO_PIO.get() };
 	// Read from fifo.ram_fifo
 	if let Some(sample) = fifo.ram_fifo.dequeue() {
 		// .. and write to fifo.pio_fifo
