@@ -257,9 +257,13 @@ impl RenderEngine {
 		let line_start = unsafe { base_ptr.add(offset) };
 		// Get a pointer into our scan-line buffer
 		let mut scan_line_buffer_ptr = scan_line_buffer.pixel_ptr();
-		let black_pixel = RGBColour(VIDEO_PALETTE[0].load(Ordering::Relaxed));
-		let white_pixel = RGBColour(VIDEO_PALETTE[1].load(Ordering::Relaxed));
 		if is_double {
+			let white_pixel = RGBColour(
+				VIDEO_PALETTE[TextForegroundColour::White as usize].load(Ordering::Relaxed),
+			);
+			let black_pixel = RGBColour(
+				VIDEO_PALETTE[TextForegroundColour::Black as usize].load(Ordering::Relaxed),
+			);
 			// double-width mode.
 			// sixteen RGB pixels (eight pairs) per byte
 			let white_pair = RGBPair::from_pixels(white_pixel, white_pixel);
