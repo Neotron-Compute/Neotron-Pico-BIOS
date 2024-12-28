@@ -1168,14 +1168,6 @@ impl Chunky4ColourLookup {
 			}
 		}
 	}
-
-	/// Turn a pair of chunky4 pixels (in a `u8`), into a pair of RGB pixels.
-	#[inline]
-	fn lookup(&self, pixel_pair: u8) -> RGBPair {
-		let index = usize::from(pixel_pair);
-		let raw = self.entries[index].load(Ordering::Relaxed);
-		RGBPair(raw)
-	}
 }
 
 // -----------------------------------------------------------------------------
