@@ -232,6 +232,10 @@ impl RenderEngine {
 				// Bitmap with 4 bits per pixel
 				self.draw_next_line_chunky4(scan_line_buffer, current_line_num);
 			}
+			neotron_common_bios::video::Format::Chunky8 => {
+				// Bitmap with 8 bits per pixel
+				self.draw_next_line_chunky8(scan_line_buffer, current_line_num);
+			}
 			_ => {
 				// Draw nothing
 			}
@@ -477,6 +481,7 @@ impl RenderEngine {
 			// }
 
 			// So I wrote it by hand in assembly instead, saving two clock cycles per loop
+			// We have 320x8 input and must produce 320x32 output
 			unsafe {
 				core::arch::asm!(
 					"0:",
@@ -499,6 +504,81 @@ impl RenderEngine {
 					tmp = in(reg) 0,
 					slbp = in(reg) scan_line_buffer_ptr,
 				);
+			}
+		}
+	}
+
+	/// Draw a line of 8-bpp bitmap as pixels.
+	///
+	/// Writes into the relevant pixel buffer (either [`PIXEL_DATA_BUFFER_ODD`]
+	/// or [`PIXEL_DATA_BUFFER_EVEN`]) assuming the framebuffer is a bitmap.
+	///
+	/// The `current_line_num` goes from `0..NUM_LINES`.
+	#[link_section = ".data"]
+	pub fn draw_next_line_chunky8(&mut self, scan_line_buffer: &LineBuffer, current_line_num: u16) {
+		let is_double = self.current_video_mode.is_horiz_2x();
+		let base_ptr = self.current_video_ptr as *const u8;
+		let line_len_bytes = self.current_video_mode.line_size_bytes();
+		let line_start_offset_bytes = usize::from(current_line_num) * line_len_bytes;
+		let line_start_bytes = unsafe { base_ptr.add(line_start_offset_bytes) };
+		// Get a pointer into our scan-line buffer
+		let mut scan_line_buffer_ptr = scan_line_buffer.pixel_ptr();
+		let palette_ptr = VIDEO_PALETTE.as_ptr() as *const RGBColour;
+		if is_double {
+			// Double-width mode.
+			// two RGB pixels (one pair) per byte
+
+			// This code optimises poorly
+			// for col in 0..line_len_bytes {
+			// 	unsafe {
+			// 		let chunky_pixel = line_start_bytes.add(col).read() as usize;
+			// 		let rgb = palette_ptr.add(chunky_pixel).read();
+			// 		scan_line_buffer_ptr.write(RGBPair::from_pixels(rgb, rgb));
+			// 		scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
+			// 	}
+			// }
+
+			// So I wrote it by hand in assembly instead, saving two clock cycles per loop
+			// We have 320x8 input and must produce 320x32 output
+			unsafe {
+				core::arch::asm!(
+					"0:",
+					// load a byte from line_start_bytes
+					"ldrb	{tmp}, [{lsb}]",
+					// multiply it by sizeof(u16)
+					"lsls	{tmp}, {tmp}, #0x1",
+					// load a 32-bit word from the palette
+					"ldrh	{tmp}, [{palette}, {tmp}]",
+					// double it up
+					"lsls   {tmp2}, {tmp}, #16",
+					"adds   {tmp}, {tmp}, {tmp2}",
+					// store the 32-bit word to the scanline buffer, and increment
+					"stm	{slbp}!, {{ {tmp} }}",
+					// increment the lsb
+					"adds	{lsb}, {lsb}, #0x1",
+					// loop until we're done
+					"cmp	{lsb}, {lsb_max}",
+					"bne	0b",
+					lsb = in(reg) line_start_bytes,
+					lsb_max = in(reg) line_start_bytes.add(line_len_bytes),
+					palette = in(reg) core::ptr::addr_of!(VIDEO_PALETTE),
+					tmp = in(reg) 0,
+					tmp2 = in(reg) 1,
+					slbp = in(reg) scan_line_buffer_ptr,
+				);
+			}
+		} else {
+			// Single-width mode.
+			// one RGB pixel per byte
+			for col in 0..line_len_bytes / 2 {
+				unsafe {
+					let chunky_pixel_left = line_start_bytes.add(col * 2).read() as usize;
+					let rgb_left = palette_ptr.add(chunky_pixel_left).read();
+					let chunky_pixel_right = line_start_bytes.add((col * 2) + 1).read() as usize;
+					let rgb_right = palette_ptr.add(chunky_pixel_right).read();
+					scan_line_buffer_ptr.write(RGBPair::from_pixels(rgb_left, rgb_right));
+					scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
+				}
 			}
 		}
 	}
@@ -2010,6 +2090,12 @@ pub fn test_video_mode(mode: neotron_common_bios::video::Mode) -> bool {
 				| neotron_common_bios::video::Format::Chunky4,
 			true,
 			false,
+		) | (
+			neotron_common_bios::video::Timing::T640x480
+				| neotron_common_bios::video::Timing::T640x400,
+			neotron_common_bios::video::Format::Chunky8,
+			true,
+			false
 		)
 	)
 }
