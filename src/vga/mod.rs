@@ -232,6 +232,10 @@ impl RenderEngine {
 				// Bitmap with 4 bits per pixel
 				self.draw_next_line_chunky4(scan_line_buffer, current_line_num);
 			}
+			neotron_common_bios::video::Format::Chunky8 => {
+				// Bitmap with 8 bits per pixel
+				self.draw_next_line_chunky8(scan_line_buffer, current_line_num);
+			}
 			_ => {
 				// Draw nothing
 			}
@@ -253,9 +257,13 @@ impl RenderEngine {
 		let line_start = unsafe { base_ptr.add(offset) };
 		// Get a pointer into our scan-line buffer
 		let mut scan_line_buffer_ptr = scan_line_buffer.pixel_ptr();
-		let black_pixel = RGBColour(VIDEO_PALETTE[0].load(Ordering::Relaxed));
-		let white_pixel = RGBColour(VIDEO_PALETTE[1].load(Ordering::Relaxed));
 		if is_double {
+			let white_pixel = RGBColour(
+				VIDEO_PALETTE[TextForegroundColour::White as usize].load(Ordering::Relaxed),
+			);
+			let black_pixel = RGBColour(
+				VIDEO_PALETTE[TextForegroundColour::Black as usize].load(Ordering::Relaxed),
+			);
 			// double-width mode.
 			// sixteen RGB pixels (eight pairs) per byte
 			let white_pair = RGBPair::from_pixels(white_pixel, white_pixel);
@@ -465,11 +473,114 @@ impl RenderEngine {
 				}
 			}
 		} else {
-			for col in 0..line_len_bytes {
+			// // This code optimises poorly, leaving a load from the literal pool in the middle of the for loop.
+			//
+			// for col in 0..line_len_bytes {
+			// 	unsafe {
+			// 		let pixel_pair = line_start_bytes.add(col).read();
+			// 		let pair = CHUNKY4_COLOUR_LOOKUP.lookup(pixel_pair);
+			// 		scan_line_buffer_ptr.write(pair);
+			// 		scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
+			// 	}
+			// }
+
+			// So I wrote it by hand in assembly instead, saving two clock cycles per loop
+			// We have 640x4 (320x8) input and must produce 320x32 output
+			unsafe {
+				core::arch::asm!(
+					"0:",
+					// load a byte from line_start_bytes
+					"ldrb	{tmp}, [{lsb}]",
+					// multiply it by sizeof(u32)
+					"lsls	{tmp}, {tmp}, #0x2",
+					// load a 32-bit RGB pair from CHUNKY4_COLOUR_LOOKUP
+					"ldr	{tmp}, [{chunky}, {tmp}]",
+					// store the 32-bit RGB pair to the scanline buffer, and increment
+					"stm	{slbp}!, {{ {tmp} }}",
+					// increment the pointer to the start of the line
+					"adds	{lsb}, {lsb}, #0x1",
+					// loop until we're done
+					"cmp	{lsb}, {lsb_max}",
+					"bne	0b",
+					lsb = in(reg) line_start_bytes,
+					lsb_max = in(reg) line_start_bytes.add(line_len_bytes),
+					chunky = in(reg) core::ptr::addr_of!(CHUNKY4_COLOUR_LOOKUP),
+					tmp = in(reg) 0,
+					slbp = in(reg) scan_line_buffer_ptr,
+				);
+			}
+		}
+	}
+
+	/// Draw a line of 8-bpp bitmap as pixels.
+	///
+	/// Writes into the relevant pixel buffer (either [`PIXEL_DATA_BUFFER_ODD`]
+	/// or [`PIXEL_DATA_BUFFER_EVEN`]) assuming the framebuffer is a bitmap.
+	///
+	/// The `current_line_num` goes from `0..NUM_LINES`.
+	#[link_section = ".data"]
+	pub fn draw_next_line_chunky8(&mut self, scan_line_buffer: &LineBuffer, current_line_num: u16) {
+		let is_double = self.current_video_mode.is_horiz_2x();
+		let base_ptr = self.current_video_ptr as *const u8;
+		let line_len_bytes = self.current_video_mode.line_size_bytes();
+		let line_start_offset_bytes = usize::from(current_line_num) * line_len_bytes;
+		let line_start_bytes = unsafe { base_ptr.add(line_start_offset_bytes) };
+		// Get a pointer into our scan-line buffer
+		let mut scan_line_buffer_ptr = scan_line_buffer.pixel_ptr();
+		let palette_ptr = VIDEO_PALETTE.as_ptr() as *const RGBColour;
+		if is_double {
+			// Double-width mode.
+			// two RGB pixels (one pair) per byte
+
+			// This code optimises poorly
+			// for col in 0..line_len_bytes {
+			// 	unsafe {
+			// 		let chunky_pixel = line_start_bytes.add(col).read() as usize;
+			// 		let rgb = palette_ptr.add(chunky_pixel).read();
+			// 		scan_line_buffer_ptr.write(RGBPair::from_pixels(rgb, rgb));
+			// 		scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
+			// 	}
+			// }
+
+			// So I wrote it by hand in assembly instead, saving two clock cycles per loop
+			// We have 320x8 input and must produce 320x32 output
+			unsafe {
+				core::arch::asm!(
+					"0:",
+					// load a byte from line_start_bytes
+					"ldrb	{tmp}, [{lsb}]",
+					// multiply it by sizeof(u16)
+					"lsls	{tmp}, {tmp}, #0x1",
+					// load a single 16-bit RGB value from the palette
+					"ldrh	{tmp}, [{palette}, {tmp}]",
+					// double it up to make a 32-bit RGB pair containing two identical pixels
+					"lsls   {tmp2}, {tmp}, #16",
+					"adds   {tmp}, {tmp}, {tmp2}",
+					// store the 32-bit RGB pair to the scanline buffer, and increment
+					"stm	{slbp}!, {{ {tmp} }}",
+					// increment the pointer to the start of the line
+					"adds	{lsb}, {lsb}, #0x1",
+					// loop until we're done
+					"cmp	{lsb}, {lsb_max}",
+					"bne	0b",
+					lsb = in(reg) line_start_bytes,
+					lsb_max = in(reg) line_start_bytes.add(line_len_bytes),
+					palette = in(reg) core::ptr::addr_of!(VIDEO_PALETTE),
+					tmp = in(reg) 0,
+					tmp2 = in(reg) 1,
+					slbp = in(reg) scan_line_buffer_ptr,
+				);
+			}
+		} else {
+			// Single-width mode. This won't run fast enough on an RP2040, but no supported mode uses it.
+			// one RGB pixel per byte
+			for col in 0..line_len_bytes / 2 {
 				unsafe {
-					let pixel_pair = line_start_bytes.add(col).read();
-					let pair = CHUNKY4_COLOUR_LOOKUP.lookup(pixel_pair);
-					scan_line_buffer_ptr.write(pair);
+					let chunky_pixel_left = line_start_bytes.add(col * 2).read() as usize;
+					let rgb_left = palette_ptr.add(chunky_pixel_left).read();
+					let chunky_pixel_right = line_start_bytes.add((col * 2) + 1).read() as usize;
+					let rgb_right = palette_ptr.add(chunky_pixel_right).read();
+					scan_line_buffer_ptr.write(RGBPair::from_pixels(rgb_left, rgb_right));
 					scan_line_buffer_ptr = scan_line_buffer_ptr.add(1);
 				}
 			}
@@ -1056,14 +1167,6 @@ impl Chunky4ColourLookup {
 				}
 			}
 		}
-	}
-
-	/// Turn a pair of chunky4 pixels (in a `u8`), into a pair of RGB pixels.
-	#[inline]
-	fn lookup(&self, pixel_pair: u8) -> RGBPair {
-		let index = usize::from(pixel_pair);
-		let raw = self.entries[index].load(Ordering::Relaxed);
-		RGBPair(raw)
 	}
 }
 
@@ -1983,6 +2086,12 @@ pub fn test_video_mode(mode: neotron_common_bios::video::Mode) -> bool {
 				| neotron_common_bios::video::Format::Chunky4,
 			true,
 			false,
+		) | (
+			neotron_common_bios::video::Timing::T640x480
+				| neotron_common_bios::video::Timing::T640x400,
+			neotron_common_bios::video::Format::Chunky8,
+			true,
+			false
 		)
 	)
 }
