@@ -485,7 +485,7 @@ impl RenderEngine {
 			// }
 
 			// So I wrote it by hand in assembly instead, saving two clock cycles per loop
-			// We have 320x8 input and must produce 320x32 output
+			// We have 640x4 (320x8) input and must produce 320x32 output
 			unsafe {
 				core::arch::asm!(
 					"0:",
@@ -493,11 +493,11 @@ impl RenderEngine {
 					"ldrb	{tmp}, [{lsb}]",
 					// multiply it by sizeof(u32)
 					"lsls	{tmp}, {tmp}, #0x2",
-					// load a 32-bit word from CHUNKY4_COLOUR_LOOKUP[lsb]
+					// load a 32-bit RGB pair from CHUNKY4_COLOUR_LOOKUP
 					"ldr	{tmp}, [{chunky}, {tmp}]",
-					// store the 32-bit word to the scanline buffer, and increment
+					// store the 32-bit RGB pair to the scanline buffer, and increment
 					"stm	{slbp}!, {{ {tmp} }}",
-					// increment the lsb
+					// increment the pointer to the start of the line
 					"adds	{lsb}, {lsb}, #0x1",
 					// loop until we're done
 					"cmp	{lsb}, {lsb_max}",
@@ -551,14 +551,14 @@ impl RenderEngine {
 					"ldrb	{tmp}, [{lsb}]",
 					// multiply it by sizeof(u16)
 					"lsls	{tmp}, {tmp}, #0x1",
-					// load a 32-bit word from the palette
+					// load a single 16-bit RGB value from the palette
 					"ldrh	{tmp}, [{palette}, {tmp}]",
-					// double it up
+					// double it up to make a 32-bit RGB pair containing two identical pixels
 					"lsls   {tmp2}, {tmp}, #16",
 					"adds   {tmp}, {tmp}, {tmp2}",
-					// store the 32-bit word to the scanline buffer, and increment
+					// store the 32-bit RGB pair to the scanline buffer, and increment
 					"stm	{slbp}!, {{ {tmp} }}",
-					// increment the lsb
+					// increment the pointer to the start of the line
 					"adds	{lsb}, {lsb}, #0x1",
 					// loop until we're done
 					"cmp	{lsb}, {lsb_max}",
@@ -572,7 +572,7 @@ impl RenderEngine {
 				);
 			}
 		} else {
-			// Single-width mode.
+			// Single-width mode. This won't run fast enough on an RP2040, but no supported mode uses it.
 			// one RGB pixel per byte
 			for col in 0..line_len_bytes / 2 {
 				unsafe {
