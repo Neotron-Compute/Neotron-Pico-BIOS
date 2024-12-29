@@ -191,6 +191,7 @@ impl RenderEngine {
 		}
 		// Tell the ISR to now generate our newly chosen timing
 		CURRENT_TIMING_MODE.store(self.current_video_mode.timing() as usize, Ordering::Relaxed);
+		DOUBLE_SCAN_MODE.store(self.current_video_mode.is_vert_2x(), Ordering::Relaxed);
 		// set up our text console to be the right size
 		self.num_text_cols = self.current_video_mode.text_width().unwrap_or(0) as usize;
 		self.num_text_rows = self.current_video_mode.text_height().unwrap_or(0) as usize;
@@ -206,8 +207,10 @@ impl RenderEngine {
 		// It's safe to write to this buffer because it's the the other one that
 		// is currently being DMA'd out to the Pixel SM.
 		let scan_line_buffer = if (current_line_num & 1) == 0 {
+			defmt::trace!("drawing {=u16} into even", current_line_num);
 			&PIXEL_DATA_BUFFER_EVEN
 		} else {
+			defmt::trace!("drawing {=u16} into odd", current_line_num);
 			&PIXEL_DATA_BUFFER_ODD
 		};
 
@@ -1747,13 +1750,19 @@ static TIMING_BUFFER: [TimingBuffer; 2] =
 /// Ensure this matches the default chosen in [`RenderEngine::new()`]
 static CURRENT_TIMING_MODE: AtomicUsize = AtomicUsize::new(0);
 
-/// Tracks which scan-line will be shown next.
+/// Tracks which scan-line will be shown next, therefore which one you should be drawing right now.
 ///
 /// This is for timing purposes, therefore it goes from
 /// `0..TIMING_BUFFER.back_porch_ends_at`.
 ///
 /// Set by the PIO IRQ.
 static NEXT_SCAN_LINE: AtomicU16 = AtomicU16::new(0);
+
+/// Are we in double-scan mode?
+///
+/// If we are, each scan-line buffer is played out twice, and you should divide
+/// `NEXT_SCAN_LINE` by 2 before rendering a line.
+static DOUBLE_SCAN_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Indicates that we should draw the current scan-line given by [`NEXT_SCAN_LINE`].
 ///
@@ -1943,9 +1952,7 @@ pub fn init(
 
 	pio.irq1().enable_sm_interrupt(1);
 
-	// Read from the timing buffer and write to the timing FIFO. We get an
-	// IRQ when the transfer is complete (i.e. when line has been fully
-	// loaded).
+	// Read from the timing buffer and write to the timing FIFO.
 	dma.ch(TIMING_DMA_CHAN).ch_ctrl_trig().write(|w| {
 		w.data_size().size_word();
 		w.incr_read().set_bit();
@@ -2061,42 +2068,40 @@ pub fn mode_needs_vram(mode: neotron_common_bios::video::Mode) -> bool {
 
 /// Check the given video mode is allowable
 pub fn test_video_mode(mode: neotron_common_bios::video::Mode) -> bool {
-	matches!(
-		(
-			mode.timing(),
-			mode.format(),
-			mode.is_horiz_2x(),
-			mode.is_vert_2x(),
-		),
-		(
-			neotron_common_bios::video::Timing::T640x480
-				| neotron_common_bios::video::Timing::T640x400,
-			neotron_common_bios::video::Format::Text8x16
-				| neotron_common_bios::video::Format::Text8x8
-				| neotron_common_bios::video::Format::Chunky1
-				| neotron_common_bios::video::Format::Chunky2
-				| neotron_common_bios::video::Format::Chunky4,
-			false,
-			false,
-		) | (
-			neotron_common_bios::video::Timing::T640x480
-				| neotron_common_bios::video::Timing::T640x400,
-			neotron_common_bios::video::Format::Chunky1
-				| neotron_common_bios::video::Format::Chunky2
-				| neotron_common_bios::video::Format::Chunky4,
-			true,
-			false,
-		) | (
-			neotron_common_bios::video::Timing::T640x480
-				| neotron_common_bios::video::Timing::T640x400,
-			neotron_common_bios::video::Format::Chunky8,
-			true,
-			false
+	if !mode.is_horiz_2x() {
+		// in the 640-px modes we can only do up to 4-bpp
+		matches!(
+			(mode.timing(), mode.format()),
+			(
+				neotron_common_bios::video::Timing::T640x480
+					| neotron_common_bios::video::Timing::T640x400,
+				neotron_common_bios::video::Format::Text8x16
+					| neotron_common_bios::video::Format::Text8x8
+					| neotron_common_bios::video::Format::Chunky1
+					| neotron_common_bios::video::Format::Chunky2
+					| neotron_common_bios::video::Format::Chunky4,
+			)
 		)
-	)
+	} else {
+		// in the 320-px modes we can also do 8-bpp
+		matches!(
+			(mode.timing(), mode.format()),
+			(
+				neotron_common_bios::video::Timing::T640x480
+					| neotron_common_bios::video::Timing::T640x400,
+				neotron_common_bios::video::Format::Chunky1
+					| neotron_common_bios::video::Format::Chunky2
+					| neotron_common_bios::video::Format::Chunky4
+					| neotron_common_bios::video::Format::Chunky8,
+			)
+		)
+	}
 }
 
 /// Get the current scan line.
+///
+/// Note that these are timing scan lines, not visible scan lines (so we count
+/// to 480 even in a 240 line mode).
 pub fn get_scan_line() -> u16 {
 	NEXT_SCAN_LINE.load(Ordering::Relaxed)
 }
@@ -2133,7 +2138,7 @@ pub fn get_palette(index: u8) -> RGBColour {
 /// Only run this function on Core 1.
 #[link_section = ".data"]
 unsafe extern "C" fn core1_main() -> u32 {
-	let mut video = RenderEngine::new();
+	let mut render_engine = RenderEngine::new();
 
 	// The LED pin was called `_pico_led` over in the `Hardware::build`
 	// function that ran on Core 1. Rather than try and move the pin over to
@@ -2160,10 +2165,15 @@ unsafe extern "C" fn core1_main() -> u32 {
 		DRAW_THIS_LINE.store(false, Ordering::Relaxed);
 
 		// The one we draw *now* is the one that is *shown* next
-		let this_line = NEXT_SCAN_LINE.load(Ordering::Relaxed);
+		let mut this_line = NEXT_SCAN_LINE.load(Ordering::Relaxed);
 
 		if this_line == 0 {
-			video.frame_start();
+			render_engine.frame_start();
+		}
+
+		if render_engine.current_video_mode.is_vert_2x() {
+			// in double scan mode we only draw ever other line
+			this_line >>= 1;
 		}
 
 		unsafe {
@@ -2173,7 +2183,7 @@ unsafe extern "C" fn core1_main() -> u32 {
 
 		// This function currently consumes about 70% CPU (or rather, 90% CPU
 		// on each of visible lines, and 0% CPU on the other lines)
-		video.draw_next_line(this_line);
+		render_engine.draw_next_line(this_line);
 
 		unsafe {
 			// Turn off LED
@@ -2182,9 +2192,16 @@ unsafe extern "C" fn core1_main() -> u32 {
 	}
 }
 
-/// This function is called whenever the Timing PIO starts a scan-line.
+/// This function is called whenever the Timing State Machine starts a
+/// scan-line.
 ///
-/// Timing wise, we should be at the start of the back-porch.
+/// Timing wise, we should be at the start of the front-porch (i.e. just after
+/// the visible portion finishes). This is because it is the 'back porch' part
+/// of the timing data sent to the Timing State Machine that contains a "Raise
+/// IRQ 1" instruction, and that IRQ triggers this function.
+///
+/// The visible section contains a "Raise IRQ 0" instruction, but that only
+/// triggers the Pixel State Machine and not a CPU interrupt.
 ///
 /// # Safety
 ///
@@ -2198,10 +2215,15 @@ unsafe fn PIO0_IRQ_1() {
 	// Clear the interrupt
 	pio.irq().write_with_zero(|w| w.irq().bits(1 << 1));
 
-	// Current mode
-	let current_mode = CURRENT_TIMING_MODE.load(Ordering::Relaxed);
-	let timing_data = &TIMING_BUFFER[current_mode];
-	// This is now the line we are currently playing
+	// Current timing mode
+	let current_mode_nr = CURRENT_TIMING_MODE.load(Ordering::Relaxed);
+	let timing_data = &TIMING_BUFFER[current_mode_nr];
+	// Are we double scanning?
+	let double_scan = DOUBLE_SCAN_MODE.load(Ordering::Relaxed);
+
+	// This is now the line we are currently in the middle of playing;
+	// timing-wise anyway - the pixels will be along in moment once we've told
+	// the DMA which pixels to play.
 	let current_timing_line = NEXT_SCAN_LINE.load(Ordering::Relaxed);
 	// This is the line we should cue up to play next
 	let next_timing_line = if current_timing_line == timing_data.back_porch_ends_at {
@@ -2212,24 +2234,56 @@ unsafe fn PIO0_IRQ_1() {
 		current_timing_line + 1
 	};
 
+	let (mask, draw_now) = if double_scan {
+		// Only tell the main loop to re-draw on odd lines (i.e. 1, 3, 5, etc)
+		// because on even lines (0, 2, 4, ...) we still need to draw the line
+		// again.
+
+		// The mask is 2, so we have:
+		//
+		// 0 = (play even, draw = true)
+		// 1 = (play even, draw = false)
+		// 2 = (play odd, draw = true)
+		// 3 = (play odd, draw = false)
+		// 4 = (play even, draw = true)
+		// etc
+		(2, (next_timing_line & 1) == 0)
+	} else {
+		// tell the main loop to draw, always
+		//
+		// The mask is 1, so we have:
+		//
+		// 0 = (play even, draw = true)
+		// 1 = (play odd, draw = true)
+		// 2 = (play even, draw = true)
+		// 3 = (play odd, draw = true)
+		// 4 = (play even, draw = true)
+		// etc
+		(1, true)
+	};
+
 	// Are we in the visible portion *right* now? If so, copy some pixels into
 	// the Pixel SM FIFO using DMA. Hopefully the main thread has them ready for
 	// us (though we're playing them, ready or not).
 	if current_timing_line <= timing_data.visible_lines_ends_at {
-		if (current_timing_line & 1) == 1 {
+		if (current_timing_line & mask) != 0 {
 			// Load the odd line into the Pixel SM FIFO for immediate playback
 			dma.ch(PIXEL_DMA_CHAN)
 				.ch_al3_read_addr_trig()
-				.write(|w| w.bits(PIXEL_DATA_BUFFER_ODD.as_ptr()))
+				.write(|w| w.bits(PIXEL_DATA_BUFFER_ODD.as_ptr()));
+			defmt::trace!("line {=u16} playing odd buffer", current_timing_line);
 		} else {
 			// Load the even line into the Pixel SM FIFO for immediate playback
 			dma.ch(PIXEL_DMA_CHAN)
 				.ch_al3_read_addr_trig()
-				.write(|w| w.bits(PIXEL_DATA_BUFFER_EVEN.as_ptr()))
+				.write(|w| w.bits(PIXEL_DATA_BUFFER_EVEN.as_ptr()));
+			defmt::trace!("line {=u16} playing even buffer", current_timing_line);
 		}
 		// The data will start pouring into the FIFO, but the output is corked until
 		// the timing SM generates the second interrupt, just before the visible
 		// portion.
+	} else {
+		defmt::trace!("line {=u16} is blank", current_timing_line);
 	}
 
 	// Set this before we set the `DRAW_THIS_LINE` flag.
@@ -2238,8 +2292,14 @@ unsafe fn PIO0_IRQ_1() {
 	// Work out what sort of sync pulses we need on the *next* scan-line, and
 	// also tell the main thread what to draw ready for the *next* scan-line.
 	let buffer = if next_timing_line <= timing_data.visible_lines_ends_at {
-		// A visible line is *up next* so start drawing it *right now*.
-		DRAW_THIS_LINE.store(true, Ordering::Release);
+		// A visible line is *up next* so maybe start drawing it *right now*.
+		defmt::trace!(
+			"DRAW {=u16} draw_now={=bool}, double_scan={=bool}",
+			next_timing_line,
+			draw_now,
+			double_scan
+		);
+		DRAW_THIS_LINE.store(draw_now, Ordering::Release);
 		&raw const timing_data.visible_line
 	} else if next_timing_line <= timing_data.front_porch_end_at {
 		// VGA front porch before VGA sync pulse
