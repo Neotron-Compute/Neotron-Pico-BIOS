@@ -12,7 +12,7 @@ chrono = { version = "0.4.38", default-features = false } # Calendar/Date/Time f
 cortex-m = {version = "0.7", features = ["inline-asm"]} # Useful Cortex-M specific functions (e.g. SysTick)
 cortex-m-rt = "0.7" # Cortex-M run-time (or start-up) code
 critical-section = "1.0" # Hardware locks for sharing data with interrupts
-defmt = "=0.3.2" # Gives us formatted PC-side logging
+defmt = "0.3" # Gives us formatted PC-side logging
 defmt-rtt = "0.4" # Sends defmt logs to the SWD debugger
 ds1307 = "0.5.0" # The Dallas DS1307 RTC driver
 embedded-hal = "0.2" # For hardware abstraction traits
@@ -30,8 +30,8 @@ pio = "0.2.1" # RP2040 PIO assembler
 pio-proc = "0.2" # Macros for RP2040 PIO assembler
 portable-atomic = { version = "1.10.0", features = ["critical-section"] } # Atomic CAS for non-CAS CPUs
 rp2040-boot2 = "0.3.0" # For the RP2040 bootloader
-rp2040-hal = { version = "0.10", features = [ "defmt", "rt", "critical-section-impl", "rom-func-cache" ] } # The Raspberry Pi RP2040 HAL (so we can turn defmt on)
-shared-bus = "0.3" # I2C Bus Sharing
+rp2040-hal = { version = "0.11", features = [ "defmt", "rt", "critical-section-impl", "rom-func-cache" ] } # The Raspberry Pi RP2040 HAL (so we can turn defmt on)
+shared-bus = "0.3.1" # I2C Bus Sharing
 tlv320aic23 = "0.1.0" # CODEC register control
 
 [build-dependencies]
@@ -57,7 +57,3 @@ opt-level = "s"
 
 [features]
 check-stack = []
-
-[patch.crates-io]
-# Patched to include the WriteIterRead trait on i2c
-shared-bus = { git = "https://github.com/thejpster/shared-bus", rev = "639a2e6" }
