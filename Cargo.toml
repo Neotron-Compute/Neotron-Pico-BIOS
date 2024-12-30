@@ -29,8 +29,7 @@ pc-keyboard = "0.7.0" # PS/2 scancode decoding
 pio = "0.2.1" # RP2040 PIO assembler
 pio-proc = "0.2" # Macros for RP2040 PIO assembler
 portable-atomic = { version = "1.10.0", features = ["critical-section"] } # Atomic CAS for non-CAS CPUs
-rp2040-boot2 = "0.3.0" # For the RP2040 bootloader
-rp2040-hal = { version = "0.11", features = [ "defmt", "rt", "critical-section-impl", "rom-func-cache" ] } # The Raspberry Pi RP2040 HAL (so we can turn defmt on)
+rp235x-hal = { version = "0.2", features = [ "defmt", "rt", "critical-section-impl", "rom-func-cache" ] } # The Raspberry Pi RP2350 HAL
 shared-bus = "0.3.1" # I2C Bus Sharing
 tlv320aic23 = "0.1.0" # CODEC register control
 

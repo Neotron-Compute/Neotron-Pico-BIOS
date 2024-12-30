@@ -14,7 +14,7 @@
             "coreConfigs": [
                 {
                     // Change this to the binary you want to debug
-                    "programBinary": "${workspaceFolder}/target/thumbv6m-none-eabi/release/neotron-pico-bios",
+                    "programBinary": "${workspaceFolder}/target/thumbv8m.main-none-eabihf/release/neotron-pico-bios",
                     "rttEnabled": true
                 }
             ],
